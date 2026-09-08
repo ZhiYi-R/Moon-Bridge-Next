@@ -1,0 +1,36 @@
+[package]
+name = "moonbridge-gateway"
+description = "Moon Bridge Next 服务层：axum HTTP 网关、路由、adapter_dispatch、provider 管理、请求生命周期编排与 usage 统计"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+moonbridge-core = { workspace = true }
+moonbridge-protocol = { workspace = true }
+moonbridge-plugin = { workspace = true }
+moonbridge-store = { workspace = true }
+axum = { workspace = true }
+async-trait = { workspace = true }
+hyper = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+async-stream = { workspace = true }
+reqwest = { workspace = true }
+eventsource-stream = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+http = { workspace = true }
+bytes = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+url = { workspace = true }
+once_cell = { workspace = true }
+parking_lot = { workspace = true }

@@ -1,0 +1,13 @@
+[package]
+name = "moonbridge-core"
+description = "Moon Bridge Next 基础层：协议中立的 Core IR、Protocol 枚举、错误类型与模型引用解析"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+indexmap = { workspace = true }
+thiserror = { workspace = true }

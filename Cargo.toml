@@ -1,0 +1,93 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/protocol",
+    "crates/plugin",
+    "crates/store",
+    "crates/gateway",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/moonbridge/moon-bridge-next"
+authors = ["Moon Bridge Next Contributors"]
+
+[workspace.dependencies]
+# ---- internal crates ----
+moonbridge-core = { path = "crates/core" }
+moonbridge-protocol = { path = "crates/protocol" }
+moonbridge-plugin = { path = "crates/plugin" }
+moonbridge-store = { path = "crates/store" }
+moonbridge-gateway = { path = "crates/gateway" }
+
+# ---- async runtime ----
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs"] }
+tokio-stream = "0.1"
+async-trait = "0.1"
+async-stream = "0.3"
+futures = "0.3"
+
+# ---- http server / client ----
+axum = { version = "0.7", features = ["json", "macros"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+hyper = { version = "1", features = ["full"] }
+http = "1"
+bytes = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip", "brotli"] }
+eventsource-stream = "0.2"
+
+# ---- serde ----
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+serde_with = "3"
+toml = "0.8"
+indexmap = { version = "2", features = ["serde"] }
+
+# ---- database ----
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# ---- lua plugin engine ----
+mlua = { version = "0.10", features = ["lua54", "async", "send", "serialize", "vendored"] }
+
+# ---- error / logging ----
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# ---- crypto / encoding ----
+aes-gcm = "0.10"
+base64 = "0.22"
+sha2 = "0.10"
+hmac = "0.12"
+
+# ---- misc ----
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+url = "2"
+once_cell = "1"
+parking_lot = "0.12"
+dirs = "5"
+
+# ---- tauri (used by src-tauri member, added later) ----
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-build = { version = "2" }
+tauri-plugin-log = "2"
+tauri-plugin-process = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-single-instance = "2"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = "s"
+panic = "unwind"
+strip = "symbols"

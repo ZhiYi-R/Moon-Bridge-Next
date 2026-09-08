@@ -1,0 +1,21 @@
+[package]
+name = "moonbridge-store"
+description = "Moon Bridge Next 存储层：rusqlite + 手写 migration + DAO(provider/model/route/plugin/usage/settings)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+moonbridge-core = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+aes-gcm = { workspace = true }
+base64 = { workspace = true }
+once_cell = { workspace = true }
+parking_lot = { workspace = true }

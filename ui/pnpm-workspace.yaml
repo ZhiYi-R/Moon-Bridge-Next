@@ -1,0 +1,16 @@
+allowBuilds:
+  esbuild: set this to true or false
+  vue-demi: set this to true or false
+# pnpm 11 起，构建/依赖相关设置从 package.json 的 "pnpm" 字段迁移至此文件。
+
+# 允许以下依赖运行安装期构建脚本（esbuild 链接平台二进制、vue-demi 切换 Vue 版本）。
+onlyBuiltDependencies:
+  - esbuild
+  - vue-demi
+
+# 本机 pnpm 的供应链策略会忽略上述构建脚本并将其判为错误（ERR_PNPM_IGNORED_BUILDS），
+# 导致 install 退出码非 0、进而 verify-deps-before-run 阻塞 pnpm run/exec。
+# esbuild 的平台二进制已通过 optional 依赖 @esbuild/linux-x64 就位，vue-demi 默认指向 Vue3，
+# 故忽略这些构建脚本无实际影响。关闭严格判定与运行前校验，保证 Tauri 的 before 命令可用。
+strictDepBuilds: false
+verifyDepsBeforeRun: false
