@@ -28,15 +28,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ── Linux：deb / rpm / pacman / AppImage ──
+          # ── Linux：deb / rpm / AppImage（Tauri v2 已移除 pacman bundle）──
           - name: linux-x86_64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            bundles: deb,rpm,appimage,pacman
+            bundles: deb,rpm,appimage
           - name: linux-arm64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            bundles: deb,rpm,appimage,pacman
+            bundles: deb,rpm,appimage
           # ── macOS：DMG（无证书 → ad-hoc 签名）；x86_64 在 arm runner 交叉编译 ──
           - name: macos-arm64
             os: macos-latest
@@ -124,9 +124,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          find "src-tauri/target/${{ matrix.target }}/release/bundle" -type f \( \
-            -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' -o -name '*.pkg.tar.zst' -o \
-            -name '*.dmg' -o -name '*-setup.exe' \) -exec cp {} release-assets/ \;
+          # cargo workspace：产物目录在仓库根 target/，非 src-tauri/target/
+          for base in target src-tauri/target; do
+            d="$base/${{ matrix.target }}/release/bundle"
+            if [ -d "$d" ]; then
+              find "$d" -type f \( \
+                -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' -o \
+                -name '*.dmg' -o -name '*-setup.exe' \) -exec cp {} release-assets/ \;
+            fi
+          done
           ls -la release-assets
 
       - name: Upload build artifacts
