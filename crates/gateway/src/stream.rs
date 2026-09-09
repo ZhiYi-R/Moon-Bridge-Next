@@ -260,7 +260,7 @@ pub fn build_stream_response(
                         }
                     }
                     CoreStreamEvent::BlockDelta { index, .. }
-                    | CoreStreamEvent::BlockStop { index }
+                    | CoreStreamEvent::BlockStop { index, .. }
                         if dropped_blocks.contains(index) =>
                     {
                         continue;

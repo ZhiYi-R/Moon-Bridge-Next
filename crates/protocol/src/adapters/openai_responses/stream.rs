@@ -66,6 +66,18 @@ impl ClientStreamAdapter for OpenAiResponsesAdapter {
                         }),
                     ));
                 }
+                ContentBlock::Reasoning { .. } => {
+                    // reasoning item：收尾（output_item.done）在 BlockStop 按
+                    // block 类型分派，这里只发 item 起始
+                    out.push(sse(
+                        event::OUTPUT_ITEM_ADDED,
+                        json!({
+                            "type": event::OUTPUT_ITEM_ADDED,
+                            "output_index": index,
+                            "item": { "type": "reasoning", "id": item_id(*index), "summary": [] },
+                        }),
+                    ));
+                }
                 _ => {
                     out.push(sse(
                         event::OUTPUT_ITEM_ADDED,
@@ -111,17 +123,46 @@ impl ClientStreamAdapter for OpenAiResponsesAdapter {
                         }),
                     ));
                 }
-                StreamDelta::Reasoning { .. } => {
-                    // 简化：Responses 入口不映射 reasoning 增量事件。输出 item 的
-                    // done 收尾由 BlockStop 统一按 message 形态发出（encode 无状态、
-                    // 无法区分块类型），若发 reasoning item 会与收尾事件不一致；
-                    // Responses 入口的推理展示暂缺，chat/anthropic 入口不受影响。
+                StreamDelta::Reasoning { text } => {
+                    // 摘要明文增量：客户端累积后随 output_item.done 的 item 一致
+                    out.push(sse(
+                        event::REASONING_SUMMARY_TEXT_DELTA,
+                        json!({
+                            "type": event::REASONING_SUMMARY_TEXT_DELTA,
+                            "item_id": item_id(*index),
+                            "output_index": index,
+                            "delta": text,
+                        }),
+                    ));
                 }
                 StreamDelta::ReasoningSignature { .. } => {
-                    // 同上：reasoning item 流式形态未映射，凭据随非流式路径透传
+                    // 凭据不经增量事件下发：随 BlockStop 的 reasoning item
+                    // （output_item.done）原样携带
                 }
             },
-            CoreStreamEvent::BlockStop { index } => {
+            CoreStreamEvent::BlockStop { index, block } => {
+                // reasoning 块：收尾事件用 reasoning item 形态（含 encrypted_content 凭据），
+                // 客户端累积后下一轮原样回传；其余块维持 message/output_text 形态。
+                if let Some(ContentBlock::Reasoning { text, signature }) = block {
+                    let mut item = json!({
+                        "type": "reasoning",
+                        "id": item_id(*index),
+                        "summary": [{ "type": "summary_text", "text": text }],
+                    });
+                    if let Some(enc) = signature {
+                        if !enc.is_empty() {
+                            item["encrypted_content"] = json!(enc);
+                        }
+                    }
+                    out.push(sse(
+                        event::OUTPUT_ITEM_DONE,
+                        json!({
+                            "type": event::OUTPUT_ITEM_DONE,
+                            "output_index": index,
+                            "item": item,
+                        }),
+                    ));
+                } else {
                 out.push(sse(
                     event::TEXT_DONE,
                     json!({
@@ -150,6 +191,7 @@ impl ClientStreamAdapter for OpenAiResponsesAdapter {
                         "item": dto::message_item(&item_id(*index), "", "completed"),
                     }),
                 ));
+                }
             }
             CoreStreamEvent::MessageDelta { usage, .. } => {
                 let usage = match usage {
@@ -221,6 +263,7 @@ impl ProviderStreamAdapter for OpenAiResponsesAdapter {
                         name: item.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
                         namespace: None,
                         input: json!({}),
+                        signature: None,
                     },
                     // reasoning item：后续 summary/reasoning 文本增量挂同一 output_index
                     Some("reasoning") => ContentBlock::Reasoning { text: String::new(), signature: None },
@@ -253,22 +296,35 @@ impl ProviderStreamAdapter for OpenAiResponsesAdapter {
                 });
             }
             "response.output_item.done" => {
-                // reasoning item 的加密 CoT 凭据在 done 事件的 item 上：
-                // 转为凭据增量流出，供入口协议透传（chat 搭 <mb-cot>、anthropic 发 signature_delta）
+                // reasoning item 的明文/凭据在 done 事件的 item 上：组装进收尾块，
+                // encode 端据此发 reasoning 形态的收尾事件（凭据原样带回客户端）。
                 let item = data.get("item").cloned().unwrap_or(Value::Null);
+                let mut block = None;
                 if item.get("type").and_then(|t| t.as_str()) == Some("reasoning") {
-                    if let Some(enc) = item
+                    let mut text = String::new();
+                    for key in ["summary", "content"] {
+                        if let Some(arr) = item.get(key).and_then(|s| s.as_array()) {
+                            for x in arr {
+                                if let Some(t) = x.get("text").and_then(|t| t.as_str()) {
+                                    text.push_str(t);
+                                }
+                            }
+                        }
+                    }
+                    let signature = item
                         .get("encrypted_content")
                         .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                    {
-                        out.push(CoreStreamEvent::BlockDelta {
-                            index: output_index(&data),
-                            delta: StreamDelta::ReasoningSignature { signature: enc.to_string() },
-                        });
+                        .map(String::from)
+                        .filter(|s| !s.is_empty());
+                    // 无明文且无凭据：不发 reasoning 形态收尾（encode 回退 message 形态）
+                    if !text.is_empty() || signature.is_some() {
+                        block = Some(ContentBlock::Reasoning { text, signature });
                     }
                 }
-                out.push(CoreStreamEvent::BlockStop { index: output_index(&data) });
+                out.push(CoreStreamEvent::BlockStop {
+                    index: output_index(&data),
+                    block,
+                });
             }
             "response.completed" => {
                 let usage = data
@@ -361,5 +417,58 @@ mod tests {
             .unwrap();
         assert!(matches!(evs[0], CoreStreamEvent::MessageDelta { .. }));
         assert!(matches!(evs[1], CoreStreamEvent::MessageStop));
+    }
+
+    /// 加密 CoT 流式 round-trip：上游 output_item.done 携带 encrypted_content →
+    /// BlockStop 的 reasoning 块凭据 → 入口 encode 以 reasoning item 形态原样下发。
+    #[test]
+    fn reasoning_encrypted_content_roundtrips_via_stop() {
+        let adapter = OpenAiResponsesAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::OpenAiResponse);
+
+        // 上游：reasoning item 只带 encrypted_content（无任何明文摘要）
+        let evs = adapter
+            .decode(
+                &ctx,
+                &chunk(json!({
+                    "type": "response.output_item.done", "output_index": 0,
+                    "item": { "type": "reasoning", "summary": [], "encrypted_content": "ENC" }
+                })),
+            )
+            .unwrap();
+        match &evs[0] {
+            CoreStreamEvent::BlockStop {
+                block: Some(ContentBlock::Reasoning { text, signature: Some(enc) }),
+                ..
+            } => {
+                assert!(text.is_empty(), "encrypted 不是展示文本");
+                assert_eq!(enc, "ENC");
+            }
+            other => panic!("expected reasoning stop block, got {other:?}"),
+        }
+
+        // 入口 encode：凭据随 reasoning item 收尾事件原样下发
+        let cchunks = adapter.encode(&ctx, &evs[0]).unwrap();
+        let raw = serde_json::to_string(
+            &cchunks[0]
+                .data
+                .as_json()
+                .expect("reasoning stop 应为 JSON 事件"),
+        )
+        .unwrap();
+        assert!(raw.contains("encrypted_content"));
+        assert!(raw.contains("ENC"));
+
+        // 无明文且无凭据：回退 message 形态收尾，不发空 reasoning item
+        let evs = adapter
+            .decode(
+                &ctx,
+                &chunk(json!({
+                    "type": "response.output_item.done", "output_index": 0,
+                    "item": { "type": "reasoning", "summary": [] }
+                })),
+            )
+            .unwrap();
+        assert!(matches!(&evs[0], CoreStreamEvent::BlockStop { block: None, .. }));
     }
 }

@@ -182,6 +182,7 @@ impl ClientAdapter for OpenAiResponsesAdapter {
                                     name,
                                     namespace: None,
                                     input,
+                                    signature: None,
                                 }],
                                 ext: Default::default(),
                             });

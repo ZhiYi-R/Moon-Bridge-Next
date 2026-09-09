@@ -41,6 +41,10 @@ pub enum ContentBlock {
         /// 工具入参（原始 JSON）。
         #[serde(default)]
         input: Value,
+        /// 回传凭据：Gemini 2.5 functionCall part 的 `thoughtSignature`（与
+        /// function call 强绑定的加密 CoT 凭据，多轮回传缺失会被拒或退化）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
     },
     /// 工具调用结果。
     ToolResult {
@@ -299,6 +303,10 @@ pub enum CoreStreamEvent {
     },
     BlockStop {
         index: usize,
+        /// 结束的块（decode 端可知时提供）。Responses 入口的收尾事件形态
+        /// 依赖它区分 reasoning/message；其余入口忽略。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<ContentBlock>,
     },
     MessageDelta {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -332,6 +340,7 @@ mod tests {
             name: "get_time".into(),
             namespace: None,
             input: serde_json::json!({"tz": "UTC"}),
+            signature: None,
         };
         let json = serde_json::to_value(&block).unwrap();
         assert_eq!(json["type"], "tool_use");

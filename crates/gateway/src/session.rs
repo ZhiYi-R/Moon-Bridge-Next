@@ -170,7 +170,7 @@ pub fn marker_blocks(tag: &str, index: usize) -> Vec<CoreStreamEvent> {
                 text: marker_inline(tag),
             },
         },
-        CoreStreamEvent::BlockStop { index },
+        CoreStreamEvent::BlockStop { index, block: None },
     ]
 }
 
@@ -386,6 +386,7 @@ mod tests {
                     name: "n".into(),
                     namespace: None,
                     input: serde_json::json!({}),
+                    signature: None,
                 },
             ],
             stop_reason: None,
@@ -448,7 +449,7 @@ mod tests {
             }
             other => panic!("期望 BlockDelta，得到 {other:?}"),
         }
-        assert!(matches!(&blocks[2], CoreStreamEvent::BlockStop { index: 7 }));
+        assert!(matches!(&blocks[2], CoreStreamEvent::BlockStop { index: 7, .. }));
     }
 
     #[test]

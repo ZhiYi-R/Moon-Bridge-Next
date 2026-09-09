@@ -210,6 +210,7 @@ impl ProviderStreamAdapter for OpenAiChatAdapter {
                             name: fn_obj.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
                             namespace: None,
                             input: json!({}),
+                            signature: None,
                         },
                     });
                 }

@@ -85,6 +85,7 @@ impl ProviderStreamAdapter for AnthropicAdapter {
                         name: cb.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
                         namespace: None,
                         input: cb.get("input").cloned().unwrap_or_else(|| Value::Null),
+                        signature: None,
                     },
                     Some("thinking") | Some("redacted_thinking") => ContentBlock::Reasoning {
                         text: cb.get("thinking").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
@@ -146,7 +147,7 @@ impl ProviderStreamAdapter for AnthropicAdapter {
             }
             "content_block_stop" => {
                 let index = data.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                out.push(CoreStreamEvent::BlockStop { index });
+                out.push(CoreStreamEvent::BlockStop { index, block: None });
             }
             "message_delta" => {
                 let sr = data
@@ -247,7 +248,7 @@ impl ClientStreamAdapter for AnthropicAdapter {
                     json!({ "type": "content_block_delta", "index": index, "delta": d }),
                 ));
             }
-            CoreStreamEvent::BlockStop { index } => {
+            CoreStreamEvent::BlockStop { index, .. } => {
                 out.push(client_sse(
                     "content_block_stop",
                     json!({ "type": "content_block_stop", "index": index }),

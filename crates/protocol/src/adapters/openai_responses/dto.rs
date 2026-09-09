@@ -21,6 +21,8 @@ pub mod event {
     pub const CONTENT_PART_DONE: &str = "response.content_part.done";
     pub const TEXT_DELTA: &str = "response.output_text.delta";
     pub const TEXT_DONE: &str = "response.output_text.done";
+    pub const REASONING_SUMMARY_TEXT_DELTA: &str = "response.reasoning_summary_text.delta";
+    pub const REASONING_SUMMARY_TEXT_DONE: &str = "response.reasoning_summary_text.done";
     pub const FUNC_ARGS_DELTA: &str = "response.function_call_arguments.delta";
     pub const FUNC_ARGS_DONE: &str = "response.function_call_arguments.done";
     pub const COMPLETED: &str = "response.completed";

@@ -96,28 +96,45 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
                     .map(String::from)
                     .unwrap_or_else(|| format!("{name}-call"));
                 let args = fc.get("args").cloned().unwrap_or_else(|| json!({}));
+                // 加密 CoT 凭据：与 function call 强绑定的 thoughtSignature（part 级字段）
+                let signature = p
+                    .get("thoughtSignature")
+                    .or_else(|| fc.get("thoughtSignature"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(String::from);
                 let idx = 1 + fc_index;
                 fc_index += 1;
                 out.push(CoreStreamEvent::BlockStart {
                     index: idx,
                     block: ContentBlock::ToolUse {
-                        id,
-                        name,
+                        id: id.clone(),
+                        name: name.clone(),
                         namespace: None,
                         input: json!({}),
+                        signature: signature.clone(),
                     },
                 });
                 out.push(CoreStreamEvent::BlockDelta {
                     index: idx,
                     delta: StreamDelta::ToolInput { partial_json: args.to_string() },
                 });
-                out.push(CoreStreamEvent::BlockStop { index: idx });
+                out.push(CoreStreamEvent::BlockStop {
+                    index: idx,
+                    block: Some(ContentBlock::ToolUse {
+                        id,
+                        name,
+                        namespace: None,
+                        input: args,
+                        signature,
+                    }),
+                });
             }
         }
 
         // 末块：finishReason 触发文本块收尾 + MessageDelta(usage) + MessageStop
         if let Some(fr) = candidate.get("finishReason").and_then(|v| v.as_str()) {
-            out.push(CoreStreamEvent::BlockStop { index: 0 });
+            out.push(CoreStreamEvent::BlockStop { index: 0, block: None });
             let usage = data.get("usageMetadata").map(usage_from_gemini);
             out.push(CoreStreamEvent::MessageDelta {
                 stop_reason: map_finish_reason(fr),
@@ -161,12 +178,14 @@ impl ClientStreamAdapter for GoogleGenAiAdapter {
         match ev {
             CoreStreamEvent::MessageStart { .. } => {}
             CoreStreamEvent::BlockStart { block, .. } => {
-                if let ContentBlock::ToolUse { name, input, .. } = block {
-                    out.push(gemini_chunk(
-                        json!([{ "functionCall": { "name": name, "args": input } }]),
-                        None,
-                        None,
-                    ));
+                if let ContentBlock::ToolUse { name, input, signature, .. } = block {
+                    let mut fc = json!({ "name": name, "args": input });
+                    if let Some(sig) = signature {
+                        if !sig.is_empty() {
+                            fc["thoughtSignature"] = json!(sig);
+                        }
+                    }
+                    out.push(gemini_chunk(json!([{ "functionCall": fc }]), None, None));
                 }
             }
             CoreStreamEvent::BlockDelta { delta, .. } => match delta {
@@ -269,7 +288,7 @@ mod tests {
             .unwrap();
         // text delta, BlockStop(0), MessageDelta, MessageStop
         assert!(evs.iter().any(|e| matches!(e, CoreStreamEvent::BlockDelta { .. })));
-        assert!(evs.iter().any(|e| matches!(e, CoreStreamEvent::BlockStop { index: 0 })));
+        assert!(evs.iter().any(|e| matches!(e, CoreStreamEvent::BlockStop { index: 0, .. })));
         let md = evs.iter().find_map(|e| match e {
             CoreStreamEvent::MessageDelta { stop_reason, usage } => Some((stop_reason, usage)),
             _ => None,

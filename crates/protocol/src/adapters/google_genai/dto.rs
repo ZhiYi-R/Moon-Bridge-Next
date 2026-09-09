@@ -109,8 +109,14 @@ pub fn core_to_contents(messages: &[Message]) -> Vec<Value> {
                         parts.push(json!({ "inlineData": { "mimeType": media_type, "data": data } }));
                     }
                 }
-                ContentBlock::ToolUse { name, input, .. } => {
-                    parts.push(json!({ "functionCall": { "name": name, "args": input } }));
+                ContentBlock::ToolUse { name, input, signature, .. } => {
+                    let mut fc = json!({ "name": name, "args": input });
+                    if let Some(sig) = signature {
+                        if !sig.is_empty() {
+                            fc["thoughtSignature"] = json!(sig);
+                        }
+                    }
+                    parts.push(json!({ "functionCall": fc }));
                 }
                 ContentBlock::ToolResult {
                     tool_use_id,
@@ -244,8 +250,14 @@ pub fn core_to_parts(content: &[ContentBlock]) -> Vec<Value> {
     for b in content {
         match b {
             ContentBlock::Text { text } => parts.push(json!({ "text": text })),
-            ContentBlock::ToolUse { name, input, .. } => {
-                parts.push(json!({ "functionCall": { "name": name, "args": input } }))
+            ContentBlock::ToolUse { name, input, signature, .. } => {
+                let mut fc = json!({ "name": name, "args": input });
+                if let Some(sig) = signature {
+                    if !sig.is_empty() {
+                        fc["thoughtSignature"] = json!(sig);
+                    }
+                }
+                parts.push(json!({ "functionCall": fc }))
             }
             ContentBlock::Image { data, media_type } => {
                 if media_type != "url" {
@@ -313,8 +325,12 @@ pub fn part_to_blocks(p: &Value) -> Vec<ContentBlock> {
             // 无文本但带凭据的 part：凭据不能丢，否则多轮回传缺失
             out.push(ContentBlock::Reasoning { text: String::new(), signature: Some(sig) });
         }
-    } else if let Some(sig) = signature {
-        out.push(ContentBlock::Reasoning { text: String::new(), signature: Some(sig) });
+    } else if p.get("functionCall").is_none() {
+        // 非文本且非 functionCall 的 part 带凭据：凭据不能丢；
+        // functionCall part 的凭据归 ToolUse 块（见下），不在此处理
+        if let Some(sig) = signature {
+            out.push(ContentBlock::Reasoning { text: String::new(), signature: Some(sig) });
+        }
     }
     if let Some(fc) = p.get("functionCall") {
         let name = fc.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
@@ -326,11 +342,20 @@ pub fn part_to_blocks(p: &Value) -> Vec<ContentBlock> {
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("{name}-call"));
         let args = fc.get("args").cloned().unwrap_or_else(|| json!({}));
+        // 加密 CoT 凭据：与 function call 强绑定的 thoughtSignature（part 级字段，
+        // 官方形态在 part 上；部分实现放在 functionCall 内，均兼容）
+        let signature = p
+            .get("thoughtSignature")
+            .or_else(|| fc.get("thoughtSignature"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from);
         out.push(ContentBlock::ToolUse {
             id,
             name,
             namespace: None,
             input: args,
+            signature,
         });
     }
     if let Some(fr) = p.get("functionResponse") {
@@ -558,6 +583,7 @@ mod tests {
                     name: "get_time".into(),
                     namespace: None,
                     input: json!({"tz": "UTC"}),
+                    signature: None,
                 }],
                 ext: Default::default(),
             },
@@ -596,6 +622,46 @@ mod tests {
             }
             other => panic!("expected tool_use, got {other:?}"),
         }
+    }
+
+    /// 加密 CoT 凭据与 function call 强绑定：functionCall part 的
+    /// thoughtSignature → ToolUse.signature，历史回传时还原到 part。
+    #[test]
+    fn function_call_thought_signature_roundtrips() {
+        let cand = json!({
+            "content": { "role": "model", "parts": [{
+                "functionCall": { "name": "get_time", "args": {"tz": "UTC"} },
+                "thoughtSignature": "SIG"
+            }] },
+            "finishReason": "STOP"
+        });
+        let (content, _) = candidate_to_core(&cand);
+        match &content[0] {
+            ContentBlock::ToolUse { signature: Some(sig), .. } => assert_eq!(sig, "SIG"),
+            other => panic!("expected tool_use with signature, got {other:?}"),
+        }
+
+        // 历史回传：凭据随 functionCall part 原样带回
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "c1".into(),
+                name: "get_time".into(),
+                namespace: None,
+                input: json!({"tz": "UTC"}),
+                signature: Some("SIG".into()),
+            }],
+            ext: Default::default(),
+        };
+        let contents = core_to_contents(&[
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::text("q")],
+                ext: Default::default(),
+            },
+            msg,
+        ]);
+        assert_eq!(contents[1]["parts"][0]["functionCall"]["thoughtSignature"], "SIG");
     }
 
     #[test]

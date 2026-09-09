@@ -108,6 +108,7 @@ pub(super) fn anthropic_to_block(v: &Value) -> Option<ContentBlock> {
             name: v.get("name").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
             namespace: None,
             input: v.get("input").cloned().unwrap_or_else(|| json!({})),
+            signature: None,
         }),
         "tool_result" => {
             let content = match v.get("content") {
@@ -444,6 +445,7 @@ mod tests {
                 name: "f".into(),
                 namespace: None,
                 input: json!({}),
+                signature: None,
             }],
             ext: Default::default(),
         });

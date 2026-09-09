@@ -108,6 +108,7 @@ pub fn chat_to_core_messages(msgs: &[Value]) -> Vec<Message> {
                     name: fn_obj.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
                     namespace: None,
                     input: args,
+                    signature: None,
                 });
             }
         }
@@ -338,6 +339,7 @@ pub fn chat_choice_to_core(choice: &Value) -> (Vec<ContentBlock>, Option<StopRea
                 name: fn_obj.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
                 namespace: None,
                 input: args,
+                signature: None,
             });
         }
     }

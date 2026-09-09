@@ -254,6 +254,7 @@ impl ProviderAdapter for OpenAiResponsesAdapter {
                             name: item.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
                             namespace: None,
                             input: args,
+                            signature: None,
                         });
                     }
                     Some("reasoning") => {
