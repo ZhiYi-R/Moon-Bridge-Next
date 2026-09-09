@@ -3,11 +3,12 @@
 //! 注意：插件在网关 `bootstrap` 时加载为 `PluginHooks`，因此增删改插件后需
 //! 调用 `gateway_restart` 方能生效（前端在保存后触发）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use moonbridge_gateway::{parse_script_ref, ScriptRef};
 use moonbridge_store::{PluginBinding, PluginRecord};
+use serde::Serialize;
 use tauri::State;
 
 use crate::commands::CmdResult;
@@ -85,11 +86,16 @@ pub fn plugin_write_script(
     name: String,
     content: String,
 ) -> CmdResult<()> {
+    write_script_inner(state.inner(), &name, &content)
+}
+
+/// [`plugin_write_script`] 的内部实现，供导入流程复用。
+fn write_script_inner(state: &ManagedState, name: &str, content: &str) -> CmdResult<()> {
     let mut rec = state
         .db
-        .get_plugin(&name)?
+        .get_plugin(name)?
         .ok_or_else(|| format!("插件不存在: {name}"))?;
-    match script_file(&state, &rec.script_ref)? {
+    match script_file(state, &rec.script_ref)? {
         Some(file) => {
             if let Some(parent) = file.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -102,11 +108,113 @@ pub fn plugin_write_script(
             }
         }
         None => {
-            rec.script_ref = content;
+            rec.script_ref = content.to_string();
             state.db.upsert_plugin(&rec)?;
         }
     }
     Ok(())
+}
+
+/// 从 Lua 脚本中尽力提取 `key = { "a", "b" }` 形式的字符串列表（导入时读取脚本
+/// 自带的 scopes/capabilities 声明）；找不到回退空表。忽略转义与注释，尽力而为。
+fn extract_lua_string_list(script: &str, key: &str) -> Vec<String> {
+    let Some(pos) = script.find(key) else {
+        return Vec::new();
+    };
+    let rest = &script[pos + key.len()..];
+    let Some(open) = rest.find('{') else {
+        return Vec::new();
+    };
+    let Some(close) = rest[open..].find('}') else {
+        return Vec::new();
+    };
+    rest[open + 1..open + close]
+        .split('"')
+        .enumerate()
+        .filter(|(i, _)| i % 2 == 1)
+        .map(|(_, s)| s.to_string())
+        .collect()
+}
+
+/// 单个文件的导入结果。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginImportOutcome {
+    pub path: String,
+    pub name: String,
+    /// imported / skipped / error
+    pub status: String,
+    pub message: Option<String>,
+}
+
+/// 从磁盘导入 `.lua` 插件文件：以文件名（去扩展名）为插件名，脚本拷贝进
+/// `plugins_dir` 并落库；同名插件已存在时跳过（不覆盖）。scopes/capabilities
+/// 尽力从脚本 `MB = { scopes = {...}, capabilities = {...} }` 声明提取，缺省
+/// global/core。逐文件返回结果，单个失败不影响其余。
+#[tauri::command]
+pub fn plugin_import(
+    state: State<'_, Arc<ManagedState>>,
+    paths: Vec<String>,
+) -> CmdResult<Vec<PluginImportOutcome>> {
+    Ok(paths.iter().map(|p| import_one(state.inner(), Path::new(p))).collect())
+}
+
+fn import_fail(path: &str, name: &str, status: &str, message: impl Into<String>) -> PluginImportOutcome {
+    PluginImportOutcome {
+        path: path.to_string(),
+        name: name.to_string(),
+        status: status.to_string(),
+        message: Some(message.into()),
+    }
+}
+
+fn import_one(state: &ManagedState, path: &Path) -> PluginImportOutcome {
+    let path_string = path.to_string_lossy().to_string();
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')) {
+        return import_fail(&path_string, &name, "error", format!("文件名 “{name}” 不能作为插件名"));
+    }
+    if matches!(state.db.get_plugin(&name), Ok(Some(_))) {
+        return import_fail(&path_string, &name, "skipped", "同名插件已存在");
+    }
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => return import_fail(&path_string, &name, "error", format!("读取失败: {e}")),
+    };
+    let mut scopes = extract_lua_string_list(&content, "scopes");
+    if scopes.is_empty() {
+        scopes = vec!["global".to_string()];
+    }
+    let mut capabilities = extract_lua_string_list(&content, "capabilities");
+    if capabilities.is_empty() {
+        capabilities = vec!["core".to_string()];
+    }
+    let rec = PluginRecord {
+        name: name.clone(),
+        source: "lua".to_string(),
+        script_ref: format!("{name}.lua"),
+        enabled: true,
+        config: serde_json::Value::Null,
+        scopes,
+        capabilities,
+    };
+    if let Err(e) = state.db.upsert_plugin(&rec) {
+        return import_fail(&path_string, &name, "error", format!("落库失败: {e}"));
+    }
+    if let Err(e) = write_script_inner(state, &name, &content) {
+        // 脚本写入失败时回滚记录，避免留下空脚本插件
+        let _ = state.db.delete_plugin(&name);
+        return import_fail(&path_string, &name, "error", format!("脚本写入失败: {e}"));
+    }
+    PluginImportOutcome {
+        path: path_string,
+        name,
+        status: "imported".to_string(),
+        message: None,
+    }
 }
 
 /// 列出某插件的全部作用域绑定。
@@ -115,7 +223,6 @@ pub fn binding_list(state: State<'_, Arc<ManagedState>>, plugin_name: String) ->
     Ok(state.db.list_bindings(&plugin_name)?)
 }
 
-/// 新增或更新作用域绑定。
 #[tauri::command]
 pub fn binding_save(state: State<'_, Arc<ManagedState>>, binding: PluginBinding) -> CmdResult<()> {
     Ok(state.db.upsert_binding(&binding)?)

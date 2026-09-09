@@ -120,6 +120,7 @@ pub fn run() {
             commands::plugin::plugin_delete,
             commands::plugin::plugin_read_script,
             commands::plugin::plugin_write_script,
+            commands::plugin::plugin_import,
             commands::plugin::binding_list,
             commands::plugin::binding_save,
             commands::plugin::binding_list_by_scope,

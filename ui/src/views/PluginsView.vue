@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowLeft, ChevronDown, Pencil, Plus, Power, RotateCw, Trash2 } from "lucide-vue-next";
+import { ArrowLeft, ChevronDown, Pencil, Plus, Power, RotateCw, Trash2, Upload } from "lucide-vue-next";
 import { onMounted, reactive, ref } from "vue";
 
 import Badge from "@/components/ui/Badge.vue";
@@ -10,7 +10,7 @@ import Label from "@/components/ui/Label.vue";
 import CodeEditor from "@/components/ui/CodeEditor.vue";
 import Switch from "@/components/ui/Switch.vue";
 import { useConfirm } from "@/composables/useConfirm";
-import { errMsg, pluginApi, type PluginRecord } from "@/lib/api";
+import { errMsg, isTauriRuntime, pluginApi, type PluginImportOutcome, type PluginRecord } from "@/lib/api";
 import { useGatewayStore } from "@/stores/gateway";
 
 const gateway = useGatewayStore();
@@ -187,6 +187,96 @@ async function restart() {
   }
 }
 
+// ── 导入插件：Tauri 走原生文件对话框（磁盘路径）；浏览器模式用文件选择器读内容 ──
+const fileInput = ref<HTMLInputElement | null>(null);
+
+function reportImport(outcomes: PluginImportOutcome[]) {
+  const imported = outcomes.filter((o) => o.status === "imported");
+  const skipped = outcomes.filter((o) => o.status === "skipped");
+  const failed = outcomes.filter((o) => o.status === "error");
+  if (imported.length > 0) needsRestart.value = true;
+  if (failed.length > 0) {
+    const ok = [
+      imported.length ? `成功导入 ${imported.length} 个` : "",
+      skipped.length ? `跳过 ${skipped.length} 个同名插件` : "",
+    ]
+      .filter(Boolean)
+      .join("，");
+    error.value = [ok ? `${ok}；` : "", ...failed.map((o) => `${o.name}：${o.message ?? "导入失败"}`)].join("");
+    return;
+  }
+  const parts = [
+    imported.length ? `成功导入 ${imported.map((o) => o.name).join("、")}` : "",
+    skipped.length ? `跳过 ${skipped.length} 个同名插件` : "",
+  ].filter(Boolean);
+  if (parts.length) notice.value = `${parts.join("；")}。重启网关后生效。`;
+}
+
+async function importPlugins() {
+  error.value = null;
+  if (isTauriRuntime) {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const picked = await open({
+        multiple: true,
+        filters: [{ name: "Lua 插件", extensions: ["lua"] }],
+      });
+      if (!picked) return;
+      const paths = Array.isArray(picked) ? picked : [picked];
+      busy.value = true;
+      try {
+        reportImport(await pluginApi.import(paths));
+        await load();
+      } finally {
+        busy.value = false;
+      }
+    } catch (e) {
+      error.value = errMsg(e);
+    }
+  } else {
+    fileInput.value?.click();
+  }
+}
+
+async function onFilesPicked(e: Event) {
+  const input = e.target as HTMLInputElement;
+  const files = Array.from(input.files ?? []);
+  input.value = ""; // 允许重复选择同一文件
+  if (files.length === 0) return;
+  busy.value = true;
+  const outcomes: PluginImportOutcome[] = [];
+  try {
+    for (const file of files) {
+      const name = file.name.replace(/\.lua$/i, "");
+      const path = file.name;
+      try {
+        if (await pluginApi.get(name)) {
+          outcomes.push({ path, name, status: "skipped", message: "同名插件已存在" });
+          continue;
+        }
+        const content = await file.text();
+        await pluginApi.save({
+          name,
+          source: "lua",
+          scriptRef: `${name}.lua`,
+          enabled: true,
+          config: null,
+          scopes: ["global"],
+          capabilities: ["core"],
+        });
+        await pluginApi.writeScript(name, content);
+        outcomes.push({ path, name, status: "imported", message: null });
+      } catch (err) {
+        outcomes.push({ path, name, status: "error", message: errMsg(err) });
+      }
+    }
+    reportImport(outcomes);
+    await load();
+  } finally {
+    busy.value = false;
+  }
+}
+
 onMounted(() => {
   load();
   gateway.refresh();
@@ -252,7 +342,7 @@ onMounted(() => {
       </button>
       <div
         v-show="metaOpen"
-        class="grid gap-4 px-5 py-4 md:grid-cols-2 md:grid-rows-[auto_auto_1fr]"
+        class="grid gap-4 px-5 py-4 grid-cols-2 grid-rows-[auto_auto_1fr]"
         :class="scriptOpen ? 'shrink-0 border-b' : 'min-h-0 flex-1 overflow-y-auto'"
       >
         <div class="space-y-1.5">
@@ -299,7 +389,7 @@ onMounted(() => {
             </label>
           </div>
         </div>
-        <div class="flex min-h-0 flex-col space-y-1.5 md:col-span-2">
+        <div class="flex min-h-0 flex-col space-y-1.5 col-span-2">
           <Label>配置</Label>
           <CodeEditor v-model="form.configText" lang="json" height="100%" class="min-h-32 flex-1" />
         </div>
@@ -328,9 +418,20 @@ onMounted(() => {
         <Button variant="outline" size="sm" :disabled="!needsRestart" @click="restart">
           <RotateCw class="size-4" /> 重启网关
         </Button>
+        <Button variant="outline" size="sm" :disabled="busy" @click="importPlugins">
+          <Upload class="size-4" /> 导入
+        </Button>
         <Button size="sm" @click="newPlugin">
           <Plus class="size-4" /> 新建
         </Button>
+        <input
+          ref="fileInput"
+          type="file"
+          accept=".lua"
+          multiple
+          class="hidden"
+          @change="onFilesPicked"
+        />
       </div>
       <div class="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">
         <div
