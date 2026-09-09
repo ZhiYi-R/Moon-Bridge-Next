@@ -7,6 +7,7 @@
 
 mod commands;
 mod config;
+pub mod headless;
 mod state;
 mod tray;
 
@@ -142,6 +143,17 @@ pub fn run() {
             commands::app::config_get,
             commands::app::config_set,
         ])
+        // 关闭主窗口时收到托盘而非退出：网关继续在后台运行，
+        // 真正退出走托盘菜单「退出」（`tray.rs` 的 `app.exit(0)`）。
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let _ = window.hide();
+                api.prevent_close();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("运行 Moon Bridge Next 时发生错误");
 }
