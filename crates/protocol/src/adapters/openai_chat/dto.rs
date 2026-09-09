@@ -358,17 +358,22 @@ const MB_COT_CLOSE: &str = "</mb-cot>";
 
 /// 从 reasoning 字段拆出（展示明文，回传凭据）：凭据以 `<mb-cot>…</mb-cot>`
 /// 定界，无标记则整体视为明文（普通上游如 DeepSeek 的 reasoning_content）。
+/// 多层嵌套时取最外层对（前置标记 `lfind`、后置标记 `rfind`），内层标记
+/// 整体保留在凭据内，由对应层级剥离，以此平衡。
 fn split_mb_cot(s: &str) -> (String, Option<String>) {
     let Some(start) = s.find(MB_COT_OPEN) else {
         return (s.to_string(), None);
     };
-    let Some(rel) = s[start..].find(MB_COT_CLOSE) else {
+    let Some(end) = s.rfind(MB_COT_CLOSE) else {
         return (s.to_string(), None);
     };
-    let enc = s[start + MB_COT_OPEN.len()..start + rel].trim().to_string();
+    if end < start + MB_COT_OPEN.len() {
+        return (s.to_string(), None);
+    }
+    let enc = s[start + MB_COT_OPEN.len()..end].trim().to_string();
     let mut text = String::with_capacity(s.len());
     text.push_str(&s[..start]);
-    text.push_str(&s[start + rel + MB_COT_CLOSE.len()..]);
+    text.push_str(&s[end + MB_COT_CLOSE.len()..]);
     let sig = if enc.is_empty() { None } else { Some(enc) };
     (text.trim().to_string(), sig)
 }
@@ -547,5 +552,50 @@ mod tests {
             &msgs3[0].content[0],
             ContentBlock::Reasoning { text, signature: None, .. } if text == "plain upstream thought"
         ));
+    }
+
+    /// 多层嵌套取最外层对：前置标记 `lfind`、后置标记 `rfind`。
+    #[test]
+    fn split_mb_cot_takes_outermost_pair() {
+        // 洋葱嵌套：内层标记整体保留在凭据内
+        let msgs = chat_to_core_messages(&[json!({
+            "role": "assistant",
+            "content": "Hi",
+            "reasoning_content": "pre<mb-cot>A<mb-cot>B</mb-cot>C</mb-cot>post"
+        })]);
+        match &msgs[0].content[0] {
+            ContentBlock::Reasoning { text, signature: Some(enc), .. } => {
+                assert_eq!(text, "prepost");
+                assert_eq!(enc, "A<mb-cot>B</mb-cot>C");
+            }
+            other => panic!("expected outermost pair, got {other:?}"),
+        }
+
+        // 顺序 siblings 同样按最外层对合并，中间文本收进凭据
+        let msgs = chat_to_core_messages(&[json!({
+            "role": "assistant",
+            "content": "Hi",
+            "reasoning_content": "t1<mb-cot>E1</mb-cot>m<mb-cot>E2</mb-cot>"
+        })]);
+        match &msgs[0].content[0] {
+            ContentBlock::Reasoning { text, signature: Some(enc), .. } => {
+                assert_eq!(text, "t1");
+                assert_eq!(enc, "E1</mb-cot>m<mb-cot>E2");
+            }
+            other => panic!("expected outermost pair, got {other:?}"),
+        }
+
+        // 非法顺序（CLOSE 在 OPEN 之前）视为无标记
+        let msgs = chat_to_core_messages(&[json!({
+            "role": "assistant",
+            "content": "Hi",
+            "reasoning_content": "</mb-cot> x <mb-cot>"
+        })]);
+        match &msgs[0].content[0] {
+            ContentBlock::Reasoning { text, signature: None, .. } => {
+                assert_eq!(text, "</mb-cot> x <mb-cot>");
+            }
+            other => panic!("expected plain text, got {other:?}"),
+        }
     }
 }

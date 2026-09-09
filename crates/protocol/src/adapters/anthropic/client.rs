@@ -14,7 +14,7 @@ use moonbridge_core::{
 };
 use serde_json::{json, Value};
 
-use super::provider::{anthropic_to_block, block_to_anthropic, unmap_stop_reason};
+use super::provider::{anthropic_to_block, anthropic_usage_out, block_to_anthropic, unmap_stop_reason};
 use super::AnthropicAdapter;
 use crate::adapter::ClientAdapter;
 use crate::adapters::effort_from_budget;
@@ -159,12 +159,7 @@ impl ClientAdapter for AnthropicAdapter {
             "content": content,
             "stop_reason": stop_reason,
             "stop_sequence": null,
-            "usage": {
-                "input_tokens": resp.usage.input_tokens,
-                "output_tokens": resp.usage.output_tokens,
-                "cache_read_input_tokens": resp.usage.cache_read_tokens,
-                "cache_creation_input_tokens": resp.usage.cache_write_tokens,
-            },
+            "usage": anthropic_usage_out(&resp.usage),
         }))
     }
 }

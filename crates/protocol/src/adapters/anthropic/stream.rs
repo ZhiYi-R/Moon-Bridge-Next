@@ -11,7 +11,7 @@ use moonbridge_core::{
 };
 use serde_json::{json, Value};
 
-use super::provider::unmap_stop_reason;
+use super::provider::{anthropic_usage_out, unmap_stop_reason};
 use super::AnthropicAdapter;
 use crate::adapter::{ClientStreamAdapter, ProviderStreamAdapter, StreamEncodeState};
 use crate::context::ReqCtx;
@@ -349,8 +349,12 @@ impl ClientStreamAdapter for AnthropicAdapter {
                     "type": "message_delta",
                     "delta": { "stop_reason": sr, "stop_sequence": null },
                 });
+                // 官方 message_delta.usage 为累计口径：output_tokens 必发；
+                // input/cache 一并附带——上游（OpenAI 系）仅在流末给出用量，
+                // 客户端（Claude Code 等）靠它管理上下文，缺了 input_tokens
+                // 会退化为无法估算上下文窗口占用
                 if let Some(u) = usage {
-                    data["usage"] = json!({ "output_tokens": u.output_tokens });
+                    data["usage"] = anthropic_usage_out(u);
                 }
                 out.push(client_sse("message_delta", data));
             }

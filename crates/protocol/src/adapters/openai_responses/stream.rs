@@ -326,8 +326,18 @@ impl ProviderStreamAdapter for OpenAiResponsesAdapter {
                         block = Some(ContentBlock::Reasoning { text, signature, redacted: false });
                     }
                 }
+                let index = output_index(&data);
+                // 凭据以增量先行：anthropic/chat 入口仅消费凭据增量（signature_delta /
+                // <mb-cot> 追加），必须在收尾前到达；responses 入口忽略此增量，
+                // 凭据随下方 BlockStop 的 reasoning item 发出。
+                if let Some(ContentBlock::Reasoning { signature: Some(sig), .. }) = &block {
+                    out.push(CoreStreamEvent::BlockDelta {
+                        index,
+                        delta: StreamDelta::ReasoningSignature { signature: sig.clone() },
+                    });
+                }
                 out.push(CoreStreamEvent::BlockStop {
-                    index: output_index(&data),
+                    index,
                     block,
                 });
             }
@@ -441,7 +451,14 @@ mod tests {
                 })),
             )
             .unwrap();
+        // 凭据以增量先行（anthropic/chat 入口消费），BlockStop 仍携带完整块
         match &evs[0] {
+            CoreStreamEvent::BlockDelta { delta: StreamDelta::ReasoningSignature { signature }, .. } => {
+                assert_eq!(signature, "ENC");
+            }
+            other => panic!("expected signature delta, got {other:?}"),
+        }
+        match &evs[1] {
             CoreStreamEvent::BlockStop {
                 block: Some(ContentBlock::Reasoning { text, signature: Some(enc), .. }),
                 ..
@@ -453,7 +470,7 @@ mod tests {
         }
 
         // 入口 encode：凭据随 reasoning item 收尾事件原样下发
-        let cchunks = adapter.encode(&ctx, &evs[0], &mut StreamEncodeState::default()).unwrap();
+        let cchunks = adapter.encode(&ctx, &evs[1], &mut StreamEncodeState::default()).unwrap();
         let raw = serde_json::to_string(
             &cchunks[0]
                 .data

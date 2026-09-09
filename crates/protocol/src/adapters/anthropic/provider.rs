@@ -95,6 +95,20 @@ pub(super) fn block_to_anthropic(block: &ContentBlock) -> Option<Value> {
     }
 }
 
+/// Core usage → Anthropic 响应的 usage 对象。
+///
+/// Core 承载 OpenAI 口径（input_tokens 为 prompt 总量、含缓存），Anthropic 口径
+/// 的 input_tokens **不含**缓存读写，出站必须扣除，否则客户端（按
+/// input + cache_read + cache_creation 汇总上下文）会双计。
+pub(super) fn anthropic_usage_out(u: &Usage) -> Value {
+    json!({
+        "input_tokens": u.input_tokens.saturating_sub(u.cache_read_tokens + u.cache_write_tokens),
+        "output_tokens": u.output_tokens,
+        "cache_read_input_tokens": u.cache_read_tokens,
+        "cache_creation_input_tokens": u.cache_write_tokens,
+    })
+}
+
 /// Anthropic content block → Core 内容块。
 pub(super) fn anthropic_to_block(v: &Value) -> Option<ContentBlock> {
     match v.get("type")?.as_str()? {
@@ -352,19 +366,28 @@ impl ProviderAdapter for AnthropicAdapter {
 
         let usage = raw
             .get("usage")
-            .map(|u| Usage {
-                input_tokens: u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-                output_tokens: u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-                cache_read_tokens: u
+            .map(|u| {
+                let cache_read = u
                     .get("cache_read_input_tokens")
                     .and_then(|x| x.as_u64())
-                    .unwrap_or(0) as u32,
-                cache_write_tokens: u
+                    .unwrap_or(0) as u32;
+                let cache_write = u
                     .get("cache_creation_input_tokens")
                     .and_then(|x| x.as_u64())
-                    .unwrap_or(0) as u32,
-                // Anthropic 协议无独立 reasoning token 字段（含在 output 内）。
-                reasoning_tokens: 0,
+                    .unwrap_or(0) as u32;
+                Usage {
+                    // Core 口径与 OpenAI 对齐：input_tokens 为 prompt 总量（含缓存），
+                    // anthropic 原生口径不含缓存，此处归一化，出站时再扣除
+                    input_tokens: (u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0)
+                        as u32)
+                        .saturating_add(cache_read)
+                        .saturating_add(cache_write),
+                    output_tokens: u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                    cache_read_tokens: cache_read,
+                    cache_write_tokens: cache_write,
+                    // Anthropic 协议无独立 reasoning token 字段（含在 output 内）。
+                    reasoning_tokens: 0,
+                }
             })
             .unwrap_or_default();
 
@@ -515,7 +538,7 @@ mod tests {
         let resp = adapter.to_core_response(&ctx, raw).await.unwrap();
         assert_eq!(resp.id, "msg_1");
         assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
-        assert_eq!(resp.usage.input_tokens, 10);
+        assert_eq!(resp.usage.input_tokens, 13, "Core 口径：prompt 总量含缓存");
         assert_eq!(resp.usage.cache_read_tokens, 3);
         assert!(matches!(resp.content[1], ContentBlock::ToolUse { .. }));
     }
