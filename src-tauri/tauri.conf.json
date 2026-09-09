@@ -32,6 +32,12 @@
     "active": true,
     "targets": "all",
     "category": "DeveloperTool",
+    "windows": {
+      "nsis": {
+        "languages": ["SimpChinese"],
+        "displayLanguageSelector": false
+      }
+    },
     "shortDescription": "本地 LLM 网关",
     "longDescription": "Moon Bridge Next 是一个本地 LLM 网关：多协议入口、Core IR 居中转换、Lua 插件（可操作出入站原始报文）、用量统计。",
     "icon": [
