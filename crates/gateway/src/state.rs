@@ -6,6 +6,7 @@ use moonbridge_protocol::{PluginHooks, Registry};
 use moonbridge_store::Database;
 
 use crate::config::GatewayConfig;
+use crate::session::SessionTable;
 
 /// 网关共享状态。以 `Arc<AppState>` 注入 axum handler。
 pub struct AppState {
@@ -19,10 +20,12 @@ pub struct AppState {
     pub hooks: Arc<dyn PluginHooks>,
     /// 共享上游 HTTP 客户端（已施加 egress 代理）。
     pub client: reqwest::Client,
+    /// 活跃会话表（深度取 `config.session_table_depth`，见 `crate::session`）。
+    pub sessions: SessionTable,
 }
 
 impl AppState {
-    /// 构造共享状态。
+    /// 构造共享状态。会话表按配置深度就地建好，故不额外收参数。
     pub fn new(
         config: GatewayConfig,
         db: Arc<Database>,
@@ -30,12 +33,14 @@ impl AppState {
         hooks: Arc<dyn PluginHooks>,
         client: reqwest::Client,
     ) -> Arc<Self> {
+        let sessions = SessionTable::new(config.session_table_depth);
         Arc::new(AppState {
             config,
             db,
             registry,
             hooks,
             client,
+            sessions,
         })
     }
 }

@@ -93,7 +93,8 @@ pub fn trace_list(state: State<'_, Arc<ManagedState>>, limit: Option<usize>) -> 
             }
         }
     }
-    out.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+    // Reverse ⇒ 新的在前（后接 truncate 取最近 N 条）
+    out.sort_by_key(|e| std::cmp::Reverse(e.modified_at));
     out.truncate(max);
     Ok(out)
 }

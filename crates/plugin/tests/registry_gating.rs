@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use moonbridge_core::{CoreRequest, CoreResponse};
 use moonbridge_plugin::{
     HostBridge, HttpRequest, HttpResponse, LuaPluginRegistry, LuaRuntime, SandboxLimits,
+    SessionStore,
 };
 use moonbridge_protocol::{PluginHooks, ReqCtx};
 
@@ -68,7 +69,7 @@ async fn provider_binding_overrides_global() {
     let mut overrides = std::collections::HashMap::new();
     overrides.insert(("probe".to_string(), "off-provider".to_string()), false);
     overrides.insert(("probe".to_string(), "on-provider".to_string()), true);
-    let registry = LuaPluginRegistry::new(vec![probe_runtime(true)], overrides);
+    let registry = LuaPluginRegistry::new(vec![probe_runtime(true)], overrides, SessionStore::new());
 
     // binding 禁用 → 覆盖全局启用
     let mut req = CoreRequest::new("m");
@@ -84,7 +85,8 @@ async fn provider_binding_overrides_global() {
 
 #[tokio::test]
 async fn no_binding_follows_global() {
-    let registry = LuaPluginRegistry::new(vec![probe_runtime(true)], Default::default());
+    let registry =
+        LuaPluginRegistry::new(vec![probe_runtime(true)], Default::default(), SessionStore::new());
 
     // 无 binding：跟随全局启用
     let mut req = CoreRequest::new("m");
@@ -96,7 +98,7 @@ async fn no_binding_follows_global() {
 async fn force_enable_disabled_plugin() {
     let mut overrides = std::collections::HashMap::new();
     overrides.insert(("probe".to_string(), "p".to_string()), true);
-    let registry = LuaPluginRegistry::new(vec![probe_runtime(false)], overrides);
+    let registry = LuaPluginRegistry::new(vec![probe_runtime(false)], overrides, SessionStore::new());
 
     // 全局停用 + provider 强制启用 → 执行
     let mut req = CoreRequest::new("m");
@@ -113,7 +115,7 @@ async fn force_enable_disabled_plugin() {
 async fn client_stage_uses_global_only() {
     let mut overrides = std::collections::HashMap::new();
     overrides.insert(("probe".to_string(), "off-provider".to_string()), false);
-    let registry = LuaPluginRegistry::new(vec![probe_runtime(true)], overrides);
+    let registry = LuaPluginRegistry::new(vec![probe_runtime(true)], overrides, SessionStore::new());
 
     // 路由前（provider 未知）按全局开关执行，不受 provider binding 影响
     let mut req = CoreRequest::new("m");

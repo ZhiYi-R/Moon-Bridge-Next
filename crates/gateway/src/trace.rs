@@ -11,6 +11,36 @@ use moonbridge_core::Usage;
 use serde::Serialize;
 use serde_json::Value;
 
+/// trace 对外暴露的用量快照（camelCase）。
+///
+/// `moonbridge_core::Usage` **有意**保持 snake_case——Lua 插件经 mlua serde 直接读写它
+/// （见 `docs/architecture.md` §3 命名约定）。而 serde 的 `rename_all` **不作用于嵌套
+/// 类型**，所以把 `Usage` 原样塞进 camelCase 的 `TraceRecord`，落盘就成了
+/// `"usage": {"input_tokens": …}`；前端按 `usage.inputTokens` 读取拿到 `undefined`，
+/// 再被 `formatTokens` 的 `n ?? 0` 兜成「0」——真实 trace 的 token 全显示为 0 且无报错
+/// （已实证）。这里做一次显式映射，使落盘 JSON 符合「面向前端的 DTO 统一 camelCase」。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cache_read_tokens: u32,
+    pub cache_write_tokens: u32,
+    pub reasoning_tokens: u32,
+}
+
+impl From<Usage> for TraceUsage {
+    fn from(u: Usage) -> Self {
+        TraceUsage {
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
+            cache_read_tokens: u.cache_read_tokens,
+            cache_write_tokens: u.cache_write_tokens,
+            reasoning_tokens: u.reasoning_tokens,
+        }
+    }
+}
+
 /// 一次请求的 trace 快照（camelCase，直接供前端 Traces 页读取展示）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,10 +55,12 @@ pub struct TraceRecord {
     pub client_protocol: String,
     pub upstream_protocol: String,
     pub stream: bool,
-    /// `ok` / `error`。
+    /// `ok` / `error` / `aborted`（流未读尽、或插件主动中止）/ `short_circuit`（插件代答）。
     pub status: String,
     pub latency_ms: u64,
-    pub usage: Usage,
+    /// 首字延迟（毫秒）；仅流式请求有值，非流式 / 插件代答为 None。
+    pub ttft_ms: Option<u64>,
+    pub usage: TraceUsage,
     /// 客户端入站请求体（经入站报文钩子后）。
     pub client_request: Value,
     /// 上游出站请求快照 `{ method, url, headers, body }`（经出站报文钩子后）。
@@ -118,7 +150,8 @@ mod tests {
             stream: false,
             status: "ok".into(),
             latency_ms: 12,
-            usage: Usage::default(),
+            ttft_ms: None,
+            usage: TraceUsage::default(),
             client_request: json!({ "model": model }),
             upstream_request: json!({ "url": "https://x" }),
             upstream_response: Value::Null,
@@ -157,5 +190,44 @@ mod tests {
         // trace_dir 为 None / 空时应静默跳过，不 panic
         write(None, &sample(None, "m"));
         write(Some("  "), &sample(None, "m"));
+    }
+
+    /// 回归：`usage` 必须随外层一起序列化为 camelCase。
+    ///
+    /// 历史缺陷是 `TraceRecord` 上 `rename_all = "camelCase"` **不会**作用到嵌套的
+    /// `moonbridge_core::Usage`（它无 rename，线上是 snake_case），于是前端
+    /// `usage.inputTokens` 恒为 `undefined`，被 `formatTokens(n ?? 0)` 渲染成 0
+    /// ——真实 trace 的 token 全部静默显示为 0。
+    #[test]
+    fn usage_is_camel_case_and_never_leaks_snake_case() {
+        let mut rec = sample(Some("sess-1"), "claude-x");
+        rec.usage = Usage {
+            input_tokens: 111,
+            output_tokens: 222,
+            cache_read_tokens: 33,
+            cache_write_tokens: 44,
+            reasoning_tokens: 55,
+        }
+        .into();
+
+        let v = serde_json::to_value(&rec).unwrap();
+        let u = &v["usage"];
+        assert_eq!(u["inputTokens"], 111, "camelCase 键: {u}");
+        assert_eq!(u["outputTokens"], 222);
+        assert_eq!(u["cacheReadTokens"], 33);
+        assert_eq!(u["cacheWriteTokens"], 44);
+        assert_eq!(u["reasoningTokens"], 55);
+        for snake in [
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "reasoning_tokens",
+        ] {
+            assert!(u.get(snake).is_none(), "不得泄漏 snake_case 键 {snake}: {u}");
+        }
+        // 外层仍须是 camelCase
+        assert!(v.get("requestId").is_some());
+        assert!(v.get("latencyMs").is_some());
     }
 }

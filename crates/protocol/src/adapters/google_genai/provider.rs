@@ -117,7 +117,7 @@ impl ProviderAdapter for GoogleGenAiAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moonbridge_core::{Message, Role, Tool, ToolChoice};
+    use moonbridge_core::{Message, Reasoning, Role, Tool, ToolChoice};
 
     fn endpoint() -> ProviderEndpoint {
         ProviderEndpoint {
@@ -212,5 +212,36 @@ mod tests {
         let resp = adapter.to_core_response(&ctx, raw).await.unwrap();
         assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
         assert!(matches!(resp.content[0], ContentBlock::ToolUse { .. }));
+    }
+
+    /// 回归：`reasoning.effort` 必须传导到 Gemini 的 thinkingConfig。
+    #[tokio::test]
+    async fn propagates_reasoning_as_thinking_config() {
+        let adapter = GoogleGenAiAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::OpenAiChat);
+
+        let mut req = CoreRequest::new("gemini-2.5-pro");
+        req.messages.push(Message::text(Role::User, "Hi"));
+        req.max_tokens = Some(32000);
+        req.reasoning = Some(Reasoning {
+            effort: Some("low".into()),
+            summary: None,
+        });
+        let up = adapter
+            .from_core_request(&ctx, &req, &endpoint())
+            .await
+            .unwrap();
+        assert_eq!(up.body["generationConfig"]["thinkingConfig"]["thinkingBudget"], 2048);
+        assert_eq!(up.body["generationConfig"]["thinkingConfig"]["includeThoughts"], true);
+
+        // 未声明 reasoning 时不得长出 thinkingConfig
+        let plain = CoreRequest::new("gemini-2.0-flash");
+        let up2 = adapter
+            .from_core_request(&ctx, &plain, &endpoint())
+            .await
+            .unwrap();
+        assert!(up2.body["generationConfig"]
+            .get("thinkingConfig")
+            .is_none());
     }
 }

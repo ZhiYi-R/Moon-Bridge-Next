@@ -196,10 +196,9 @@ pub fn apply_lua_to_chunk(lua: &Lua, t: &Table, c: &mut RawChunk) -> Result<()> 
     if !(truncated && matches!(data_v, LuaValue::Nil)) {
         c.data = lua_to_body(lua, data_v)?;
     }
-    if let Ok(raw) = t.get::<Option<String>>("raw") {
-        if let Some(raw) = raw {
-            c.raw = raw;
-        }
+    // `ok().flatten()`：读取失败（Err）与字段缺失（None）同样按「未改写 raw」处理
+    if let Some(raw) = t.get::<Option<String>>("raw").ok().flatten() {
+        c.raw = raw;
     }
     Ok(())
 }

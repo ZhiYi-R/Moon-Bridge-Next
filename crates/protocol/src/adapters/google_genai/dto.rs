@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 
+use crate::adapters::{clamped_thinking_budget, reasoning_effort};
 use moonbridge_core::{
     ContentBlock, CoreRequest, Message, Role, StopReason, Tool, ToolChoice, Usage,
 };
@@ -206,6 +207,16 @@ pub fn core_to_generation_config(req: &CoreRequest) -> Option<Value> {
     }
     if !req.stop.is_empty() {
         obj.insert("stopSequences".to_string(), json!(req.stop));
+    }
+    // 推理强度：Gemini 用 generationConfig.thinkingConfig.thinkingBudget 表达
+    if let Some(effort) = reasoning_effort(req) {
+        let max_tokens = req.max_tokens.unwrap_or(u32::MAX);
+        if let Some(budget) = clamped_thinking_budget(effort, max_tokens) {
+            obj.insert(
+                "thinkingConfig".to_string(),
+                json!({ "thinkingBudget": budget, "includeThoughts": true }),
+            );
+        }
     }
     if obj.is_empty() {
         None

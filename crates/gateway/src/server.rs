@@ -17,7 +17,8 @@ use crate::state::AppState;
 /// - `/v1/responses`（+ `/responses`）—— OpenAI Responses
 /// - `/v1/messages` —— Anthropic Messages
 /// - `/v1/chat/completions` —— OpenAI Chat
-/// 另有 `/health`、`/v1/models`。
+///
+/// 另有 `/health`、`/v1/models`。Gemini 作入口时未挂路由（主要作上游）。
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(handlers::health))
@@ -48,10 +49,16 @@ where
         .await
         .map_err(|e| GatewayError::Other(format!("监听 {addr} 失败: {e}")))?;
     tracing::info!(%addr, "Moon Bridge Next 网关已启动");
-    axum::serve(listener, router(state))
+    // [LIFECYCLE] 绑定成功后、开始服务前跑 MB.init。放在这里而非 bootstrap：
+    // bootstrap 是同步函数，await 不了 Lua 钩子；且绑定失败时不该留下
+    // 「init 跑过但 shutdown 永不跑」的不配对状态。
+    state.hooks.init_all().await;
+    let served = axum::serve(listener, router(state.clone()))
         .with_graceful_shutdown(shutdown)
-        .await
-        .map_err(|e| GatewayError::Other(format!("网关服务错误: {e}")))?;
+        .await;
+    // [LIFECYCLE] 无论服务如何退出都给插件一次收尾机会（与 init_all 严格配对）。
+    state.hooks.shutdown_all().await;
+    served.map_err(|e| GatewayError::Other(format!("网关服务错误: {e}")))?;
     tracing::info!(%addr, "Moon Bridge Next 网关已停止");
     Ok(())
 }

@@ -4,6 +4,7 @@
 //! 所有 command 统一用 [`CommandError`]（可序列化）作为错误类型，便于前端展示。
 
 pub mod app;
+pub mod catalog;
 pub mod gateway;
 pub mod model;
 pub mod plugin;

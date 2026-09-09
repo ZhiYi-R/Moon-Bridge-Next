@@ -17,6 +17,7 @@ use super::client::{parse_content_item, usage_from_value};
 use super::dto;
 use super::OpenAiResponsesAdapter;
 use crate::adapter::{ProviderAdapter, ProviderEndpoint, UpstreamRequest};
+use crate::adapters::reasoning_effort;
 use crate::context::ReqCtx;
 
 /// 提取内容块中的纯文本（用于 function_call_output）。
@@ -181,6 +182,14 @@ impl ProviderAdapter for OpenAiResponsesAdapter {
         if let Some(p) = req.top_p {
             obj.insert("top_p".to_string(), json!(p));
         }
+        // 推理强度：Responses 用 reasoning.{effort,summary} 表达
+        if let Some(effort) = reasoning_effort(req) {
+            let mut r = json!({ "effort": effort });
+            if let Some(summary) = req.reasoning.as_ref().and_then(|x| x.summary.clone()) {
+                r["summary"] = summary;
+            }
+            obj.insert("reasoning".to_string(), r);
+        }
 
         let mut headers = vec![
             ("content-type".to_string(), "application/json".to_string()),
@@ -268,7 +277,7 @@ impl ProviderAdapter for OpenAiResponsesAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moonbridge_core::{Message, Tool, Usage};
+    use moonbridge_core::{Message, Reasoning, Tool, Usage};
 
     fn endpoint() -> ProviderEndpoint {
         ProviderEndpoint {
@@ -338,5 +347,32 @@ mod tests {
         }
         assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
         assert_eq!(resp.usage, Usage { input_tokens: 8, output_tokens: 4, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0 });
+    }
+
+    /// 回归：`reasoning.{effort,summary}` 必须传导到 Responses 上游。
+    #[tokio::test]
+    async fn propagates_reasoning_object() {
+        let adapter = OpenAiResponsesAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::OpenAiResponse);
+
+        let mut req = CoreRequest::new("gpt-5");
+        req.messages.push(Message::text(Role::User, "Hi"));
+        req.reasoning = Some(Reasoning {
+            effort: Some("medium".into()),
+            summary: Some(json!("auto")),
+        });
+        let up = adapter
+            .from_core_request(&ctx, &req, &endpoint())
+            .await
+            .unwrap();
+        assert_eq!(up.body["reasoning"]["effort"], "medium");
+        assert_eq!(up.body["reasoning"]["summary"], "auto");
+
+        let plain = CoreRequest::new("gpt-5");
+        let up2 = adapter
+            .from_core_request(&ctx, &plain, &endpoint())
+            .await
+            .unwrap();
+        assert!(up2.body.get("reasoning").is_none());
     }
 }

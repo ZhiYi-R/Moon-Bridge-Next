@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::error::{GatewayError, Result};
 
 /// 路由解析结果。
+#[derive(Debug)]
 pub struct ResolvedRoute {
     pub provider_key: String,
     /// 上游实际模型名。
@@ -76,7 +77,7 @@ impl Router {
 
         // 1. 限定名 model(provider)
         if let Some(provider_key) = &mref.provider {
-            return build(db, provider_key, &mref.model).and_then(|opt| {
+            return build(db, provider_key, &mref.model, None).and_then(|opt| {
                 opt.ok_or_else(|| {
                     GatewayError::Route(format!(
                         "provider '{provider_key}' 未找到（模型 {}）",
@@ -88,7 +89,7 @@ impl Router {
 
         // 2. routes 别名
         if let Some(route) = db.resolve_route(model_alias)? {
-            return build(db, &route.provider_key, &route.model_slug).and_then(|opt| {
+            return build(db, &route.provider_key, &route.model_slug, None).and_then(|opt| {
                 opt.ok_or_else(|| {
                     GatewayError::Route(format!(
                         "路由 '{model_alias}' 指向的 provider '{}' 未找到",
@@ -105,7 +106,10 @@ impl Router {
             }
             for offer in db.list_offers(&p.key)? {
                 if offer.model_slug == mref.model {
-                    if let Some(r) = build(db, &p.key, &mref.model)? {
+                    // offer 可绑定特定协议端点：非空则只用该协议的端点故障转移。
+                    if let Some(r) =
+                        build(db, &p.key, &mref.model, offer.endpoint_protocol.as_deref())?
+                    {
                         return Ok(r);
                     }
                 }
@@ -116,11 +120,32 @@ impl Router {
     }
 }
 
-fn build(db: &Database, provider_key: &str, upstream_model: &str) -> Result<Option<ResolvedRoute>> {
+/// 构造路由结果。`endpoint_protocol` 非空时只保留匹配该协议的端点（供 offer 绑定端点用），
+/// 为空则用该 provider 的全部端点（按 idx 故障转移，旧行为）。
+fn build(
+    db: &Database,
+    provider_key: &str,
+    upstream_model: &str,
+    endpoint_protocol: Option<&str>,
+) -> Result<Option<ResolvedRoute>> {
     let Some(p) = db.get_provider(provider_key)? else {
         return Ok(None);
     };
-    let endpoints = endpoints_from_provider(&p)?;
+    let mut endpoints = endpoints_from_provider(&p)?;
+    // offer 指定了端点协议：筛掉其余协议，只在该协议的端点间故障转移。
+    if let Some(want) = endpoint_protocol {
+        let Some(target) = Protocol::parse(want) else {
+            return Err(GatewayError::Route(format!(
+                "offer 绑定的端点协议 '{want}' 无法识别（provider {provider_key} / 模型 {upstream_model}）"
+            )));
+        };
+        endpoints.retain(|e| e.protocol == target);
+        if endpoints.is_empty() {
+            return Err(GatewayError::Route(format!(
+                "provider {provider_key} 无协议为 '{want}' 的端点（模型 {upstream_model} 的 offer 绑定了该协议）"
+            )));
+        }
+    }
     // 默认协议取首个端点（路由前 ctx 与流式回退用；实际请求逐端点判定）
     let protocol = endpoints[0].protocol;
     Ok(Some(ResolvedRoute {
@@ -129,4 +154,124 @@ fn build(db: &Database, provider_key: &str, upstream_model: &str) -> Result<Opti
         protocol,
         endpoints,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use moonbridge_store::{Endpoint, Offer};
+
+    /// 造一个持三种协议端点（anthropic / openai-response / openai-chat）的 provider。
+    fn provider_with_three_endpoints() -> Provider {
+        Provider {
+            key: "zen".into(),
+            endpoints: vec![
+                Endpoint {
+                    protocol: "anthropic".into(),
+                    base_url: "https://zen/anthropic".into(),
+                    api_key: "k".into(),
+                },
+                Endpoint {
+                    protocol: "openai-response".into(),
+                    base_url: "https://zen/openai".into(),
+                    api_key: "k".into(),
+                },
+                Endpoint {
+                    protocol: "openai-chat".into(),
+                    base_url: "https://zen/chat".into(),
+                    api_key: "k".into(),
+                },
+            ],
+            version: None,
+            user_agent: None,
+            web_search: None,
+            extra: Value::Null,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn db_with_provider() -> Database {
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_provider(&provider_with_three_endpoints()).unwrap();
+        db
+    }
+
+    fn offer(model: &str, endpoint_protocol: Option<&str>) -> Offer {
+        Offer {
+            provider_key: "zen".into(),
+            model_slug: model.into(),
+            pricing: None,
+            endpoint_protocol: endpoint_protocol.map(str::to_string),
+        }
+    }
+
+    /// offer 绑定 openai-response：只保留该协议端点，默认协议随之为 OpenAiResponse。
+    #[test]
+    fn offer_bound_protocol_selects_only_that_endpoint() {
+        let db = db_with_provider();
+        db.upsert_offer(&offer("muse", Some("openai-response"))).unwrap();
+
+        let r = Router::resolve(&db, "muse").expect("应解析成功");
+        assert_eq!(r.endpoints.len(), 1, "只应保留绑定协议的端点");
+        assert_eq!(r.protocol, Protocol::OpenAiResponse);
+        assert_eq!(r.endpoints[0].base_url, "https://zen/openai");
+    }
+
+    /// offer 不绑定端点协议：保留全部端点，默认协议为首个端点（旧行为）。
+    #[test]
+    fn offer_without_binding_keeps_all_endpoints() {
+        let db = db_with_provider();
+        db.upsert_offer(&offer("muse", None)).unwrap();
+
+        let r = Router::resolve(&db, "muse").expect("应解析成功");
+        assert_eq!(r.endpoints.len(), 3, "未绑定则保留全部端点");
+        assert_eq!(r.protocol, Protocol::Anthropic, "默认协议为 idx=0 端点");
+    }
+
+    /// offer 绑定的协议在该 provider 无对应端点：明确报错，而非静默错端点。
+    #[test]
+    fn offer_bound_to_absent_protocol_errors() {
+        let db = db_with_provider();
+        db.upsert_offer(&offer("muse", Some("google-genai"))).unwrap();
+
+        let err = Router::resolve(&db, "muse").unwrap_err();
+        assert!(
+            matches!(&err, GatewayError::Route(m) if m.contains("google-genai")),
+            "应报「无该协议端点」错误: {err:?}"
+        );
+    }
+
+    /// 绑定协议的别名无法识别：报错而非当作裸名。
+    #[test]
+    fn offer_bound_to_unknown_protocol_name_errors() {
+        let db = db_with_provider();
+        db.upsert_offer(&offer("muse", Some("nonsense-proto"))).unwrap();
+
+        let err = Router::resolve(&db, "muse").unwrap_err();
+        assert!(
+            matches!(&err, GatewayError::Route(m) if m.contains("无法识别")),
+            "应报协议无法识别错误: {err:?}"
+        );
+    }
+
+    /// endpoint_protocol 支持 Protocol::parse 的别名（如 "gemini" → google-genai）。
+    #[test]
+    fn offer_bound_protocol_accepts_aliases() {
+        let db = Database::open_in_memory().unwrap();
+        let mut p = provider_with_three_endpoints();
+        p.endpoints.push(Endpoint {
+            protocol: "google-genai".into(),
+            base_url: "https://zen/gemini".into(),
+            api_key: "k".into(),
+        });
+        db.upsert_provider(&p).unwrap();
+        // offer 用别名 "gemini"，应归一到 google-genai 端点
+        db.upsert_offer(&offer("g", Some("gemini"))).unwrap();
+
+        let r = Router::resolve(&db, "g").expect("应解析成功");
+        assert_eq!(r.endpoints.len(), 1);
+        assert_eq!(r.protocol, Protocol::GoogleGenai);
+    }
 }

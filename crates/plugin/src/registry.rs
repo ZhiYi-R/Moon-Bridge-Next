@@ -17,6 +17,7 @@ use moonbridge_protocol::{
 
 use crate::manifest::{CAP_CORE, CAP_RAW_REQUEST, CAP_RAW_RESPONSE, CAP_RAW_STREAM};
 use crate::runtime::LuaRuntime;
+use crate::session::SessionStore;
 
 /// 已加载 Lua 插件的注册表。
 pub struct LuaPluginRegistry {
@@ -25,18 +26,29 @@ pub struct LuaPluginRegistry {
     /// 存在表项则以表项为准（启用/禁用），否则回落插件全局 `enabled`
     /// （即「跟随全局」）。由 store 的 `plugin_bindings(scope='provider')` 装配。
     overrides: HashMap<(String, String), bool>,
+    /// 与所有插件运行时共享的会话状态存储，供会话淘汰时回收其桶。
+    sessions: SessionStore,
 }
 
 impl LuaPluginRegistry {
-    /// 由已加载的插件运行时与 provider 维度三态覆盖表构造。
-    pub fn new(plugins: Vec<Arc<LuaRuntime>>, overrides: HashMap<(String, String), bool>) -> Self {
-        Self { plugins, overrides }
+    /// 由已加载的插件运行时、provider 维度三态覆盖表与共享会话存储构造。
+    pub fn new(
+        plugins: Vec<Arc<LuaRuntime>>,
+        overrides: HashMap<(String, String), bool>,
+        sessions: SessionStore,
+    ) -> Self {
+        Self {
+            plugins,
+            overrides,
+            sessions,
+        }
     }
     /// 空注册表。
     pub fn empty() -> Self {
         Self {
             plugins: Vec::new(),
             overrides: HashMap::new(),
+            sessions: SessionStore::new(),
         }
     }
     /// 是否为空。
@@ -248,5 +260,28 @@ impl PluginHooks for LuaPluginRegistry {
         // 加载入注册表的插件均视为启用；细粒度 scope（含 provider 维度三态）
         // 由各钩子内 `effective()` 依据门控表逐请求判定。
         true
+    }
+
+    async fn init_all(&self) {
+        for p in self.plugins.iter() {
+            if let Err(e) = p.init().await {
+                tracing::warn!(plugin = %p.name, error = %e, "MB.init 失败，插件继续加载");
+            }
+        }
+    }
+
+    async fn shutdown_all(&self) {
+        // 逆序：后加载的插件先收尾，与其建立资源的顺序相反。
+        for p in self.plugins.iter().rev() {
+            if let Err(e) = p.shutdown().await {
+                tracing::warn!(plugin = %p.name, error = %e, "MB.shutdown 失败");
+            }
+        }
+    }
+
+    async fn forget_session(&self, session_id: &str) {
+        // 一次性清掉所有插件在该会话下的桶：SessionStore 内部按 (plugin, session, key)
+        // 组织，clear_session 自行跨插件过滤，无需逐插件循环。
+        self.sessions.clear_session(session_id);
     }
 }

@@ -114,6 +114,25 @@ pub trait PluginHooks: Send + Sync {
     fn enabled_for_model(&self, _model: &str) -> bool {
         true
     }
+
+    // ── 生命周期（非请求作用域）───────────────────────────────────
+
+    /// 网关开始服务前通知所有插件执行各自的 `MB.init`。默认 no-op。
+    ///
+    /// 不经 capability、不经 provider 三态门控：初始化是插件自身的事，与该插件
+    /// 对哪些请求生效无关（被 provider 强制启用的插件同样需要 init）。
+    async fn init_all(&self) {}
+
+    /// 网关停止时通知所有插件执行各自的 `MB.shutdown`，用于释放插件侧资源。
+    ///
+    /// 默认 no-op：只有 Lua 注册表需要扇出。与 [`Self::init_all`] 同点成对
+    /// （`server::serve_with_shutdown`），故插件看到的 shutdown 次数与 init 次数一致。
+    async fn shutdown_all(&self) {}
+
+    /// 某个会话彻底不再活跃时被调用，用于丢弃该会话在插件侧的累积状态。
+    ///
+    /// 由会话活跃表淘汰（FIFO 超深）触发。默认 no-op。
+    async fn forget_session(&self, _session_id: &str) {}
 }
 
 /// 空钩子实现：无插件启用时使用，全部走 no-op 默认。

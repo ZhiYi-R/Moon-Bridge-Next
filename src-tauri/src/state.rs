@@ -54,10 +54,13 @@ impl ManagedState {
             tracing::warn!(error = %e, "引导配置加载失败，使用默认配置");
             AppConfig::default()
         });
-        // 把 trace 目录回填进网关配置（若用户未显式设置）
+        // 把 trace / plugins 目录回填进网关配置（若用户未显式设置）
         let mut config = config;
         if config.gateway.trace_dir.is_none() {
             config.gateway.trace_dir = Some(paths.trace_dir.to_string_lossy().to_string());
+        }
+        if config.gateway.plugins_dir.is_none() {
+            config.gateway.plugins_dir = Some(paths.plugins_dir.to_string_lossy().to_string());
         }
         Ok(Arc::new(Self {
             db: Arc::new(db),
@@ -84,41 +87,54 @@ impl ManagedState {
 
     /// 查询网关状态（同步，不阻塞）。
     pub fn status(&self) -> GatewayStatus {
-        let addr = self.config.read().unwrap().gateway.addr.clone();
+        let config_addr = self.config.read().unwrap().gateway.addr.clone();
         let error = self.last_error.lock().unwrap().clone();
-        let running = self
-            .gateway
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|h| !h.task.is_finished())
-            .unwrap_or(false);
+        // running 与 addr 在同一把锁内一次取齐：原先分两次 lock 既冗余，
+        // 又给「持锁再进 status」留了坑（见 `has_live_gateway`）。
+        let (running, handle_addr) = {
+            let guard = self.gateway.lock().unwrap();
+            match guard.as_ref() {
+                Some(h) if !h.task.is_finished() => (true, Some(h.addr.clone())),
+                _ => (false, None),
+            }
+        };
         GatewayStatus {
             running,
-            addr: if running {
-                self.gateway
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .map(|h| h.addr.clone())
-                    .unwrap_or(addr)
-            } else {
-                addr
-            },
+            addr: handle_addr.unwrap_or(config_addr),
             error: if running { None } else { error },
         }
     }
 
+    /// 是否已有存活的网关任务。
+    ///
+    /// 单独成函数是为了让 `MutexGuard` 在**返回时**必然释放。历史缺陷：
+    /// `if let Some(h) = self.gateway.lock().unwrap().as_ref() { return self.status(); }`
+    /// 在 edition 2021 下 `if let`  scrutinee 的临时量活到块结束，守卫仍被持有，
+    /// 而 `status()` 再次获取同一把**非重入** `std::sync::Mutex` ⇒ 永久死锁，
+    /// 连带 `gateway_status` / `gateway_stop` / 托盘切换全部卡死。
+    /// 实测 edition 2021 与 2024 都会死锁，升级 edition 不是解法。
+    fn has_live_gateway(&self) -> bool {
+        let guard = self.gateway.lock().unwrap();
+        matches!(guard.as_ref(), Some(h) if !h.task.is_finished())
+    }
+
     /// 启动网关（若已运行则直接返回当前状态）。
     pub async fn start_gateway(&self) -> Result<GatewayStatus> {
-        // 已在运行则幂等返回
-        if let Some(h) = self.gateway.lock().unwrap().as_ref() {
-            if !h.task.is_finished() {
-                return Ok(self.status());
-            }
+        // 已在运行则幂等返回（守卫已在 `has_live_gateway` 返回时释放）
+        if self.has_live_gateway() {
+            return Ok(self.status());
         }
 
-        let config = self.config.read().unwrap().gateway.clone();
+        let mut config = self.config.read().unwrap().gateway.clone();
+        // 路径型配置一律以 AppPaths 为准回填。设置页保存是**整体替换** AppConfig，
+        // 前端漏传某字段就会把它变成 None —— 而 plugins_dir 为 None 时脚本包含性
+        // 校验随之失效，绝不能依赖前端回传。
+        if config.trace_dir.is_none() {
+            config.trace_dir = Some(self.paths.trace_dir.to_string_lossy().to_string());
+        }
+        if config.plugins_dir.is_none() {
+            config.plugins_dir = Some(self.paths.plugins_dir.to_string_lossy().to_string());
+        }
         let db = self.db.clone();
         let state = moonbridge_gateway::bootstrap(config, db).context("构建网关状态失败")?;
         let addr = state.config.addr.clone();
@@ -158,5 +174,94 @@ impl ManagedState {
             let _ = h.task.await;
         }
         Ok(self.status())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn temp_paths(tag: &str) -> (AppPaths, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "moonbridge-state-{}-{tag}",
+            std::process::id()
+        ));
+        let paths = AppPaths::resolve(dir.join("config"), dir.join("data"));
+        (paths, dir)
+    }
+
+    /// 回归：网关已在运行时再次 `start_gateway` 必须幂等返回，不得死锁。
+    ///
+    /// 历史缺陷：`if let Some(h) = self.gateway.lock()...` 仍持守卫时调用 `status()`，
+    /// 再取同一把非重入 `std::sync::Mutex` ⇒ 永久阻塞。
+    ///
+    /// 为什么把被测调用放进独立 OS 线程 + 自有 runtime：死锁发生在同步 `lock()` 里，
+    /// 若按直觉写 `timeout(dur, st.start_gateway())`，定时器与该 future 同属一个任务，
+    /// 任务一旦阻塞就再也不能轮询定时器 —— 回归时表现为**测试挂死**而非失败。
+    /// 现在阻塞只会泄漏那个分离线程，主测试线程靠 `recv_timeout` 干净地判定失败。
+    #[test]
+    fn start_gateway_while_running_does_not_deadlock() {
+        let (paths, dir) = temp_paths("idempotent");
+        let st = ManagedState::new(paths).unwrap();
+        // 端口 0：交给内核分配，避免与真实网关(38440)或其它测试抢端口
+        st.update_config(|c| c.gateway.addr = "127.0.0.1:0".to_string())
+            .unwrap();
+
+        let (tx, rx) = mpsc::channel::<Vec<Result<String, String>>>();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("测试 runtime 构建失败");
+            let steps = rt.block_on(async {
+                let mut out = Vec::new();
+                out.push(
+                    st.start_gateway()
+                        .await
+                        .map(|s| format!("首次启动 running={}", s.running))
+                        .map_err(|e| format!("首次启动失败: {e}")),
+                );
+                out.push(
+                    st.start_gateway()
+                        .await
+                        .map(|s| format!("重复启动 running={}", s.running))
+                        .map_err(|e| format!("重复启动失败: {e}")),
+                );
+                out.push(Ok(format!("status running={}", st.status().running)));
+                out
+            });
+            let _ = tx.send(steps);
+        });
+
+        let steps = rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("重复 start_gateway 死锁：工作线程 60s 内未返回（修复前必现）");
+        assert_eq!(
+            steps,
+            vec![
+                Ok("首次启动 running=true".to_string()),
+                Ok("重复启动 running=true".to_string()),
+                Ok("status running=true".to_string()),
+            ],
+            "已运行时再次 start 应幂等返回，且 status 仍可用"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 未启动时 running=false 且 addr 回落到配置值。
+    #[test]
+    fn status_falls_back_to_config_addr_when_stopped() {
+        let (paths, dir) = temp_paths("fallback");
+        let st = ManagedState::new(paths).unwrap();
+        let status = st.status();
+        assert!(!status.running);
+        assert_eq!(
+            status.addr, "127.0.0.1:38440",
+            "未启动时应回落到配置里的监听地址"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

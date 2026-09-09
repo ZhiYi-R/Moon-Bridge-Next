@@ -19,6 +19,7 @@ impl ModelRef {
     ///
     /// - `"deepseek-v4-pro(deepseek)"` → model=`deepseek-v4-pro`, provider=`Some("deepseek")`
     /// - `"moonbridge"` → model=`moonbridge`, provider=`None`
+    ///
     /// 括号不闭合等异常输入按裸模型名处理，保证健壮性。
     pub fn parse(input: &str) -> Self {
         let input = input.trim();

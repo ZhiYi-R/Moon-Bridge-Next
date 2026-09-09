@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use super::dto;
 use super::OpenAiChatAdapter;
 use crate::adapter::{ProviderAdapter, ProviderEndpoint, UpstreamRequest};
+use crate::adapters::reasoning_effort;
 use crate::context::ReqCtx;
 
 #[async_trait]
@@ -45,6 +46,10 @@ impl ProviderAdapter for OpenAiChatAdapter {
         }
         if !req.stop.is_empty() {
             obj.insert("stop".to_string(), json!(req.stop));
+        }
+        // 推理强度：Chat Completions 用 reasoning_effort 字符串枚举表达
+        if let Some(effort) = reasoning_effort(req) {
+            obj.insert("reasoning_effort".to_string(), json!(effort));
         }
 
         let mut headers = vec![
@@ -90,7 +95,7 @@ impl ProviderAdapter for OpenAiChatAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moonbridge_core::{ContentBlock, Message, Role, StopReason};
+    use moonbridge_core::{ContentBlock, Message, Reasoning, Role, StopReason};
 
     fn endpoint() -> ProviderEndpoint {
         ProviderEndpoint {
@@ -121,6 +126,31 @@ mod tests {
         assert_eq!(up.body["messages"][1]["role"], "user");
         assert_eq!(up.body["max_tokens"], 128);
         assert!(up.headers.iter().any(|(k, v)| k == "authorization" && v == "Bearer sk-test"));
+    }
+
+    /// 回归：`reasoning.effort` 必须传导到上游 `reasoning_effort`。
+    /// 历史缺陷是 Core IR 只有入口侧写、四个上游 adapter 全不读，Codex 的推理
+    /// 强度意图被静默丢弃。
+    #[tokio::test]
+    async fn propagates_reasoning_effort() {
+        let mut req = CoreRequest::new("o3");
+        req.messages.push(Message::text(Role::User, "Hi"));
+        req.reasoning = Some(Reasoning {
+            effort: Some("high".into()),
+            summary: None,
+        });
+        let adapter = OpenAiChatAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::OpenAiChat);
+        let up = adapter.from_core_request(&ctx, &req, &endpoint()).await.unwrap();
+        assert_eq!(up.body["reasoning_effort"], "high");
+
+        // 未声明时不得凭空长出该字段
+        let plain = CoreRequest::new("gpt-4o");
+        let up2 = adapter
+            .from_core_request(&ctx, &plain, &endpoint())
+            .await
+            .unwrap();
+        assert!(up2.body.get("reasoning_effort").is_none());
     }
 
     #[tokio::test]

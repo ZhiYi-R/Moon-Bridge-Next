@@ -105,6 +105,9 @@ pub fn run() {
             commands::model::offer_list,
             commands::model::offer_save,
             commands::model::offer_delete,
+            // 模型目录（models.dev 拉取 + 导入）
+            commands::catalog::catalog_fetch,
+            commands::catalog::catalog_import,
             // Route
             commands::route::route_list,
             commands::route::route_get,

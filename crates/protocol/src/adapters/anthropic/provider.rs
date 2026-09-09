@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use super::dto;
 use super::AnthropicAdapter;
 use crate::adapter::{ProviderAdapter, ProviderEndpoint, UpstreamRequest};
+use crate::adapters::{clamped_thinking_budget, reasoning_effort};
 use crate::context::ReqCtx;
 
 /// Core 内容块 → Anthropic content block。
@@ -216,9 +217,10 @@ impl ProviderAdapter for AnthropicAdapter {
             dto::MESSAGES_PATH
         );
 
+        let max_tokens = req.max_tokens.unwrap_or(dto::DEFAULT_MAX_TOKENS);
         let mut body = json!({
             "model": req.model,
-            "max_tokens": req.max_tokens.unwrap_or(dto::DEFAULT_MAX_TOKENS),
+            "max_tokens": max_tokens,
             "messages": build_messages(req),
             "stream": req.stream,
         });
@@ -260,6 +262,16 @@ impl ProviderAdapter for AnthropicAdapter {
         }
         if !req.stop.is_empty() {
             obj.insert("stop_sequences".to_string(), json!(req.stop));
+        }
+        // 推理强度：Anthropic 用扩展思考的 token 预算表达，且要求
+        // 1024 <= budget_tokens < max_tokens，故经 clamped_thinking_budget 夹紧。
+        if let Some(effort) = reasoning_effort(req) {
+            if let Some(budget) = clamped_thinking_budget(effort, max_tokens) {
+                obj.insert(
+                    "thinking".to_string(),
+                    json!({ "type": "enabled", "budget_tokens": budget }),
+                );
+            }
         }
 
         // headers
@@ -346,7 +358,7 @@ pub(crate) fn messages_for_test(req: &CoreRequest) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moonbridge_core::Message;
+    use moonbridge_core::{Message, Reasoning};
 
     fn endpoint() -> ProviderEndpoint {
         ProviderEndpoint {
@@ -436,5 +448,52 @@ mod tests {
         assert_eq!(resp.usage.input_tokens, 10);
         assert_eq!(resp.usage.cache_read_tokens, 3);
         assert!(matches!(resp.content[1], ContentBlock::ToolUse { .. }));
+    }
+
+    /// 回归：`reasoning.effort` 必须翻译成 Anthropic 扩展思考的 token 预算。
+    #[tokio::test]
+    async fn propagates_reasoning_as_thinking_budget() {
+        let adapter = AnthropicAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::OpenAiResponse);
+
+        let mut req = CoreRequest::new("claude-sonnet-4");
+        req.messages.push(Message::text(Role::User, "Hi"));
+        req.max_tokens = Some(32000);
+        req.reasoning = Some(Reasoning {
+            effort: Some("high".into()),
+            summary: None,
+        });
+        let up = adapter
+            .from_core_request(&ctx, &req, &endpoint())
+            .await
+            .unwrap();
+        assert_eq!(up.body["thinking"]["type"], "enabled");
+        assert_eq!(up.body["thinking"]["budget_tokens"], 16384);
+
+        // 预算必须严格小于 max_tokens：小 max_tokens 时被夹紧
+        let mut tight = req.clone();
+        tight.max_tokens = Some(3000);
+        let up2 = adapter
+            .from_core_request(&ctx, &tight, &endpoint())
+            .await
+            .unwrap();
+        assert_eq!(up2.body["thinking"]["budget_tokens"], 2999);
+
+        // max_tokens 小到无法容纳合法预算时，宁可不发也不构造必被拒的请求
+        let mut tiny = req.clone();
+        tiny.max_tokens = Some(500);
+        let up3 = adapter
+            .from_core_request(&ctx, &tiny, &endpoint())
+            .await
+            .unwrap();
+        assert!(up3.body.get("thinking").is_none(), "不应发出非法 thinking");
+
+        // 未声明 reasoning 时不得凭空长出 thinking
+        let plain = CoreRequest::new("claude");
+        let up4 = adapter
+            .from_core_request(&ctx, &plain, &endpoint())
+            .await
+            .unwrap();
+        assert!(up4.body.get("thinking").is_none());
     }
 }

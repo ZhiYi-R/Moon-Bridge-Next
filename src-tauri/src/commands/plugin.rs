@@ -3,35 +3,31 @@
 //! 注意：插件在网关 `bootstrap` 时加载为 `PluginHooks`，因此增删改插件后需
 //! 调用 `gateway_restart` 方能生效（前端在保存后触发）。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use moonbridge_gateway::{parse_script_ref, ScriptRef};
 use moonbridge_store::{PluginBinding, PluginRecord};
 use tauri::State;
 
 use crate::commands::CmdResult;
 use crate::state::ManagedState;
 
-/// 解析插件脚本的文件路径：`script_ref` 以 `.lua` 结尾视为文件脚本，
-/// 相对路径优先归一到 `plugins_dir`；否则（非 `.lua`）视为内联脚本，返回 `None`。
-fn resolve_script_file(state: &ManagedState, script_ref: &str) -> Option<PathBuf> {
-    let trimmed = script_ref.trim();
-    if !trimmed.ends_with(".lua") {
-        return None;
+/// 解析脚本引用为**受约束**的文件路径；`Ok(None)` 表示内联脚本。
+///
+/// 判定与网关加载侧共用 [`parse_script_ref`]（以 `.lua` 结尾 = 文件脚本），并强制
+/// 相对路径归一到 `plugins_dir`、绝对路径必须落在 `plugins_dir` 之内。
+///
+/// 历史缺陷：旧实现把绝对 `script_ref` 原样放行，`plugin_read_script` 还有一条
+/// 「只要 `Path::exists()` 就读」的兜底——等于任意文件读取原语；配合
+/// `plugin_write_script` 即任意文件写入。同目录 `trace.rs` 早有 `resolve_within`
+/// 做包含性校验，此处缺失属遗漏。
+fn script_file(state: &ManagedState, script_ref: &str) -> CmdResult<Option<PathBuf>> {
+    match parse_script_ref(script_ref, Some(state.paths.plugins_dir.as_path())) {
+        ScriptRef::File(p) => Ok(Some(p)),
+        ScriptRef::Inline(_) => Ok(None),
+        ScriptRef::Rejected(p) => Err(format!("插件脚本路径越出插件目录: {p}").into()),
     }
-    let p = Path::new(trimmed);
-    if p.is_absolute() {
-        return Some(p.to_path_buf());
-    }
-    let in_plugins = state.paths.plugins_dir.join(p);
-    if in_plugins.exists() {
-        return Some(in_plugins);
-    }
-    if p.exists() {
-        return Some(p.to_path_buf());
-    }
-    // 尚不存在：归一到 plugins_dir 下
-    Some(in_plugins)
 }
 
 /// 列出全部插件。
@@ -66,25 +62,23 @@ pub fn plugin_read_script(state: State<'_, Arc<ManagedState>>, name: String) -> 
         .db
         .get_plugin(&name)?
         .ok_or_else(|| format!("插件不存在: {name}"))?;
-    if let Some(file) = resolve_script_file(&state, &rec.script_ref) {
-        if file.exists() {
-            return Ok(std::fs::read_to_string(&file).map_err(|e| e.to_string())?);
+    match script_file(&state, &rec.script_ref)? {
+        Some(file) => {
+            if file.is_file() {
+                Ok(std::fs::read_to_string(&file).map_err(|e| e.to_string())?)
+            } else {
+                Ok(String::new()) // 文件脚本但尚未落盘
+            }
         }
-        return Ok(String::new()); // 文件脚本但尚未落盘
-    }
-    // 兼容：script_ref 为其它既存路径则读文件，否则作内联脚本
-    let p = Path::new(&rec.script_ref);
-    if p.exists() {
-        Ok(std::fs::read_to_string(p).unwrap_or_else(|_| rec.script_ref.clone()))
-    } else {
-        Ok(rec.script_ref)
+        None => Ok(rec.script_ref), // 内联脚本
     }
 }
 
 /// 写入（保存）插件脚本内容，供前端在线编辑。
 ///
-/// 文件脚本（`.lua`）：写入解析出的路径（必要时创建父目录），并把 `script_ref`
-/// 规范化为绝对路径，确保网关按原样读取时能定位；内联脚本：直接写回记录。
+/// 文件脚本（`.lua`）：写入**已收敛到 `plugins_dir` 内**的路径（必要时创建父目录），
+/// 并把 `script_ref` 规范化为该绝对路径，确保网关按同一路径读取；内联脚本：直接写回
+/// 记录。越出 `plugins_dir` 的引用由 [`script_file`] 判为错误，写不到目录外。
 #[tauri::command]
 pub fn plugin_write_script(
     state: State<'_, Arc<ManagedState>>,
@@ -95,19 +89,22 @@ pub fn plugin_write_script(
         .db
         .get_plugin(&name)?
         .ok_or_else(|| format!("插件不存在: {name}"))?;
-    if let Some(file) = resolve_script_file(&state, &rec.script_ref) {
-        if let Some(parent) = file.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    match script_file(&state, &rec.script_ref)? {
+        Some(file) => {
+            if let Some(parent) = file.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&file, content).map_err(|e| e.to_string())?;
+            let abs = file.to_string_lossy().to_string();
+            if rec.script_ref != abs {
+                rec.script_ref = abs;
+                state.db.upsert_plugin(&rec)?;
+            }
         }
-        std::fs::write(&file, content).map_err(|e| e.to_string())?;
-        let abs = file.to_string_lossy().to_string();
-        if rec.script_ref != abs {
-            rec.script_ref = abs;
+        None => {
+            rec.script_ref = content;
             state.db.upsert_plugin(&rec)?;
         }
-    } else {
-        rec.script_ref = content;
-        state.db.upsert_plugin(&rec)?;
     }
     Ok(())
 }

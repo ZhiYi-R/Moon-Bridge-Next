@@ -16,17 +16,18 @@ use std::time::Instant;
 use axum::body::Body;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use moonbridge_core::{Protocol, Usage};
+use moonbridge_core::{CoreRequest, Protocol, Usage};
 use moonbridge_protocol::{
     RawBody, RawMessage, RawStage, RawVerdict, ReqCtx, UpstreamRequest,
 };
 use serde_json::Value;
 
 use crate::error::{GatewayError, Result};
-use crate::router::Router;
+use crate::router::{ResolvedRoute, Router};
+use crate::session;
 use crate::state::AppState;
 use crate::stream;
-use crate::trace::{self, TraceRecord};
+use crate::trace::{self, TraceRecord, TraceUsage};
 use crate::upstream;
 use crate::usage;
 
@@ -63,9 +64,14 @@ pub async fn handle_request(
     };
     match state.hooks.on_client_request_raw(&ctx, &mut inbound).await? {
         RawVerdict::ShortCircuit { status, headers, body } => {
-            return Ok(short_circuit(status, headers, body));
+            let trace = pre_route_trace(&ctx, &inbound);
+            return Ok(answered(
+                &state, &ctx, start, trace, Usage::default(), status, headers, body,
+            ));
         }
-        RawVerdict::Abort { message } => return Err(GatewayError::Other(message)),
+        RawVerdict::Abort { message } => {
+            return Err(aborted(&state, &ctx, start, pre_route_trace(&ctx, &inbound), message))
+        }
         RawVerdict::Pass => {}
     }
     let raw_body = take_json_body(inbound.body, client_protocol)?;
@@ -79,6 +85,9 @@ pub async fn handle_request(
         .ok_or_else(|| GatewayError::Route(format!("无入口 Adapter 支持协议 {client_protocol}")))?;
     let mut core_req = client_adapter.to_core_request(&ctx, raw_body).await?;
     ctx.stream = core_req.stream;
+
+    // ── 会话水印：入站即剥除，剥完才往下走（上游与插件都看不到 marker）──
+    let session_tag = resolve_session(&state, &mut ctx, &mut core_req).await;
 
     // ── 路由解析 ──
     let resolved = Router::resolve(&state.db, &core_req.model_alias)?;
@@ -124,18 +133,29 @@ pub async fn handle_request(
             .await?
         {
             RawVerdict::ShortCircuit { status, headers, body } => {
-                return Ok(short_circuit(status, headers, body));
+                return Ok(answered(
+                    &state,
+                    &ctx,
+                    start,
+                    outbound_trace(&ctx, &outbound, &resolved, &client_request_snapshot),
+                    Usage::default(),
+                    status,
+                    headers,
+                    body,
+                ));
             }
-            RawVerdict::Abort { message } => return Err(GatewayError::Other(message)),
+            RawVerdict::Abort { message } => {
+                return Err(aborted(
+                    &state,
+                    &ctx,
+                    start,
+                    outbound_trace(&ctx, &outbound, &resolved, &client_request_snapshot),
+                    message,
+                ))
+            }
             RawVerdict::Pass => {}
         }
-        if let Some(url) = outbound.url {
-            u.url = url;
-        }
-        u.headers = outbound.headers;
-        if let RawBody::Json { value } = outbound.body {
-            u.body = value;
-        }
+        apply_outbound(&mut u, outbound)?;
 
         match upstream::send(&state.client, &u).await {
             Ok(r) => {
@@ -180,30 +200,20 @@ pub async fn handle_request(
     let status = resp.status();
 
     // ── trace 骨架（请求侧；响应侧回程时补齐）──
-    let mut trace = TraceRecord {
-        request_id: ctx.request_id.clone(),
-        created_at: trace::now_ms(),
-        session_id: ctx.session_id.clone(),
-        model_alias: ctx.model_alias.clone(),
-        upstream_model: resolved.upstream_model.clone(),
-        provider_key: resolved.provider_key.clone(),
-        client_protocol: ctx.client_protocol.to_string(),
-        upstream_protocol: used_protocol.to_string(),
-        stream: core_req.stream,
-        status: "ok".to_string(),
-        latency_ms: 0,
-        usage: Usage::default(),
-        client_request: client_request_snapshot,
-        upstream_request: serde_json::json!({
+    let mut trace = new_trace(
+        &ctx,
+        client_request_snapshot,
+        core_req.stream,
+        resolved.upstream_model.clone(),
+        resolved.provider_key.clone(),
+        Some(used_protocol),
+        serde_json::json!({
             "method": up.method.to_string(),
             "url": up.url,
             "headers": up.headers,
             "body": up.body,
         }),
-        upstream_response: Value::Null,
-        client_response: Value::Null,
-        error: None,
-    };
+    );
 
     // ── 发送上游 ──（已在故障转移循环内完成）
     if !status.is_success() {
@@ -213,20 +223,9 @@ pub async fn handle_request(
             .transform_error(&ctx, &text)
             .await
             .unwrap_or_else(|_| text.clone());
-        usage::record(
-            &state.db,
-            &ctx,
-            &resolved.upstream_model,
-            &Usage::default(),
-            "error",
-            Some(&msg),
-            start,
-            None,
-        );
         trace.status = "error".to_string();
         trace.error = Some(msg.clone());
-        trace.latency_ms = start.elapsed().as_millis() as u64;
-        trace::write(state.config.trace_dir.as_deref(), &trace);
+        finish_audit(&state, &ctx, &mut trace, start, &Usage::default(), "error");
         return Err(GatewayError::Upstream {
             status: status.as_u16(),
             message: msg,
@@ -242,13 +241,59 @@ pub async fn handle_request(
             resolved.upstream_model,
             start,
             trace,
+            session_tag,
         ))
     } else {
-        non_stream(state, ctx, resp, used_protocol, start, trace).await
+        non_stream(state, ctx, resp, used_protocol, start, trace, session_tag).await
     }
 }
 
-/// 非流式回程编排。`upstream_protocol` 为实际命中端点的协议。
+/// 解析本次请求归属的会话，并**就地剥除**请求里的所有 marker。
+///
+/// 优先级：外部显式身份（body `session_id` / `previous_response_id` /
+/// `X-Codex-Window-Id`，已由 `handlers::extract_session` 填进 `ctx`）> 请求带回的
+/// marker（命中活跃表）> 新分配。外部身份更可信，故两者冲突时以它为准。
+///
+/// 返回本次响应应附加的短 tag；水印关闭时返回 `None`（**但仍照剥 marker**——
+/// 客户端可能带着开启期间留下的历史，不该让它污染上游 prompt）。
+async fn resolve_session(
+    state: &Arc<AppState>,
+    ctx: &mut ReqCtx,
+    req: &mut CoreRequest,
+) -> Option<String> {
+    let carried = session::extract_from_request(req);
+
+    if !state.config.session_marker {
+        return None;
+    }
+    // 外部身份优先：登记（幂等）后按同一 tag 复用
+    if let Some(id) = ctx.session_id.clone() {
+        let (tag, evicted) = state.sessions.note_external(&id);
+        forget_sessions(state, evicted).await;
+        return Some(tag);
+    }
+    if let Some(tag) = carried.as_deref() {
+        if let Some(id) = state.sessions.lookup(tag) {
+            ctx.session_id = Some(id);
+            return Some(tag.to_string());
+        }
+        // tag 形似但不在活跃表：被淘汰过或网关重启 ⇒ 按新会话处理（陈旧 tag 已被剥净）
+    }
+    let (id, evicted, tag) = state.sessions.new_session();
+    ctx.session_id = Some(id);
+    forget_sessions(state, evicted).await;
+    Some(tag)
+}
+
+/// 会话被淘汰时顺手清理插件侧的会话状态（`mb.session` 的桶）。
+async fn forget_sessions(state: &Arc<AppState>, evicted: Vec<String>) {
+    for id in evicted {
+        state.hooks.forget_session(&id).await;
+    }
+}
+
+/// 非流式回程编排。`upstream_protocol` 为实际命中端点的协议；
+/// `session_tag` 为本次要附加的会话水印（`None` = 不打标）。
 async fn non_stream(
     state: Arc<AppState>,
     ctx: ReqCtx,
@@ -256,6 +301,7 @@ async fn non_stream(
     upstream_protocol: Protocol,
     start: Instant,
     mut trace: TraceRecord,
+    session_tag: Option<String>,
 ) -> Result<Response> {
     let provider_adapter = state
         .registry
@@ -297,9 +343,14 @@ async fn non_stream(
         .await?
     {
         RawVerdict::ShortCircuit { status, headers, body } => {
-            return Ok(short_circuit(status, headers, body));
+            trace.upstream_response = body_snapshot(&inbound_resp.body);
+            return Ok(answered(
+                &state, &ctx, start, trace, Usage::default(), status, headers, body,
+            ));
         }
-        RawVerdict::Abort { message } => return Err(GatewayError::Other(message)),
+        RawVerdict::Abort { message } => {
+            return Err(aborted(&state, &ctx, start, trace, message))
+        }
         RawVerdict::Pass => {}
     }
     let body_value = take_json_body(inbound_resp.body, upstream_protocol)?;
@@ -309,6 +360,21 @@ async fn non_stream(
     let mut core_resp = provider_adapter.to_core_response(&ctx, body_value).await?;
     // ── [CORE] 响应钩子 ──
     state.hooks.on_response(&ctx, &mut core_resp).await?;
+    // ── [CORE] 内容块过滤（响应钩子之后：插件先看全貌，再逐块决定去留）──
+    if !core_resp.content.is_empty() {
+        let mut kept = Vec::with_capacity(core_resp.content.len());
+        for mut block in std::mem::take(&mut core_resp.content) {
+            if state.hooks.filter_content(&ctx, &mut block).await? {
+                continue;
+            }
+            kept.push(block);
+        }
+        core_resp.content = kept;
+    }
+    // ── 会话水印：只给纯文本输出打标（含 tool_use 的轮次由 append_to_response 自行跳过）──
+    if let Some(tag) = &session_tag {
+        session::append_to_response(&mut core_resp, tag);
+    }
     let usage_snapshot = core_resp.usage;
 
     // ── Core → 入口协议 ──
@@ -331,28 +397,20 @@ async fn non_stream(
         .await?
     {
         RawVerdict::ShortCircuit { status, headers, body } => {
-            return Ok(short_circuit(status, headers, body));
+            return Ok(answered(
+                &state, &ctx, start, trace, usage_snapshot, status, headers, body,
+            ));
         }
-        RawVerdict::Abort { message } => return Err(GatewayError::Other(message)),
+        RawVerdict::Abort { message } => {
+            return Err(aborted(&state, &ctx, start, trace, message))
+        }
         RawVerdict::Pass => {}
     }
     let final_body = outbound_resp.body.as_json().cloned().unwrap_or(Value::Null);
 
-    usage::record(
-        &state.db,
-        &ctx,
-        &trace.upstream_model,
-        &usage_snapshot,
-        "ok",
-        None,
-        start,
-        None, // 非流式无 TTFT 语义
-    );
-
     trace.client_response = final_body.clone();
-    trace.usage = usage_snapshot;
-    trace.latency_ms = start.elapsed().as_millis() as u64;
-    trace::write(state.config.trace_dir.as_deref(), &trace);
+    trace.usage = usage_snapshot.into();
+    finish_audit(&state, &ctx, &mut trace, start, &usage_snapshot, "ok");
 
     Ok(axum::Json(final_body).into_response())
 }
@@ -375,6 +433,195 @@ fn take_json_body(body: RawBody, protocol: Protocol) -> Result<Value> {
     }
 }
 
+/// 把插件对出站报文的改写**全部**回读到 [`UpstreamRequest`]。
+///
+/// 历史缺陷：这里只回读 url / headers / JSON body。`method` 明明被写进了递给 Lua 的
+/// 表里（`convert.rs`），却从不回读 ⇒ 插件改 `msg.method` 静默无效；插件把 body 改写成
+/// `Text` 同样被 `if let RawBody::Json` 一句丢弃 ⇒ 改写静默失效却照常发请求。
+///
+/// 上游传输层只承载 JSON（`upstream::send` 走 `req.json`），所以：`Text` 按其是否为合法
+/// JSON 解析后采用，`Binary` 与解析失败的 `Text` 一律显式报错（不再假装成功），`Empty`
+/// 保持 Adapter 原 body（要发 null 请写回 `Json(Value::Null)`）。
+fn apply_outbound(up: &mut UpstreamRequest, outbound: RawMessage) -> Result<()> {
+    if let Some(m) = &outbound.method {
+        up.method = http::Method::from_bytes(m.as_bytes())
+            .map_err(|_| GatewayError::Other(format!("插件写回非法 HTTP method: {m}")))?;
+    }
+    if let Some(url) = outbound.url {
+        up.url = url;
+    }
+    up.headers = outbound.headers;
+    match outbound.body {
+        RawBody::Json { value } => up.body = value,
+        RawBody::Text { text } => {
+            up.body = serde_json::from_str(&text).map_err(|e| {
+                GatewayError::Other(format!(
+                    "插件写回的 body 文本不是合法 JSON，无法经 JSON 通道发往上游: {e}"
+                ))
+            })?;
+        }
+        RawBody::Binary { .. } => {
+            return Err(GatewayError::Other(
+                "上游请求只支持 JSON body，插件不得写回二进制".to_string(),
+            ));
+        }
+        RawBody::Empty => {}
+    }
+    Ok(())
+}
+
+/// 构造 trace 骨架。路由前后的字段差异用参数表达：路由前上游信息尚不存在 ⇒ 传空串 / `None` / `Null`。
+#[allow(clippy::too_many_arguments)]
+fn new_trace(
+    ctx: &ReqCtx,
+    client_request: Value,
+    stream: bool,
+    upstream_model: String,
+    provider_key: String,
+    upstream_protocol: Option<Protocol>,
+    upstream_request: Value,
+) -> TraceRecord {
+    TraceRecord {
+        request_id: ctx.request_id.clone(),
+        created_at: trace::now_ms(),
+        session_id: ctx.session_id.clone(),
+        model_alias: ctx.model_alias.clone(),
+        upstream_model,
+        provider_key,
+        client_protocol: ctx.client_protocol.to_string(),
+        upstream_protocol: upstream_protocol
+            .map(|p| p.to_string())
+            .unwrap_or_default(),
+        stream,
+        status: "ok".to_string(),
+        latency_ms: 0,
+        ttft_ms: None,
+        usage: TraceUsage::default(),
+        client_request,
+        upstream_request,
+        upstream_response: Value::Null,
+        client_response: Value::Null,
+        error: None,
+    }
+}
+
+/// 路由之前（入站请求钩子阶段）的裸 trace：只有客户端请求侧信息。
+///
+/// `stream` 从（可能已被入站钩子改写的）请求体里读，读不到按非流式记。
+fn pre_route_trace(ctx: &ReqCtx, inbound: &RawMessage) -> TraceRecord {
+    let json = inbound.body.as_json().cloned().unwrap_or(Value::Null);
+    let stream = json
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    new_trace(
+        ctx,
+        json,
+        stream,
+        String::new(),
+        String::new(),
+        None,
+        Value::Null,
+    )
+}
+
+/// 出站请求阶段（尚未发送）的 trace：路由已定，上游侧只有出站报文。
+fn outbound_trace(
+    ctx: &ReqCtx,
+    outbound: &RawMessage,
+    resolved: &ResolvedRoute,
+    client_request: &Value,
+) -> TraceRecord {
+    new_trace(
+        ctx,
+        client_request.clone(),
+        ctx.stream,
+        resolved.upstream_model.clone(),
+        resolved.provider_key.clone(),
+        Some(outbound.protocol),
+        serde_json::json!({
+            "method": outbound.method,
+            "url": outbound.url,
+            "headers": outbound.headers,
+            "body": body_snapshot(&outbound.body),
+        }),
+    )
+}
+
+/// `RawBody` → trace 快照。非 JSON 也尽力留痕（不追求可反解析）。
+fn body_snapshot(body: &RawBody) -> Value {
+    match body {
+        RawBody::Json { value } => value.clone(),
+        RawBody::Text { text } => Value::String(text.clone()),
+        RawBody::Binary { data } => serde_json::json!({ "binary_bytes": data.len() }),
+        RawBody::Empty => Value::Null,
+    }
+}
+
+/// 收尾落审计：一行 usage + 一份 trace 文件。
+///
+/// `trace` 的 `status` 与各报文快照由调用方**事先填好**，错误消息取 `trace.error`；
+/// `usage_status` 单独传是因为二者的取值口径不同——例如插件以 200 短路直答时，
+/// trace 记 `short_circuit`（说明是谁答的），usage 记 `ok`（对客户端而言确实成功）。
+fn finish_audit(
+    state: &Arc<AppState>,
+    ctx: &ReqCtx,
+    trace: &mut TraceRecord,
+    start: Instant,
+    usage: &Usage,
+    usage_status: &str,
+) {
+    usage::record(
+        &state.db,
+        ctx,
+        &trace.upstream_model,
+        usage,
+        usage_status,
+        trace.error.as_deref(),
+        start,
+        None,
+    );
+    trace.latency_ms = start.elapsed().as_millis() as u64;
+    trace::write(state.config.trace_dir.as_deref(), trace);
+}
+
+/// 插件短路直答：**照常**落 usage 与 trace 后，把插件给的报文回给客户端。
+///
+/// 历史缺陷是这些路径直接 `return`，插件代答的请求在用量统计与 Traces 页完全不可见。
+#[allow(clippy::too_many_arguments)]
+fn answered(
+    state: &Arc<AppState>,
+    ctx: &ReqCtx,
+    start: Instant,
+    mut trace: TraceRecord,
+    usage: Usage,
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: RawBody,
+) -> Response {
+    trace.status = "short_circuit".to_string();
+    trace.error = Some(format!("插件短路直答（HTTP {status}）"));
+    trace.client_response = body_snapshot(&body);
+    let usage_status = if status < 400 { "ok" } else { "error" };
+    finish_audit(state, ctx, &mut trace, start, &usage, usage_status);
+    short_circuit(status, headers, body)
+}
+
+/// 插件主动中止：同样留下审计痕迹，再把错误交回上层。返回错误而非 `()`，
+/// 让调用点写成 `return Err(aborted(..))`，不给人「忘了落审计」留空间。
+fn aborted(
+    state: &Arc<AppState>,
+    ctx: &ReqCtx,
+    start: Instant,
+    mut trace: TraceRecord,
+    message: String,
+) -> GatewayError {
+    trace.status = "aborted".to_string();
+    trace.error = Some(message.clone());
+    finish_audit(state, ctx, &mut trace, start, &Usage::default(), "error");
+    GatewayError::Other(message)
+}
+
 /// 由报文钩子的短路判定构造直接应答。
 fn short_circuit(status: u16, headers: Vec<(String, String)>, body: RawBody) -> Response {
     let code = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
@@ -395,4 +642,107 @@ fn short_circuit(status: u16, headers: Vec<(String, String)>, body: RawBody) -> 
         builder = builder.header(k.as_str(), v.as_str());
     }
     builder.body(Body::from(body_bytes)).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn upstream_req() -> UpstreamRequest {
+        UpstreamRequest {
+            method: http::Method::POST,
+            url: "https://up.example/v1/messages".into(),
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: json!({ "model": "original" }),
+            stream: false,
+        }
+    }
+
+    /// 由 Adapter 产出的请求构造出站报文（与 dispatch 里的组装方式一致）。
+    fn outbound_from(up: &UpstreamRequest) -> RawMessage {
+        RawMessage {
+            stage: RawStage::UpstreamRequest,
+            protocol: Protocol::Anthropic,
+            provider: Some("p".into()),
+            method: Some(up.method.to_string()),
+            url: Some(up.url.clone()),
+            status: None,
+            headers: up.headers.clone(),
+            body: RawBody::json(up.body.clone()),
+        }
+    }
+
+    /// 回归：插件对 method 的改写必须生效。旧代码把 method 写进 Lua 表却从不回读，
+    /// 改 `msg.method` 静默无效。
+    #[test]
+    fn reads_back_method() {
+        let mut u = upstream_req();
+        let mut ob = outbound_from(&u);
+        ob.method = Some("PUT".into());
+        assert!(apply_outbound(&mut u, ob).is_ok());
+        assert_eq!(u.method, http::Method::PUT);
+    }
+
+    #[test]
+    fn url_and_headers_and_json_body_are_read_back() {
+        let mut u = upstream_req();
+        let mut ob = outbound_from(&u);
+        ob.url = Some("https://other.example/rewritten".into());
+        ob.headers = vec![("x-tapped".into(), "1".into())];
+        ob.body = RawBody::json(json!({ "model": "rewritten" }));
+        assert!(apply_outbound(&mut u, ob).is_ok());
+        assert_eq!(u.url, "https://other.example/rewritten");
+        assert_eq!(u.headers, vec![("x-tapped".into(), "1".into())]);
+        assert_eq!(u.body["model"], "rewritten");
+    }
+
+    /// 非法 method 必须报错，而不是悄悄按原方法发出。
+    #[test]
+    fn invalid_method_is_rejected() {
+        let mut u = upstream_req();
+        let mut ob = outbound_from(&u);
+        ob.method = Some("BAD METHOD".into());
+        assert!(apply_outbound(&mut u, ob).is_err());
+    }
+
+    /// 插件把 body 重写成文本：是合法 JSON 就采用——旧代码直接丢弃。
+    #[test]
+    fn text_body_is_accepted_when_it_is_json() {
+        let mut u = upstream_req();
+        let mut ob = outbound_from(&u);
+        ob.body = RawBody::Text {
+            text: r#"{"model":"from-text"}"#.into(),
+        };
+        assert!(apply_outbound(&mut u, ob).is_ok());
+        assert_eq!(u.body["model"], "from-text");
+    }
+
+    /// 上游只走 JSON 通道：非 JSON 文本与二进制必须显式失败，不能假装改写成功。
+    #[test]
+    fn non_json_and_binary_body_are_rejected() {
+        let mut u = upstream_req();
+        let mut ob = outbound_from(&u);
+        ob.body = RawBody::Text {
+            text: "not json at all".into(),
+        };
+        assert!(apply_outbound(&mut u, ob).is_err(), "非 JSON 文本应报错");
+        assert_eq!(u.body["model"], "original", "报错时不得留下半成品改写");
+
+        let mut ob2 = outbound_from(&u);
+        ob2.body = RawBody::Binary {
+            data: vec![1, 2, 3],
+        };
+        assert!(apply_outbound(&mut u, ob2).is_err(), "二进制应报错");
+    }
+
+    /// `Empty` 表示插件没写 body，保持 Adapter 原 body（而非发 null）。
+    #[test]
+    fn empty_body_keeps_adapter_body() {
+        let mut u = upstream_req();
+        let mut ob = outbound_from(&u);
+        ob.body = RawBody::Empty;
+        assert!(apply_outbound(&mut u, ob).is_ok());
+        assert_eq!(u.body["model"], "original");
+    }
 }

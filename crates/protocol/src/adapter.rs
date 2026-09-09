@@ -70,6 +70,10 @@ pub trait ClientAdapter: Send + Sync {
     /// 客户端原始请求 JSON → CoreRequest。
     async fn to_core_request(&self, ctx: &ReqCtx, raw: Value) -> Result<CoreRequest>;
     /// CoreResponse → 客户端协议响应 JSON。
+    //
+    // `from_core_*` / `to_core_*` 表达的是 **Core ↔ 协议的转换方向**、与配对方法对称，
+    // 不是构造函数；且 Adapter 经 `Arc<dyn …>` 动态派发，`&self` 无法去除。
+    #[allow(clippy::wrong_self_convention)]
     async fn from_core_response(&self, ctx: &ReqCtx, resp: CoreResponse) -> Result<Value>;
 }
 
@@ -88,6 +92,9 @@ pub trait ClientStreamAdapter: Send + Sync {
 pub trait ProviderAdapter: Send + Sync {
     fn protocol(&self) -> Protocol;
     /// CoreRequest → 上游待发送请求（含 URL/headers/body）。
+    ///
+    /// 命名口径同上（转换方向，非构造函数；`&self` 为动态派发所必需）。
+    #[allow(clippy::wrong_self_convention)]
     async fn from_core_request(
         &self,
         ctx: &ReqCtx,
