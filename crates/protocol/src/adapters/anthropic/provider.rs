@@ -65,9 +65,21 @@ pub(super) fn block_to_anthropic(block: &ContentBlock) -> Option<Value> {
             Some(obj)
         }
         ContentBlock::Reasoning { text, signature } => {
+            // redacted_thinking 的凭据在 data 字段、无可读 thinking：text 空且
+            // signature 有值时按原形态回传（Anthropic 要求 redacted 原样带回）
+            if text.is_empty() {
+                if let Some(sig) = signature {
+                    if !sig.is_empty() {
+                        return Some(json!({ "type": "redacted_thinking", "data": sig }));
+                    }
+                }
+                return None; // 空推理且无凭据，无回传价值
+            }
             let mut obj = json!({ "type": "thinking", "thinking": text });
             if let Some(sig) = signature {
-                obj["signature"] = json!(sig);
+                if !sig.is_empty() {
+                    obj["signature"] = json!(sig);
+                }
             }
             Some(obj)
         }
@@ -113,9 +125,15 @@ pub(super) fn anthropic_to_block(v: &Value) -> Option<ContentBlock> {
                 is_error: v.get("is_error").and_then(|x| x.as_bool()).unwrap_or(false),
             })
         }
-        "thinking" | "redacted_thinking" => Some(ContentBlock::Reasoning {
+        "thinking" => Some(ContentBlock::Reasoning {
             text: v.get("thinking").and_then(|t| t.as_str()).unwrap_or_default().to_string(),
             signature: v.get("signature").and_then(|s| s.as_str()).map(|s| s.to_string()),
+        }),
+        // redacted_thinking：凭据在 data 字段（无可读 thinking）→ signature 承载，
+        // 多轮回传时原样还原，丢失会 400
+        "redacted_thinking" => Some(ContentBlock::Reasoning {
+            text: String::new(),
+            signature: v.get("data").and_then(|s| s.as_str()).map(|s| s.to_string()),
         }),
         _ => None,
     }
@@ -359,6 +377,24 @@ pub(crate) fn messages_for_test(req: &CoreRequest) -> Vec<Value> {
 mod tests {
     use super::*;
     use moonbridge_core::{Message, Reasoning};
+
+    /// redacted_thinking：data 凭据 → signature，回传时还原 redacted 形态。
+    #[test]
+    fn redacted_thinking_roundtrips() {
+        let block = json!({ "type": "redacted_thinking", "data": "ENC" });
+        let core = anthropic_to_block(&block).unwrap();
+        match &core {
+            ContentBlock::Reasoning { text, signature: Some(enc) } => {
+                assert_eq!(text, "");
+                assert_eq!(enc, "ENC");
+            }
+            other => panic!("expected reasoning with credential, got {other:?}"),
+        }
+        let back = block_to_anthropic(&core).unwrap();
+        assert_eq!(back["type"], "redacted_thinking");
+        assert_eq!(back["data"], "ENC");
+    }
+
 
     fn endpoint() -> ProviderEndpoint {
         ProviderEndpoint {

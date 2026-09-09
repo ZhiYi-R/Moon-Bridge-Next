@@ -180,6 +180,8 @@ impl ClientStreamAdapter for GoogleGenAiAdapter {
                         out.push(gemini_chunk(json!([{ "text": text }]), None, None));
                     }
                 }
+                // Gemini 流式无凭据承载位（thoughtSignature 是非流式 part 级字段）
+                StreamDelta::ReasoningSignature { .. } => {}
                 StreamDelta::ToolInput { .. } => {}
             },
             CoreStreamEvent::BlockStop { .. } => {}

@@ -125,7 +125,20 @@ pub fn core_to_contents(messages: &[Message]) -> Vec<Value> {
                         "functionResponse": { "name": name, "response": { "result": text_of(content) } }
                     }));
                 }
-                ContentBlock::Reasoning { .. } => {}
+                ContentBlock::Reasoning { text, signature } => {
+                    // 历史 thought 回传：Gemini 2.5 多轮 function calling 要求
+                    // thoughtSignature 原样带回（缺失会被拒或退化）。
+                    let mut part = json!({ "thought": true });
+                    if !text.is_empty() {
+                        part["text"] = json!(text);
+                    }
+                    if let Some(sig) = signature {
+                        if !sig.is_empty() {
+                            part["thoughtSignature"] = json!(sig);
+                        }
+                    }
+                    parts.push(part);
+                }
             }
         }
         if !parts.is_empty() {
@@ -239,10 +252,18 @@ pub fn core_to_parts(content: &[ContentBlock]) -> Vec<Value> {
                     parts.push(json!({ "inlineData": { "mimeType": media_type, "data": data } }));
                 }
             }
-            ContentBlock::Reasoning { text, .. } => {
+            ContentBlock::Reasoning { text, signature } => {
+                // thought part 回传：凭据（thoughtSignature）随 part 原样带回
+                let mut part = json!({ "thought": true });
                 if !text.is_empty() {
-                    parts.push(json!({ "text": text }));
+                    part["text"] = json!(text);
                 }
+                if let Some(sig) = signature {
+                    if !sig.is_empty() {
+                        part["thoughtSignature"] = json!(sig);
+                    }
+                }
+                parts.push(part);
             }
             ContentBlock::ToolResult { .. } => {}
         }
@@ -274,10 +295,26 @@ fn resp_to_text(v: &Value) -> String {
 /// 单个 Gemini part → 0..n 个 Core 内容块。
 pub fn part_to_blocks(p: &Value) -> Vec<ContentBlock> {
     let mut out = Vec::new();
+    let signature = p
+        .get("thoughtSignature")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let thought = p.get("thought").and_then(|v| v.as_bool()).unwrap_or(false);
     if let Some(t) = p.get("text").and_then(|v| v.as_str()) {
         if !t.is_empty() {
-            out.push(ContentBlock::text(t));
+            if thought {
+                // thought part：明文 + thoughtSignature（回传凭据）→ Reasoning 块
+                out.push(ContentBlock::Reasoning { text: t.to_string(), signature });
+            } else {
+                out.push(ContentBlock::text(t));
+            }
+        } else if let Some(sig) = signature {
+            // 无文本但带凭据的 part：凭据不能丢，否则多轮回传缺失
+            out.push(ContentBlock::Reasoning { text: String::new(), signature: Some(sig) });
         }
+    } else if let Some(sig) = signature {
+        out.push(ContentBlock::Reasoning { text: String::new(), signature: Some(sig) });
     }
     if let Some(fc) = p.get("functionCall") {
         let name = fc.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
@@ -465,6 +502,32 @@ pub fn usage_object(u: &Usage) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// thought part 的 thoughtSignature 凭据 round-trip。
+    #[test]
+    fn thought_signature_roundtrips() {
+        let part = json!({ "text": "thinking...", "thought": true, "thoughtSignature": "SIG" });
+        let blocks = part_to_blocks(&part);
+        match &blocks[0] {
+            ContentBlock::Reasoning { text, signature: Some(sig) } => {
+                assert_eq!(text, "thinking...");
+                assert_eq!(sig, "SIG");
+            }
+            other => panic!("expected reasoning, got {other:?}"),
+        }
+        // 历史回传：thoughtSignature 原样带回
+        let msgs = vec![Message {
+            role: Role::Assistant,
+            content: blocks,
+            ext: Default::default(),
+        }];
+        let contents = core_to_contents(&msgs);
+        let p = &contents[0]["parts"][0];
+        assert_eq!(p["thought"], true);
+        assert_eq!(p["thoughtSignature"], "SIG");
+        assert_eq!(p["text"], "thinking...");
+    }
+
 
     #[test]
     fn maps_finish_reasons() {

@@ -208,17 +208,32 @@ impl ClientAdapter for OpenAiResponsesAdapter {
                             });
                         }
                         Some("reasoning") => {
-                            // 历史 reasoning summary：转为 Reasoning 块挂到 assistant 消息
-                            let text = item
-                                .get("summary")
-                                .map(|s| s.to_string())
-                                .unwrap_or_default();
+                            // 历史 reasoning：明文取 summary[].text / content[].text，
+                            // encrypted_content 存入 signature（Reasoning.signature 语义
+                            // 即「不透明回传凭据」，与 Anthropic thinking 签名一致）。
+                            // 多轮 function-call 循环中缺失 reasoning item 会 400，
+                            // 即便无明文也要保留凭据。
+                            let mut text = String::new();
+                            for key in ["summary", "content"] {
+                                if let Some(arr) = item.get(key).and_then(|s| s.as_array()) {
+                                    for x in arr {
+                                        if let Some(t) = x.get("text").and_then(|t| t.as_str()) {
+                                            text.push_str(t);
+                                        }
+                                    }
+                                }
+                            }
+                            let signature = item
+                                .get("encrypted_content")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                                .filter(|s| !s.is_empty());
+                            if text.is_empty() && signature.is_none() {
+                                continue;
+                            }
                             req.messages.push(Message {
                                 role: Role::Assistant,
-                                content: vec![ContentBlock::Reasoning {
-                                    text,
-                                    signature: None,
-                                }],
+                                content: vec![ContentBlock::Reasoning { text, signature }],
                                 ext: Default::default(),
                             });
                         }
@@ -281,12 +296,18 @@ impl ClientAdapter for OpenAiResponsesAdapter {
                 ContentBlock::Text { text } => {
                     text_buf.push_str(text);
                 }
-                ContentBlock::Reasoning { text, .. } => {
-                    output.push(json!({
+                ContentBlock::Reasoning { text, signature } => {
+                    let mut item = json!({
                         "type": "reasoning",
                         "id": format!("rs_{}", { item_seq += 1; item_seq }),
                         "summary": [{ "type": "summary_text", "text": text }],
-                    }));
+                    });
+                    if let Some(enc) = signature {
+                        if !enc.is_empty() {
+                            item["encrypted_content"] = json!(enc);
+                        }
+                    }
+                    output.push(item);
                 }
                 ContentBlock::ToolUse {
                     id,

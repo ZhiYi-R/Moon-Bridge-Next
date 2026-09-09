@@ -91,7 +91,24 @@ impl ClientStreamAdapter for OpenAiChatAdapter {
                         json!({ "index": index, "function": { "arguments": partial_json } }),
                     ));
                 }
-                StreamDelta::Reasoning { .. } => {}
+                // 双写两种生态约定：DeepSeek（reasoning_content）与 OpenRouter/vLLM（reasoning）
+                StreamDelta::Reasoning { text } => {
+                    out.push(chat_chunk(
+                        model,
+                        json!({ "reasoning_content": text, "reasoning": text }),
+                        Value::Null,
+                    ));
+                }
+                // 凭据以 <mb-cot> 定界标记追加：客户端累积 reasoning_content 后
+                // 标记自然位于尾部，下一轮历史回传时由 split_mb_cot 解析还原
+                StreamDelta::ReasoningSignature { signature } => {
+                    let marker = format!("<mb-cot>{signature}</mb-cot>");
+                    out.push(chat_chunk(
+                        model,
+                        json!({ "reasoning_content": marker, "reasoning": marker }),
+                        Value::Null,
+                    ));
+                }
             },
             CoreStreamEvent::BlockStop { .. } => {}
             CoreStreamEvent::MessageDelta { stop_reason, usage } => {
@@ -167,6 +184,20 @@ impl ProviderStreamAdapter for OpenAiChatAdapter {
             }
         }
 
+        // 推理增量：DeepSeek 系 reasoning_content / OpenRouter 系 reasoning
+        if let Some(text) = delta
+            .get("reasoning_content")
+            .or_else(|| delta.get("reasoning"))
+            .and_then(|v| v.as_str())
+        {
+            if !text.is_empty() {
+                out.push(CoreStreamEvent::BlockDelta {
+                    index: 0,
+                    delta: StreamDelta::Reasoning { text: text.to_string() },
+                });
+            }
+        }
+
         if let Some(tcs) = delta.get("tool_calls").and_then(|v| v.as_array()) {
             for tc in tcs {
                 let index = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -229,6 +260,34 @@ mod tests {
         match &evs[0].data {
             RawBody::Text { text } => assert_eq!(text, "[DONE]"),
             other => panic!("expected [DONE] text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encodes_reasoning_delta_with_both_conventions() {
+        let adapter = OpenAiChatAdapter;
+        let mut ctx = ReqCtx::new("r1", Protocol::OpenAiChat);
+        ctx.model_alias = "m".to_string();
+        let evs = adapter
+            .encode(&ctx, &CoreStreamEvent::BlockDelta { index: 0, delta: StreamDelta::Reasoning { text: "think".into() } })
+            .unwrap();
+        let d = &evs[0].data.as_json().unwrap()["choices"][0]["delta"];
+        assert_eq!(d["reasoning_content"], "think", "DeepSeek 约定");
+        assert_eq!(d["reasoning"], "think", "OpenRouter/vLLM 约定");
+    }
+
+    #[test]
+    fn decodes_reasoning_content_from_upstream() {
+        let adapter = OpenAiChatAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::OpenAiChat);
+        for key in ["reasoning_content", "reasoning"] {
+            let evs = adapter
+                .decode(&ctx, &chunk(json!({"choices":[{"index":0,"delta":{key: "hmm"}}]})))
+                .unwrap();
+            match &evs[0] {
+                CoreStreamEvent::BlockDelta { delta: StreamDelta::Reasoning { text }, .. } => assert_eq!(text, "hmm"),
+                other => panic!("expected reasoning delta, got {other:?}"),
+            }
         }
     }
 

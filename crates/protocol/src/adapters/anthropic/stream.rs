@@ -127,7 +127,20 @@ impl ProviderStreamAdapter for AnthropicAdapter {
                             delta: StreamDelta::Reasoning { text: thinking.to_string() },
                         });
                     }
-                    // signature_delta 等暂不单独映射
+                    // 加密 CoT 回传凭据：必须在 content_block_stop 前到达客户端，
+                    // 否则多轮 thinking+tool_use 回传缺失 signature 会 400
+                    Some("signature_delta") => {
+                        let sig = delta
+                            .get("signature")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        if !sig.is_empty() {
+                            out.push(CoreStreamEvent::BlockDelta {
+                                index,
+                                delta: StreamDelta::ReasoningSignature { signature: sig.to_string() },
+                            });
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -223,6 +236,11 @@ impl ClientStreamAdapter for AnthropicAdapter {
                     StreamDelta::Reasoning { text } => {
                         json!({ "type": "thinking_delta", "thinking": text })
                     }
+                    // 加密 CoT 回传凭据：客户端在 content_block_stop 前累积进
+                    // thinking 块的 signature，下一轮原样回传
+                    StreamDelta::ReasoningSignature { signature } => {
+                        json!({ "type": "signature_delta", "signature": signature })
+                    }
                 };
                 out.push(client_sse(
                     "content_block_delta",
@@ -263,6 +281,33 @@ impl ClientStreamAdapter for AnthropicAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 上游 signature_delta → Core 凭据增量；入口 encode 还原 signature_delta。
+    #[test]
+    fn signature_delta_roundtrips() {
+        let adapter = AnthropicAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::Anthropic);
+        let evs = adapter.decode(&ctx, &chunk(json!({
+            "type": "content_block_delta", "index": 0,
+            "delta": { "type": "signature_delta", "signature": "SIG" }
+        }))).unwrap();
+        match &evs[0] {
+            CoreStreamEvent::BlockDelta { delta: StreamDelta::ReasoningSignature { signature }, .. } => {
+                assert_eq!(signature, "SIG");
+            }
+            other => panic!("expected signature delta, got {other:?}"),
+        }
+        let mut c = ReqCtx::new("r1", Protocol::Anthropic);
+        c.model_alias = "m".into();
+        let chunks = adapter.encode(&c, &CoreStreamEvent::BlockDelta {
+            index: 0,
+            delta: StreamDelta::ReasoningSignature { signature: "SIG".into() },
+        }).unwrap();
+        let d = &chunks[0].data.as_json().unwrap()["delta"];
+        assert_eq!(d["type"], "signature_delta");
+        assert_eq!(d["signature"], "SIG");
+    }
+
 
     fn chunk(v: Value) -> RawChunk {
         RawChunk::json(ChunkStage::UpstreamChunk, Protocol::Anthropic, None, v)

@@ -272,6 +272,10 @@ pub enum StreamDelta {
     Text { text: String },
     /// 推理文本增量。
     Reasoning { text: String },
+    /// 推理凭据增量：加密 CoT 的回传凭据（如 anthropic `signature_delta`、
+    /// responses reasoning item 的 `encrypted_content`）。不透明文本，
+    /// 仅供入口协议原样透传给客户端供下一轮回传，绝不是展示内容。
+    ReasoningSignature { signature: String },
     /// 工具入参增量（部分 JSON 字符串）。
     ToolInput { partial_json: String },
 }

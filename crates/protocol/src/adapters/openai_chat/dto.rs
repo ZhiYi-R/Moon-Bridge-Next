@@ -123,6 +123,26 @@ pub fn chat_to_core_messages(msgs: &[Value]) -> Vec<Message> {
             }];
         }
 
+        // assistant 消息的推理回传：reasoning_content（含 <mb-cot> 凭据标记）
+        // → Reasoning 块，凭据还原后供 responses 类上游多轮回传
+        if role == Role::Assistant {
+            let raw = m
+                .get("reasoning_content")
+                .or_else(|| m.get("reasoning"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let (reasoning_text, signature) = split_mb_cot(raw);
+            if !reasoning_text.is_empty() || signature.is_some() {
+                content.insert(
+                    0,
+                    ContentBlock::Reasoning {
+                        text: reasoning_text,
+                        signature,
+                    },
+                );
+            }
+        }
+
         out.push(Message {
             role,
             content,
@@ -288,6 +308,23 @@ pub fn unparse_tool_choice(tc: &ToolChoice) -> Value {
 pub fn chat_choice_to_core(choice: &Value) -> (Vec<ContentBlock>, Option<StopReason>) {
     let msg = choice.get("message").cloned().unwrap_or(Value::Null);
     let mut content = parse_chat_content(msg.get("content"));
+    // 推理文本（DeepSeek 系 reasoning_content / OpenRouter 系 reasoning）：
+    // 含 <mb-cot> 凭据标记时拆出凭据（嵌套网关场景），否则整体为展示明文；
+    // 置于正文之前，缺失时不产生空块
+    if let Some(raw) = msg
+        .get("reasoning_content")
+        .or_else(|| msg.get("reasoning"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        let (text, signature) = split_mb_cot(raw);
+        if !text.is_empty() || signature.is_some() {
+            content.insert(
+                0,
+                ContentBlock::Reasoning { text, signature },
+            );
+        }
+    }
     if let Some(tcs) = msg.get("tool_calls").and_then(|t| t.as_array()) {
         for tc in tcs {
             let fn_obj = tc.get("function").cloned().unwrap_or(Value::Null);
@@ -311,21 +348,67 @@ pub fn chat_choice_to_core(choice: &Value) -> (Vec<ContentBlock>, Option<StopRea
     (content, finish)
 }
 
+/// 凭据定界标记：凭据（不可读文本）以此包裹拼在 reasoning_content 尾部下发，
+/// 客户端回传 assistant 历史时随 reasoning_content 带回，回传侧解析还原。
+const MB_COT_OPEN: &str = "<mb-cot>";
+const MB_COT_CLOSE: &str = "</mb-cot>";
+
+/// 从 reasoning 字段拆出（展示明文，回传凭据）：凭据以 `<mb-cot>…</mb-cot>`
+/// 定界，无标记则整体视为明文（普通上游如 DeepSeek 的 reasoning_content）。
+fn split_mb_cot(s: &str) -> (String, Option<String>) {
+    let Some(start) = s.find(MB_COT_OPEN) else {
+        return (s.to_string(), None);
+    };
+    let Some(rel) = s[start..].find(MB_COT_CLOSE) else {
+        return (s.to_string(), None);
+    };
+    let enc = s[start + MB_COT_OPEN.len()..start + rel].trim().to_string();
+    let mut text = String::with_capacity(s.len());
+    text.push_str(&s[..start]);
+    text.push_str(&s[start + rel + MB_COT_CLOSE.len()..]);
+    let sig = if enc.is_empty() { None } else { Some(enc) };
+    (text.trim().to_string(), sig)
+}
+
 /// Core 内容块 → Chat 响应的 assistant message 对象。
+///
+/// Reasoning 下发：`reasoning_content`/`reasoning`（明文展示，双写两种生态约定）；
+/// 凭据（不可读文本）以 `<mb-cot>…</mb-cot>` 定界标记拼在字段尾部——chat 协议
+/// 无凭据承载字段、tool result 也无法由响应侧闭合，reasoning_content 是
+/// assistant 消息上唯一可控的搭车位，客户端回传历史时凭据随之返回。
 pub fn core_to_chat_response_message(content: &[ContentBlock]) -> Value {
     let mut tool_calls = Vec::new();
     let mut text_parts: Vec<ContentBlock> = Vec::new();
+    let mut reasoning_parts: Vec<&str> = Vec::new();
+    let mut credential: Option<&str> = None;
     for b in content {
         match b {
             ContentBlock::ToolUse { id, name, input, .. } => tool_calls.push(json!({
                 "id": id, "type": "function",
                 "function": { "name": name, "arguments": input.to_string() },
             })),
-            ContentBlock::Reasoning { .. } => {}
+            ContentBlock::Reasoning { text, signature } => {
+                if !text.is_empty() {
+                    reasoning_parts.push(text);
+                }
+                if signature.as_deref().is_some_and(|s| !s.is_empty()) {
+                    credential = signature.as_deref();
+                }
+            }
             other => text_parts.push(other.clone()),
         }
     }
     let mut msg = json!({ "role": "assistant", "content": text_of(&text_parts) });
+    let mut reasoning = reasoning_parts.concat();
+    if let Some(enc) = credential {
+        reasoning.push_str(MB_COT_OPEN);
+        reasoning.push_str(enc);
+        reasoning.push_str(MB_COT_CLOSE);
+    }
+    if !reasoning.is_empty() {
+        msg["reasoning_content"] = json!(reasoning);
+        msg["reasoning"] = json!(reasoning);
+    }
     if !tool_calls.is_empty() {
         msg["tool_calls"] = json!(tool_calls);
     }
@@ -364,4 +447,102 @@ pub fn usage_object(u: &Usage) -> Value {
 /// 便捷取字段（供 client/provider 复用）。
 pub fn str_field(v: &Value, key: &str) -> String {
     s(v, key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 上游非流式 message.reasoning_content / reasoning → Reasoning 块（置于正文前）。
+    #[test]
+    fn chat_choice_to_core_carries_reasoning() {
+        let choice = json!({
+            "message": {
+                "role": "assistant",
+                "content": "pong",
+                "reasoning_content": "let me think"
+            },
+            "finish_reason": "stop"
+        });
+        let (content, finish) = chat_choice_to_core(&choice);
+        assert_eq!(finish, Some(StopReason::EndTurn));
+        assert_eq!(content.len(), 2);
+        match &content[0] {
+            ContentBlock::Reasoning { text, signature } => {
+                assert_eq!(text, "let me think");
+                assert!(signature.is_none());
+            }
+            other => panic!("expected reasoning first, got {other:?}"),
+        }
+        match &content[1] {
+            ContentBlock::Text { text } => assert_eq!(text, "pong"),
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_choice_to_core_without_reasoning_is_unchanged() {
+        let choice = json!({
+            "message": { "role": "assistant", "content": "hi" },
+            "finish_reason": "stop"
+        });
+        let (content, _) = chat_choice_to_core(&choice);
+        assert_eq!(content.len(), 1);
+        assert!(matches!(&content[0], ContentBlock::Text { text } if text == "hi"));
+    }
+
+    /// 凭据搭车：signature 以 <mb-cot> 定界拼入 reasoning_content 下发；
+    /// 客户端回传 assistant 历史 → 标记解析拆出凭据（signature）与展示明文。
+    #[test]
+    fn reasoning_credential_roundtrips_via_mb_cot_marker() {
+        // 下发：凭据（不可读文本）拼在 reasoning_content 尾部
+        let msg = core_to_chat_response_message(&[
+            ContentBlock::Reasoning { text: "thought".into(), signature: Some("ENC".into()) },
+            ContentBlock::text("Hi"),
+        ]);
+        assert_eq!(msg["reasoning_content"], "thought<mb-cot>ENC</mb-cot>");
+        assert_eq!(msg["reasoning"], "thought<mb-cot>ENC</mb-cot>");
+        // 无凭据时不带标记
+        let plain = core_to_chat_response_message(&[
+            ContentBlock::Reasoning { text: "pure".into(), signature: None },
+        ]);
+        assert_eq!(plain["reasoning_content"], "pure");
+
+        // 回传：标记解析拆出凭据与明文
+        let msgs = chat_to_core_messages(&[json!({
+            "role": "assistant",
+            "content": "Hi",
+            "reasoning_content": "thought<mb-cot>ENC</mb-cot>"
+        })]);
+        match &msgs[0].content[0] {
+            ContentBlock::Reasoning { text, signature: Some(enc) } => {
+                assert_eq!(text, "thought");
+                assert_eq!(enc, "ENC");
+            }
+            other => panic!("expected reasoning with credential, got {other:?}"),
+        }
+
+        // 纯凭据（无明文）：凭据还原、展示明文为空
+        let msgs2 = chat_to_core_messages(&[json!({
+            "role": "assistant",
+            "content": "Hi",
+            "reasoning_content": "<mb-cot>ENC</mb-cot>"
+        })]);
+        assert!(matches!(
+            &msgs2[0].content[0],
+            ContentBlock::Reasoning { text, signature: Some(enc) } if text.is_empty() && enc == "ENC"
+        ));
+
+        // 无标记的普通上游明文（如 DeepSeek）→ 整体为展示文本，无凭据
+        let msgs3 = chat_to_core_messages(&[json!({
+            "role": "assistant",
+            "content": "Hi",
+            "reasoning_content": "plain upstream thought"
+        })]);
+        assert!(matches!(
+            &msgs3[0].content[0],
+            ContentBlock::Reasoning { text, signature: None } if text == "plain upstream thought"
+        ));
+    }
 }

@@ -112,7 +112,13 @@ impl ClientStreamAdapter for OpenAiResponsesAdapter {
                     ));
                 }
                 StreamDelta::Reasoning { .. } => {
-                    // 简化：reasoning 增量不单独映射为 Responses 事件
+                    // 简化：Responses 入口不映射 reasoning 增量事件。输出 item 的
+                    // done 收尾由 BlockStop 统一按 message 形态发出（encode 无状态、
+                    // 无法区分块类型），若发 reasoning item 会与收尾事件不一致；
+                    // Responses 入口的推理展示暂缺，chat/anthropic 入口不受影响。
+                }
+                StreamDelta::ReasoningSignature { .. } => {
+                    // 同上：reasoning item 流式形态未映射，凭据随非流式路径透传
                 }
             },
             CoreStreamEvent::BlockStop { index } => {
@@ -216,9 +222,21 @@ impl ProviderStreamAdapter for OpenAiResponsesAdapter {
                         namespace: None,
                         input: json!({}),
                     },
+                    // reasoning item：后续 summary/reasoning 文本增量挂同一 output_index
+                    Some("reasoning") => ContentBlock::Reasoning { text: String::new(), signature: None },
                     _ => ContentBlock::text(""),
                 };
                 out.push(CoreStreamEvent::BlockStart { index: output_index(&data), block });
+            }
+            // 推理增量：官方摘要（summary_text）与原文（reasoning_text，第三方兼容实现）
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                let text = data.get("delta").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                if !text.is_empty() {
+                    out.push(CoreStreamEvent::BlockDelta {
+                        index: output_index(&data),
+                        delta: StreamDelta::Reasoning { text },
+                    });
+                }
             }
             "response.output_text.delta" => {
                 let text = data.get("delta").and_then(|v| v.as_str()).unwrap_or_default().to_string();
@@ -235,6 +253,21 @@ impl ProviderStreamAdapter for OpenAiResponsesAdapter {
                 });
             }
             "response.output_item.done" => {
+                // reasoning item 的加密 CoT 凭据在 done 事件的 item 上：
+                // 转为凭据增量流出，供入口协议透传（chat 搭 <mb-cot>、anthropic 发 signature_delta）
+                let item = data.get("item").cloned().unwrap_or(Value::Null);
+                if item.get("type").and_then(|t| t.as_str()) == Some("reasoning") {
+                    if let Some(enc) = item
+                        .get("encrypted_content")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                    {
+                        out.push(CoreStreamEvent::BlockDelta {
+                            index: output_index(&data),
+                            delta: StreamDelta::ReasoningSignature { signature: enc.to_string() },
+                        });
+                    }
+                }
                 out.push(CoreStreamEvent::BlockStop { index: output_index(&data) });
             }
             "response.completed" => {
@@ -270,6 +303,37 @@ mod tests {
 
     fn chunk(v: Value) -> RawChunk {
         RawChunk::json(ChunkStage::UpstreamChunk, Protocol::OpenAiResponse, None, v)
+    }
+
+    #[test]
+    fn decodes_reasoning_item_and_deltas() {
+        let adapter = OpenAiResponsesAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::OpenAiResponse);
+
+        // reasoning item 开始：块类型为 Reasoning（而非默认 text 块）
+        let evs = adapter
+            .decode(&ctx, &chunk(json!({
+                "type": "response.output_item.added", "output_index": 0,
+                "item": { "type": "reasoning", "summary": [] }
+            })))
+            .unwrap();
+        assert!(matches!(
+            &evs[0],
+            CoreStreamEvent::BlockStart { block: ContentBlock::Reasoning { .. }, .. }
+        ));
+
+        // 官方摘要与第三方原文两种增量都解析为 Reasoning
+        for ty in ["response.reasoning_summary_text.delta", "response.reasoning_text.delta"] {
+            let evs = adapter
+                .decode(&ctx, &chunk(json!({ "type": ty, "output_index": 0, "delta": "hmm" })))
+                .unwrap();
+            match &evs[0] {
+                CoreStreamEvent::BlockDelta { delta: StreamDelta::Reasoning { text }, .. } => {
+                    assert_eq!(text, "hmm")
+                }
+                other => panic!("expected reasoning delta for {ty}, got {other:?}"),
+            }
+        }
     }
 
     #[test]

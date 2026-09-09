@@ -106,6 +106,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn carries_reasoning_in_response_message() {
+        let resp = CoreResponse {
+            id: "chatcmpl-2".into(),
+            model: "m".into(),
+            content: vec![
+                ContentBlock::Reasoning { text: "thought".into(), signature: None },
+                ContentBlock::text("Hi"),
+            ],
+            stop_reason: Some(StopReason::EndTurn),
+            usage: Usage::default(),
+            ext: Default::default(),
+        };
+        let adapter = OpenAiChatAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::OpenAiChat);
+        let out = adapter.from_core_response(&ctx, resp).await.unwrap();
+
+        let msg = &out["choices"][0]["message"];
+        assert_eq!(msg["content"], "Hi");
+        assert_eq!(msg["reasoning_content"], "thought", "DeepSeek 约定");
+        assert_eq!(msg["reasoning"], "thought", "OpenRouter/vLLM 约定");
+    }
+
+    #[tokio::test]
     async fn builds_chat_response() {
         let resp = CoreResponse {
             id: "chatcmpl-1".into(),
