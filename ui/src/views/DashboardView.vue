@@ -91,6 +91,21 @@ const perf = ref<{ buckets: PerfBucket[]; avgTtft: number | null; avgTps: number
   avgTps: null,
 });
 
+// ───────────────── 平均缓存命中率（token 加权：Σ缓存读 / Σ输入） ─────────────────
+
+const cacheHit = ref<{ rate: number | null }>({ rate: null });
+
+/** Core 口径 input 已含缓存部分，故命中率 = 缓存读 / 输入总量。 */
+function cacheStats() {
+  let read = 0;
+  let input = 0;
+  for (const r of records.value) {
+    read += r.cacheReadTokens || 0;
+    input += r.inputTokens || 0;
+  }
+  cacheHit.value = { rate: input > 0 ? read / input : null };
+}
+
 const TTFT_BAR = "bg-sky-500/60 group-hover:bg-sky-500/85";
 const TPS_BAR = "bg-emerald-500/60 group-hover:bg-emerald-500/85";
 
@@ -99,6 +114,7 @@ async function loadPerf() {
   try {
     records.value = await usageApi.query({ limit: 1000 });
     perf.value = perfStats();
+    cacheStats();
   } catch {
     // 性能图数据加载失败不影响页面其余部分
   } finally {
@@ -144,10 +160,12 @@ onMounted(loadAll);
     <div class="grid gap-4 grid-cols-3">
       <Card>
         <div class="card-header pb-2">
-          <span class="card-description">总请求</span>
+          <span class="card-description">平均缓存命中率</span>
         </div>
         <div class="card-content">
-          <div class="text-2xl font-semibold tabular-nums">{{ summary?.requests ?? 0 }}</div>
+          <div class="text-2xl font-semibold tabular-nums">
+            {{ cacheHit.rate != null ? (cacheHit.rate * 100).toFixed(1) + "%" : "—" }}
+          </div>
         </div>
       </Card>
       <Card>
