@@ -132,6 +132,16 @@ ALTER TABLE providers DROP COLUMN protocol;
 /// V5：用量记录增加 ttft_ms（首字延迟，毫秒；流式请求才有值）。
 const V5: &str = "ALTER TABLE usage_records ADD COLUMN ttft_ms INTEGER;";
 
+/// V6：offer 可绑定到 provider 的**特定协议端点**。新增可空 `endpoint_protocol` 列：
+/// 非空时路由命中该 offer 后只用匹配该协议的端点（而非该 provider 的全部端点按 idx
+/// 故障转移），从而让「模型 → 端点」精确绑定；为空则维持旧行为（全端点故障转移）。
+const V6: &str = "ALTER TABLE offers ADD COLUMN endpoint_protocol TEXT;";
+
+/// V7：模型定义瘦身为纯元数据。`models.pricing_json` 无任何消费者（计费 TODO 指向
+/// 按 offers 定价），删除该列；定价口径统一在 offers（models.dev 导入的定价改写到
+/// 对应 provider 的 offer）。
+const V7: &str = "ALTER TABLE models DROP COLUMN pricing_json;";
+
 /// 全部 migration，按版本升序。
 const MIGRATIONS: &[Migration] = &[
     Migration { version: 1, sql: V1 },
@@ -139,6 +149,8 @@ const MIGRATIONS: &[Migration] = &[
     Migration { version: 3, sql: V3 },
     Migration { version: 4, sql: V4 },
     Migration { version: 5, sql: V5 },
+    Migration { version: 6, sql: V6 },
+    Migration { version: 7, sql: V7 },
 ];
 
 /// 对连接执行 migration（幂等）。

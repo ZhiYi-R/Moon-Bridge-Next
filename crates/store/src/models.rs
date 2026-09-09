@@ -55,7 +55,7 @@ fn default_true() -> bool {
     true
 }
 
-/// 模型元数据定义。
+/// 模型元数据定义（仅承载模型自身属性；定价口径统一在 offers）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelDef {
@@ -69,8 +69,6 @@ pub struct ModelDef {
     #[serde(default)]
     pub reasoning_levels: Option<Value>,
     #[serde(default)]
-    pub pricing: Option<Value>,
-    #[serde(default)]
     pub extra: Value,
 }
 
@@ -82,6 +80,10 @@ pub struct Offer {
     pub model_slug: String,
     #[serde(default)]
     pub pricing: Option<Value>,
+    /// 绑定到 provider 的特定协议端点（如 `openai-response`）。非空时路由命中该 offer
+    /// 后只用匹配该协议的端点故障转移；为空则用该 provider 的全部端点（旧行为）。
+    #[serde(default)]
+    pub endpoint_protocol: Option<String>,
 }
 
 /// 路由别名：把客户端请求的别名映射到 (provider, model)。

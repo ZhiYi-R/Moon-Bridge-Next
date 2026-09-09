@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn migrates_and_reports_version() {
         let db = Database::open_in_memory().unwrap();
-        assert_eq!(db.version().unwrap(), 5);
+        assert_eq!(db.version().unwrap(), 7);
     }
 
     #[test]
