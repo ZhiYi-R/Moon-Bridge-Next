@@ -463,7 +463,7 @@ onMounted(async () => {
       :title="isNew ? '新建模型' : '编辑模型'"
       @close="editing = false"
     >
-      <div class="grid gap-4 md:grid-cols-2">
+      <div class="grid gap-4 grid-cols-2">
         <div class="space-y-1.5">
           <Label for="m-slug">唯一标识</Label>
           <Input id="m-slug" v-model="form.slug" placeholder="如 claude-sonnet-4" :disabled="!isNew" />
@@ -472,7 +472,7 @@ onMounted(async () => {
           <Label for="m-name">显示名</Label>
           <Input id="m-name" v-model="form.displayName" placeholder="Claude Sonnet 4" />
         </div>
-        <div class="space-y-1.5 md:col-span-2">
+        <div class="space-y-1.5 col-span-2">
           <Label for="m-ctx">上下文窗口</Label>
           <Input id="m-ctx" v-model="form.contextWindow" placeholder="200000" inputmode="numeric" />
         </div>
@@ -498,7 +498,7 @@ onMounted(async () => {
           <Label>推理档位</Label>
           <StringListInput v-model="form.reasoningLevels" placeholder="如 high 后回车添加" />
         </div>
-        <div class="space-y-1.5 md:col-span-2">
+        <div class="space-y-1.5 col-span-2">
           <Label for="m-extra">扩展字段</Label>
           <textarea id="m-extra" v-model="form.extraText" rows="3" spellcheck="false" :class="textareaClass"></textarea>
         </div>
@@ -555,8 +555,8 @@ onMounted(async () => {
         </div>
         <div ref="importScroll" class="scrollbar-thin max-h-[52vh] overflow-y-auto rounded-md border">
           <table class="w-full text-center text-sm">
-            <thead class="thead-glass">
-              <tr class="text-center text-muted-foreground">
+            <thead class="thead-sticky">
+              <tr class="border-b text-center text-muted-foreground">
                 <th class="w-8 py-2"></th>
                 <th class="py-2 font-medium">模型</th>
                 <th class="py-2 font-medium">Provider</th>
@@ -634,8 +634,8 @@ onMounted(async () => {
             暂无模型定义，点击「新建模型」添加。
           </div>
           <table v-else class="w-full text-center text-sm">
-            <thead class="thead-glass">
-              <tr class="text-center text-muted-foreground">
+            <thead class="thead-sticky">
+              <tr class="border-b text-center text-muted-foreground">
                 <th class="py-2 font-medium">标识</th>
                 <th class="py-2 font-medium">显示名</th>
                 <th class="py-2 font-medium">上下文窗口</th>
@@ -704,8 +704,8 @@ onMounted(async () => {
               该 provider 暂无报价。
             </div>
             <table v-else class="w-full text-center text-sm">
-              <thead class="thead-glass">
-                <tr class="text-center text-muted-foreground">
+              <thead class="thead-sticky">
+                <tr class="border-b text-center text-muted-foreground">
                   <th class="py-2 font-medium">模型</th>
                   <th class="py-2 font-medium">绑定端点</th>
                   <th class="py-2 font-medium">输入</th>
@@ -764,7 +764,7 @@ onMounted(async () => {
         </p>
       </div>
       <p class="mb-4 text-xs text-muted-foreground">单位：USD / 1M tokens；留空表示该项不单独定价。</p>
-      <div class="grid gap-4 sm:grid-cols-2">
+      <div class="grid gap-4 grid-cols-2">
         <div class="space-y-1.5">
           <Label for="p-input">输入</Label>
           <Input id="p-input" v-model="offerForm.inputPrice" placeholder="3" inputmode="decimal" />

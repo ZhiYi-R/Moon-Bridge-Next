@@ -82,11 +82,12 @@ function timeBuckets(): TimeBucket[] {
     const key = Math.floor(r.createdAt / size) * size;
     const e =
       map.get(key) ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, requests: 0 };
-    e.input += r.inputTokens;
-    e.output += r.outputTokens;
-    e.cacheRead += r.cacheReadTokens;
-    e.cacheWrite += r.cacheWriteTokens;
-    e.reasoning += r.reasoningTokens;
+    // 字段缺失时回退 0，避免 undefined 污染聚合与后续除法（NaN 会把柱状图画成满宽）
+    e.input += r.inputTokens || 0;
+    e.output += r.outputTokens || 0;
+    e.cacheRead += r.cacheReadTokens || 0;
+    e.cacheWrite += r.cacheWriteTokens || 0;
+    e.reasoning += r.reasoningTokens || 0;
     e.requests += 1;
     map.set(key, e);
   }
@@ -94,7 +95,7 @@ function timeBuckets(): TimeBucket[] {
     .map(([t, v]) => ({ t, ...v, total: v.input + v.output + v.cacheRead + v.cacheWrite + v.reasoning }))
     .sort((a, b) => a.t - b.t)
     .slice(-24);
-  const max = Math.max(1, ...buckets.map((b) => b.total));
+  const max = Math.max(1, ...buckets.map((b) => b.total).filter((n) => Number.isFinite(n)));
   return buckets.map((b) => ({
     label: byHour
       ? `${new Date(b.t * 1000).getHours()}:00`
@@ -127,16 +128,16 @@ function modelBuckets(): ModelBucket[] {
     const k = r.model ?? "—";
     const e = map.get(k) ?? { requests: 0, input: 0, output: 0, cost: 0 };
     e.requests += 1;
-    e.input += r.inputTokens;
-    e.output += r.outputTokens;
-    e.cost += r.cost;
+    e.input += r.inputTokens || 0;
+    e.output += r.outputTokens || 0;
+    e.cost += r.cost || 0;
     map.set(k, e);
   }
   const arr = [...map.entries()]
     .map(([model, v]) => ({ model, ...v, total: v.input + v.output }))
     .sort((a, b) => b.total - a.total);
-  const max = Math.max(1, ...arr.map((a) => a.total));
-  return arr.map((a) => ({ ...a, pct: (a.total / max) * 100 }));
+  const max = Math.max(1, ...arr.map((a) => a.total).filter((n) => Number.isFinite(n)));
+  return arr.map((a) => ({ ...a, pct: a.total > 0 ? (a.total / max) * 100 : 0 }));
 }
 
 const tBuckets = ref<TimeBucket[]>([]);
@@ -199,8 +200,8 @@ watch(pageCount, (n) => {
     </div>
 
     <!-- 图表行：时序 + 模型分布并排，控制纵向占用 -->
-    <div class="grid shrink-0 gap-4 lg:grid-cols-2">
-    <Card class="shrink-0">
+    <div class="grid shrink-0 gap-4 grid-cols-2">
+    <Card class="min-w-0 shrink-0">
       <div class="card-header">
         <h3 class="card-title">Token 消耗</h3>
         <div class="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
@@ -233,7 +234,7 @@ watch(pageCount, (n) => {
                 :key="s.label"
                 class="w-full transition-all"
                 :class="s.bar"
-                :style="{ height: b.pcts[si] + '%' }"
+                :style="{ height: (b.pcts[si] || 0) + '%' }"
               ></div>
             </div>
           </div>
@@ -242,7 +243,7 @@ watch(pageCount, (n) => {
     </Card>
 
     <!-- 模型分布 -->
-    <Card class="shrink-0">
+    <Card class="min-w-0 shrink-0">
       <div class="card-header">
         <h3 class="card-title">模型分布</h3>
       </div>
@@ -262,8 +263,12 @@ watch(pageCount, (n) => {
                 <template v-if="m.cost > 0"> · ${{ m.cost.toFixed(2) }}</template>
               </span>
             </div>
-            <div class="h-2.5 w-full overflow-hidden rounded-full bg-muted">
-              <div class="h-full rounded-full bg-primary/80" :style="{ width: m.pct + '%' }"></div>
+            <!-- 0/0（无 token）不渲染轨道：满宽空轨道看起来像满值进度条 -->
+            <div v-if="m.total > 0" class="h-2.5 w-full overflow-hidden rounded-full bg-muted">
+              <div
+                class="h-full rounded-full bg-primary/80"
+                :style="{ width: (Number.isFinite(m.pct) ? m.pct : 0) + '%' }"
+              ></div>
             </div>
           </li>
         </ul>
@@ -296,16 +301,16 @@ watch(pageCount, (n) => {
         <template v-else>
           <div class="scrollbar-thin min-h-[60px] flex-1 overflow-auto">
             <table class="w-full text-center text-sm">
-              <thead class="[&_th]:sticky [&_th]:top-0 [&_th]:z-10 [&_th]:bg-card">
-                <tr class="border-b text-muted-foreground">
-                  <th class="pb-2 font-medium">时间</th>
-                  <th class="pb-2 font-medium">模型</th>
-                  <th class="pb-2 font-medium">上游</th>
-                  <th class="pb-2 font-medium">输入</th>
-                  <th class="pb-2 font-medium">输出</th>
-                  <th class="pb-2 font-medium">成本</th>
-                  <th class="pb-2 font-medium">延迟</th>
-                  <th class="pb-2 font-medium">状态</th>
+              <thead class="thead-sticky">
+                <tr class="border-b text-center text-muted-foreground">
+                  <th class="py-2 font-medium">时间</th>
+                  <th class="py-2 font-medium">模型</th>
+                  <th class="py-2 font-medium">上游</th>
+                  <th class="py-2 font-medium">输入</th>
+                  <th class="py-2 font-medium">输出</th>
+                  <th class="py-2 font-medium">成本</th>
+                  <th class="py-2 font-medium">延迟</th>
+                  <th class="py-2 font-medium">状态</th>
                 </tr>
               </thead>
               <tbody>

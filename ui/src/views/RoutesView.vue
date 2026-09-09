@@ -102,13 +102,13 @@ onMounted(load);
         >
           暂无路由别名。
         </div>
-        <table v-else class="w-full text-sm">
-          <thead>
-            <tr class="border-b text-left text-muted-foreground">
-              <th class="pb-2 font-medium">别名</th>
-              <th class="pb-2 font-medium">上游模型</th>
-              <th class="pb-2 font-medium">上游服务</th>
-              <th class="pb-2 text-right font-medium">操作</th>
+        <table v-else class="w-full text-center text-sm">
+          <thead class="thead-sticky">
+            <tr class="border-b text-center text-muted-foreground">
+              <th class="py-2 font-medium">别名</th>
+              <th class="py-2 font-medium">上游模型</th>
+              <th class="py-2 font-medium">上游服务</th>
+              <th class="py-2 font-medium">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -117,7 +117,7 @@ onMounted(load);
               <td class="py-2">{{ r.modelSlug }}</td>
               <td class="py-2">{{ r.providerKey }}</td>
               <td class="py-2">
-                <div class="flex justify-end">
+                <div class="flex justify-center">
                   <Button variant="ghost" size="icon" class="size-7" @click="remove(r.alias)">
                     <Trash2 class="size-3.5 text-destructive" />
                   </Button>

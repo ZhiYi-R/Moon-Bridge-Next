@@ -192,6 +192,10 @@ export interface GatewayConfig {
   pluginsDir?: string | null;
   requestTimeoutSecs: number;
   traceDir?: string | null;
+  /** trace 是否记录请求/响应体；关闭时只留元数据。变更后需重启网关生效。 */
+  traceRecordBodies?: boolean;
+  /** trace 保留条数（按 mtime 保留最近 N 条，0 = 不清理）。变更后需重启网关生效。 */
+  traceRetention?: number;
 }
 
 export interface AppConfig {
@@ -241,11 +245,22 @@ export const routeApi = {
   remove: (alias: string) => call<void>("route_delete", { alias }),
 };
 
+/** 单个插件的导入结果（逐文件）。 */
+export interface PluginImportOutcome {
+  path: string;
+  name: string;
+  /** imported / skipped / error */
+  status: string;
+  message?: string | null;
+}
+
 export const pluginApi = {
   list: () => call<PluginRecord[]>("plugin_list"),
   get: (name: string) => call<PluginRecord | null>("plugin_get", { name }),
   save: (plugin: PluginRecord) => call<void>("plugin_save", { plugin }),
   remove: (name: string) => call<void>("plugin_delete", { name }),
+  /** 从磁盘路径批量导入 .lua 插件（仅 Tauri；同名插件跳过）。 */
+  import: (paths: string[]) => call<PluginImportOutcome[]>("plugin_import", { paths }),
   readScript: (name: string) => call<string>("plugin_read_script", { name }),
   writeScript: (name: string, content: string) =>
     call<void>("plugin_write_script", { name, content }),

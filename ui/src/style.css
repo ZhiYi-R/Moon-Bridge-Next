@@ -99,14 +99,9 @@
     @apply flex items-center p-5 pt-0;
   }
 
-  /* 毛玻璃悬浮表头：sticky 的 thead 内绘一块圆角浮层，行内容从其下方穿过被模糊；
-     配套要求表头行不带 border-b（分隔由浮层发丝边框承担）。 */
-  .thead-glass {
-    @apply sticky top-0 z-10;
-  }
-  .thead-glass::before {
-    content: "";
-    /* 默认向两侧外扩 0.5rem，包住贴边单元格的文字；要求滚动容器有 ≥0.5rem 水平内边距 */
-    @apply absolute -inset-x-2 inset-y-0 -z-10 rounded-md bg-card/80 ring-1 ring-border backdrop-blur-sm;
+  /* 实底 sticky 表头：毛玻璃方案在 WebKitGTK 生产环境有兼容问题且观感廉价，已否决。
+     分隔由表头行自身的 border-b 承担。 */
+  .thead-sticky {
+    @apply sticky top-0 z-10 bg-card;
   }
 }

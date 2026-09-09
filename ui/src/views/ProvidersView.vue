@@ -315,7 +315,7 @@ onMounted(() => {
       >
         {{ error }}
       </div>
-      <div class="grid gap-4 md:grid-cols-2">
+      <div class="grid gap-4 grid-cols-2">
         <div class="space-y-1.5">
           <Label for="p-key">唯一标识</Label>
           <Input id="p-key" v-model="form.key" placeholder="如 deepseek" :disabled="!!form.createdAt" />
@@ -324,7 +324,7 @@ onMounted(() => {
           <Label for="p-version">协议版本头</Label>
           <Input id="p-version" v-model="form.version" placeholder="2023-06-01" />
         </div>
-        <div class="flex items-center gap-2 md:col-span-2">
+        <div class="flex items-center gap-2 col-span-2">
           <input id="p-enabled" v-model="form.enabled" type="checkbox" class="size-4 accent-primary" />
           <Label for="p-enabled">启用</Label>
         </div>
@@ -453,14 +453,14 @@ onMounted(() => {
         >
           暂无上游服务，点击「新建」添加。
         </div>
-        <table v-else class="w-full text-sm">
-          <thead>
-            <tr class="border-b text-left text-muted-foreground">
-              <th class="pb-2 font-medium">Key</th>
-              <th class="pb-2 font-medium">协议</th>
-              <th class="pb-2 font-medium">端点</th>
-              <th class="pb-2 font-medium">状态</th>
-              <th class="pb-2 text-right font-medium">操作</th>
+        <table v-else class="w-full text-center text-sm">
+          <thead class="thead-sticky">
+            <tr class="border-b text-center text-muted-foreground">
+              <th class="py-2 font-medium">Key</th>
+              <th class="py-2 font-medium">协议</th>
+              <th class="py-2 font-medium">端点</th>
+              <th class="py-2 font-medium">状态</th>
+              <th class="py-2 font-medium">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -477,7 +477,7 @@ onMounted(() => {
                 </Badge>
               </td>
               <td class="py-2">
-                <div class="flex justify-end gap-0.5">
+                <div class="flex justify-center gap-0.5">
                   <Button variant="ghost" size="icon" class="size-7" @click="editProvider(p)">
                     <Pencil class="size-3.5" />
                   </Button>

@@ -141,7 +141,7 @@ onMounted(loadAll);
     </div>
 
     <!-- 用量统计 -->
-    <div class="grid gap-4 md:grid-cols-3">
+    <div class="grid gap-4 grid-cols-3">
       <Card>
         <div class="card-header pb-2">
           <span class="card-description">总请求</span>
@@ -175,7 +175,7 @@ onMounted(loadAll);
     </div>
 
     <!-- 性能时序：平均 TTFT / 平均 TPS（流式请求，逐小时） -->
-    <div class="grid gap-4 lg:grid-cols-2">
+    <div class="grid gap-4 grid-cols-2">
       <Card>
         <div class="card-header flex-row items-center justify-between space-y-0">
           <div class="flex items-center gap-2">

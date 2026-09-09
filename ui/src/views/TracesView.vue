@@ -28,6 +28,20 @@ const tpsText = computed(() => {
   return `${(d.usage.outputTokens / genSec).toFixed(1)} tok/s`;
 });
 
+/** 报文区数据：旧 trace 无响应快照且 error 存有响应体时，兜底展示到「上游响应」。 */
+const sections = computed(() => {
+  const d = detail.value;
+  if (!d) return [];
+  const upstreamResponse =
+    d.upstreamResponse ?? (d.error ? { traceError: d.error } : null);
+  return [
+    { title: "客户端请求", body: d.clientRequest },
+    { title: "上游请求", body: d.upstreamRequest },
+    { title: "上游响应", body: upstreamResponse },
+    { title: "客户端响应", body: d.clientResponse },
+  ];
+});
+
 const filtered = computed(() => {
   const q = filter.value.trim().toLowerCase();
   if (!q) return entries.value;
@@ -106,8 +120,8 @@ onMounted(async () => {
       {{ error }}
     </div>
 
-    <!-- 主从一体卡：左列表 / 右详情，中缝分齐，高度填满视口 -->
-    <Card class="grid min-h-0 flex-1 overflow-hidden lg:grid-cols-[360px_1fr] lg:divide-x lg:divide-border">
+    <!-- 主从一体卡：左列表 / 右详情，中缝分齐，高度填满视口（桌面固定双栏，轨道 minmax(0,1fr) 防长内容撑破） -->
+    <Card class="grid min-h-0 flex-1 grid-cols-[360px_minmax(0,1fr)] divide-x divide-border overflow-hidden">
       <!-- 列表 -->
       <section class="flex min-h-0 flex-col">
         <div class="flex shrink-0 items-center gap-2 border-b p-3">
@@ -172,7 +186,7 @@ onMounted(async () => {
       </section>
 
       <!-- 详情 -->
-      <section class="flex min-h-0 flex-col">
+      <section class="flex min-h-0 min-w-0 flex-col">
         <div v-if="!selected" class="flex h-full items-center justify-center">
           <p class="text-sm text-muted-foreground">从左侧选择一条 trace 查看详情。</p>
         </div>
@@ -221,22 +235,13 @@ onMounted(async () => {
                 <dd class="font-mono">{{ formatTimeMs(detail.createdAt) }}</dd>
               </dl>
 
-              <div
-                v-if="detail.error"
-                class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
-              >
-                {{ detail.error }}
-              </div>
-
               <!-- 各阶段报文 -->
-              <section v-for="sec in [
-                { title: '客户端请求', body: detail.clientRequest },
-                { title: '上游请求', body: detail.upstreamRequest },
-                { title: '上游响应', body: detail.upstreamResponse },
-                { title: '客户端响应', body: detail.clientResponse },
-              ]" :key="sec.title">
+              <section v-for="sec in sections" :key="sec.title">
                 <h4 class="mb-1 text-xs font-semibold text-muted-foreground">{{ sec.title }}</h4>
-                <pre class="scrollbar-thin max-h-72 overflow-auto rounded-md bg-muted p-3 font-mono text-[11px] leading-relaxed">{{ pretty(sec.body) }}</pre>
+                <pre
+                  class="scrollbar-thin max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted p-3 font-mono text-[11px] leading-relaxed"
+                  >{{ pretty(sec.body) }}</pre
+                >
               </section>
             </div>
           </div>

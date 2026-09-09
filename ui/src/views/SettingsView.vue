@@ -23,6 +23,8 @@ const form = reactive<AppConfig>({
     maxBodyBytes: 8388608,
     requestTimeoutSecs: 300,
     traceDir: null,
+    traceRecordBodies: true,
+    traceRetention: 500,
   },
   logLevel: "info",
   autoStart: true,
@@ -75,6 +77,7 @@ function payload(): AppConfig {
       ...form.gateway,
       maxBodyBytes: Number.isNaN(n) ? 0 : Math.round(n * Number(bodyUnit.value)),
       requestTimeoutSecs: Number(form.gateway.requestTimeoutSecs),
+      traceRetention: Math.max(0, Math.floor(Number(form.gateway.traceRetention) || 0)),
     },
     logLevel: form.logLevel,
     autoStart: form.autoStart,
@@ -115,46 +118,67 @@ async function save(restart = false) {
         />
       </button>
       <div v-show="gwOpen">
-        <div class="card-content grid gap-4 border-t md:grid-cols-2">
-        <div class="space-y-1.5">
-          <Label for="s-addr">监听地址</Label>
-          <Input id="s-addr" v-model="form.gateway.addr" placeholder="127.0.0.1:38440" />
-        </div>
-        <div class="space-y-1.5">
-          <Label>日志级别</Label>
-          <Select v-model="form.logLevel" :options="logOptions" />
-        </div>
-        <div class="space-y-1.5">
-          <Label for="s-token">Bearer Token</Label>
-          <Input
-            id="s-token"
-            v-model="form.gateway.authToken"
-            type="password"
-            placeholder="留空则不鉴权"
-          />
-        </div>
-        <div class="space-y-1.5">
-          <Label for="s-proxy">出站代理</Label>
-          <Input id="s-proxy" v-model="form.gateway.egressProxy" placeholder="http://127.0.0.1:7890" />
-        </div>
-        <div class="space-y-1.5">
-          <Label for="s-body">请求体大小上限</Label>
-          <div class="flex gap-2">
-            <Input id="s-body" v-model="bodyValue" inputmode="numeric" class="flex-1" />
-            <div class="w-28 shrink-0">
-              <Select v-model="bodyUnit" :options="bodyUnitOptions" />
+        <div class="card-content grid gap-4 border-t grid-cols-2">
+          <div class="space-y-1.5">
+            <Label for="s-addr">监听地址</Label>
+            <Input id="s-addr" v-model="form.gateway.addr" placeholder="127.0.0.1:38440" />
+          </div>
+          <div class="space-y-1.5">
+            <Label>日志级别</Label>
+            <Select v-model="form.logLevel" :options="logOptions" />
+          </div>
+          <div class="space-y-1.5">
+            <Label for="s-token">Bearer Token</Label>
+            <Input
+              id="s-token"
+              v-model="form.gateway.authToken"
+              type="password"
+              placeholder="留空则不鉴权"
+            />
+          </div>
+          <div class="space-y-1.5">
+            <Label for="s-proxy">出站代理</Label>
+            <Input id="s-proxy" v-model="form.gateway.egressProxy" placeholder="http://127.0.0.1:7890" />
+          </div>
+          <div class="space-y-1.5">
+            <Label for="s-body">请求体大小上限</Label>
+            <div class="flex gap-2">
+              <Input id="s-body" v-model="bodyValue" inputmode="numeric" class="flex-1" />
+              <div class="w-28 shrink-0">
+                <Select v-model="bodyUnit" :options="bodyUnitOptions" />
+              </div>
+            </div>
+          </div>
+          <div class="space-y-1.5">
+            <Label for="s-timeout">上游超时</Label>
+            <Input id="s-timeout" v-model="form.gateway.requestTimeoutSecs" type="number" placeholder="60" />
+          </div>
+          <div class="col-span-2 space-y-1.5">
+            <Label for="s-retention">trace 保留条数</Label>
+            <Input
+              id="s-retention"
+              v-model="form.gateway.traceRetention"
+              type="number"
+              min="0"
+              placeholder="500"
+            />
+          </div>
+          <div class="col-span-2 flex flex-col gap-2.5 border-t pt-4">
+            <div class="flex items-center gap-2">
+              <input
+                id="s-bodies"
+                v-model="form.gateway.traceRecordBodies"
+                type="checkbox"
+                class="size-4 accent-primary"
+              />
+              <Label for="s-bodies">trace 记录请求/响应体</Label>
+            </div>
+            <div class="flex items-center gap-2">
+              <input id="s-auto" v-model="form.autoStart" type="checkbox" class="size-4 accent-primary" />
+              <Label for="s-auto">应用启动时自动开启网关</Label>
             </div>
           </div>
         </div>
-        <div class="space-y-1.5">
-          <Label for="s-timeout">上游超时</Label>
-          <Input id="s-timeout" v-model="form.gateway.requestTimeoutSecs" type="number" placeholder="60" />
-        </div>
-        <div class="flex items-center gap-2 md:col-span-2">
-          <input id="s-auto" v-model="form.autoStart" type="checkbox" class="size-4 accent-primary" />
-          <Label for="s-auto">应用启动时自动开启网关</Label>
-        </div>
-      </div>
         <div class="flex shrink-0 justify-end gap-2 border-t px-5 py-3">
           <span v-if="saved" class="mr-auto text-sm text-emerald-400">已保存</span>
           <Button variant="outline" size="sm" @click="save(false)">保存</Button>
