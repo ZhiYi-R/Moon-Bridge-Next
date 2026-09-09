@@ -111,6 +111,13 @@ jobs:
         shell: bash
         run: npm install -g @tauri-apps/cli@^2
 
+      - name: Install Linux bundling prerequisites
+        # x86_64 runner 自带 xdg-utils；ubuntu-24.04-arm 没有，AppImage 打包
+        # 需要 xdg-open（failed: xdg-open binary not found）
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq xdg-utils
+
       - name: Build Tauri app
         shell: bash
         # tauri CLI 对 beforeBuildCommand 的 cwd 解析与运行目录相关：从仓库根
