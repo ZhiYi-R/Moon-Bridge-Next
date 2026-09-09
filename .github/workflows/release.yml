@@ -51,6 +51,9 @@ jobs:
     env:
       # macOS 未配置 Apple 证书：'-' 即 ad-hoc 签名，产物可直接本机运行
       APPLE_SIGNING_IDENTITY: "-"
+      # linuxdeploy AppImage 在 CI runner 上无 FUSE 可用，改为解压运行
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+      NO_STRIP: "true"
 
     steps:
       - name: Checkout
