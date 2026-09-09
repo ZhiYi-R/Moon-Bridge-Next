@@ -41,13 +41,13 @@ export interface Provider {
   updatedAt: number;
 }
 
+/** 模型元数据定义（仅承载模型自身属性；定价口径统一在 Offer）。 */
 export interface ModelDef {
   slug: string;
   displayName?: string | null;
   contextWindow?: number | null;
   modalities?: Json;
   reasoningLevels?: Json;
-  pricing?: Json;
   extra: Json;
 }
 
@@ -55,6 +55,21 @@ export interface Offer {
   providerKey: string;
   modelSlug: string;
   pricing?: Json;
+  /** 绑定到 provider 的特定协议端点（如 "openai-response"）；空/缺省表示用全部端点故障转移。 */
+  endpointProtocol?: string | null;
+}
+
+/** models.dev 候选模型（后端解析后的扁平视图，供搜索勾选导入）。 */
+export interface CatalogModel {
+  providerKey: string;
+  providerName: string;
+  id: string;
+  name?: string | null;
+  contextWindow?: number | null;
+  modalities: string[];
+  reasoningLevels: string[];
+  /** 定价（USD / 1M tokens），仅含有值项：input/output/cache_read/cache_write/reasoning。 */
+  pricing: Record<string, number>;
 }
 
 export interface Route {
@@ -136,6 +151,8 @@ export interface TraceDetail {
   stream: boolean;
   status: string;
   latencyMs: number;
+  /** 首字延迟（毫秒）；仅流式请求有值，非流式 / 插件代答为 null。 */
+  ttftMs?: number | null;
   usage: {
     inputTokens: number;
     outputTokens: number;
@@ -170,6 +187,9 @@ export interface GatewayConfig {
   authToken?: string | null;
   egressProxy?: string | null;
   maxBodyBytes: number;
+  /** 插件脚本目录：script_ref 的相对 `.lua` 路径归一到此处，绝对路径须在其内。
+   *  由 app 层按数据目录回填，设置页不编辑但须原样回传。 */
+  pluginsDir?: string | null;
   requestTimeoutSecs: number;
   traceDir?: string | null;
 }
@@ -205,6 +225,13 @@ export const modelApi = {
   offerSave: (offer: Offer) => call<void>("offer_save", { offer }),
   offerRemove: (providerKey: string, modelSlug: string) =>
     call<void>("offer_delete", { providerKey, modelSlug }),
+};
+
+export const catalogApi = {
+  /** 从 models.dev 拉取全部候选模型（后端解析精简）。 */
+  fetch: () => call<CatalogModel[]>("catalog_fetch"),
+  /** 把勾选的候选批量导入本地 models 表（含定价），返回导入数量。 */
+  import: (models: CatalogModel[]) => call<number>("catalog_import", { models }),
 };
 
 export const routeApi = {

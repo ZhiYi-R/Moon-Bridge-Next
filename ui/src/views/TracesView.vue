@@ -20,6 +20,14 @@ const detail = ref<TraceDetail | null>(null);
 const detailLoading = ref(false);
 const traceDir = ref("");
 
+/** TPS：输出 token / 生成秒；生成时间 = 总延迟 − TTFT，非流式或无 TTFT 为 null。 */
+const tpsText = computed(() => {
+  const d = detail.value;
+  if (!d?.ttftMs || d.latencyMs <= d.ttftMs) return "—";
+  const genSec = (d.latencyMs - d.ttftMs) / 1000;
+  return `${(d.usage.outputTokens / genSec).toFixed(1)} tok/s`;
+});
+
 const filtered = computed(() => {
   const q = filter.value.trim().toLowerCase();
   if (!q) return entries.value;
@@ -195,8 +203,12 @@ onMounted(async () => {
                 <dd class="break-all font-mono">{{ detail.providerKey }}</dd>
                 <dt class="text-muted-foreground">模型</dt>
                 <dd class="break-all font-mono">{{ detail.modelAlias }} → {{ detail.upstreamModel }}</dd>
-                <dt class="text-muted-foreground">延迟</dt>
-                <dd class="font-mono">{{ formatLatency(detail.latencyMs) }}</dd>
+                <dt class="text-muted-foreground">TTFT</dt>
+                <dd class="font-mono">
+                  {{ detail.ttftMs != null ? formatLatency(detail.ttftMs) : "—" }}
+                </dd>
+                <dt class="text-muted-foreground">TPS</dt>
+                <dd class="font-mono">{{ tpsText }}</dd>
                 <dt class="text-muted-foreground">用量</dt>
                 <dd class="flex flex-wrap gap-x-1.5 font-mono">
                   <span>输入 {{ formatTokens(detail.usage.inputTokens) }}</span>

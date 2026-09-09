@@ -7,6 +7,7 @@
 import type {
   AppConfig,
   AppInfo,
+  CatalogModel,
   GatewayConfig,
   GatewayStatus,
   Json,
@@ -81,7 +82,6 @@ const seedModels: ModelDef[] = [
     contextWindow: 200_000,
     modalities: ["text"],
     reasoningLevels: ["standard", "extended"],
-    pricing: { input: 3, output: 15, currency: "USD/1M" },
     extra: {},
   },
   {
@@ -90,7 +90,6 @@ const seedModels: ModelDef[] = [
     contextWindow: 128_000,
     modalities: ["text"],
     reasoningLevels: ["standard"],
-    pricing: { input: 0.27, output: 1.1, currency: "USD/1M" },
     extra: {},
   },
   {
@@ -99,7 +98,6 @@ const seedModels: ModelDef[] = [
     contextWindow: 128_000,
     modalities: ["text"],
     reasoningLevels: ["standard"],
-    pricing: { input: 0.07, output: 0.28, currency: "USD/1M" },
     extra: {},
   },
 ];
@@ -114,6 +112,40 @@ const seedOffers: Offer[] = [
 const seedRoutes: Route[] = [
   { alias: "claude-sonnet-4", modelSlug: "claude-sonnet-4", providerKey: "anthropic-official", extra: {} },
   { alias: "deepseek-pro", modelSlug: "deepseek-v4-pro", providerKey: "openai-relay", extra: {} },
+];
+
+/** models.dev 候选（mock；真实环境由后端 catalog_fetch 拉取）。 */
+const seedCatalog: CatalogModel[] = [
+  {
+    providerKey: "opencode",
+    providerName: "OpenCode Zen",
+    id: "muse-spark-1.3-contributor-free",
+    name: "Muse Spark 1.3 Free",
+    contextWindow: 1048576,
+    modalities: ["text", "image", "video", "pdf", "audio"],
+    reasoningLevels: ["minimal", "low", "medium", "high", "xhigh"],
+    pricing: { input: 0, output: 0, cache_read: 0 },
+  },
+  {
+    providerKey: "anthropic",
+    providerName: "Anthropic",
+    id: "claude-sonnet-4-6",
+    name: "Claude Sonnet 4.6",
+    contextWindow: 200000,
+    modalities: ["text", "image"],
+    reasoningLevels: [],
+    pricing: { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 },
+  },
+  {
+    providerKey: "google",
+    providerName: "Google",
+    id: "gemini-3.1-pro",
+    name: "Gemini 3.1 Pro",
+    contextWindow: 1048576,
+    modalities: ["text", "image", "pdf", "video", "audio"],
+    reasoningLevels: [],
+    pricing: { input: 2, output: 12 },
+  },
 ];
 
 const DEFAULT_SCRIPT = `-- Moon Bridge Next 插件示例：为出站请求注入自定义头
@@ -270,6 +302,7 @@ const traceDetails = new Map<string, TraceDetail>();
       stream: true,
       status: "ok",
       latencyMs: r.latencyMs,
+      ttftMs: r.ttftMs,
       usage: {
         inputTokens: r.inputTokens,
         outputTokens: r.outputTokens,
@@ -373,6 +406,42 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
       );
       if (idx >= 0) offers.splice(idx, 1);
       return undefined as T;
+    }
+
+    // ── 模型目录（models.dev）──
+    case "catalog_fetch":
+      return seedCatalog.map((m) => ({ ...m })) as T;
+    case "catalog_import": {
+      const list = (args as { models: CatalogModel[] }).models ?? [];
+      for (const c of list) {
+        upsert(
+          models,
+          {
+            slug: c.id,
+            displayName: c.name ?? null,
+            contextWindow: c.contextWindow ?? null,
+            modalities: c.modalities.length ? c.modalities : null,
+            reasoningLevels: c.reasoningLevels.length ? c.reasoningLevels : null,
+            extra: null,
+          },
+          (x) => x.slug,
+        );
+        // 定价口径在 offer：仅当该 (provider, model) 报价不存在时插入
+        if (Object.keys(c.pricing).length > 0) {
+          const exists = offers.some(
+            (o) => o.providerKey === c.providerKey && o.modelSlug === c.id,
+          );
+          if (!exists) {
+            offers.push({
+              providerKey: c.providerKey,
+              modelSlug: c.id,
+              pricing: { ...c.pricing },
+              endpointProtocol: null,
+            });
+          }
+        }
+      }
+      return list.length as T;
     }
 
     // ── Route ──

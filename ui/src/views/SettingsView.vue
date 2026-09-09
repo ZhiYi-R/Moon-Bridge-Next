@@ -125,7 +125,7 @@ async function save(restart = false) {
           <Select v-model="form.logLevel" :options="logOptions" />
         </div>
         <div class="space-y-1.5">
-          <Label for="s-token">Bearer Token（可选）</Label>
+          <Label for="s-token">Bearer Token</Label>
           <Input
             id="s-token"
             v-model="form.gateway.authToken"
@@ -134,7 +134,7 @@ async function save(restart = false) {
           />
         </div>
         <div class="space-y-1.5">
-          <Label for="s-proxy">出站代理（可选）</Label>
+          <Label for="s-proxy">出站代理</Label>
           <Input id="s-proxy" v-model="form.gateway.egressProxy" placeholder="http://127.0.0.1:7890" />
         </div>
         <div class="space-y-1.5">
@@ -147,8 +147,8 @@ async function save(restart = false) {
           </div>
         </div>
         <div class="space-y-1.5">
-          <Label for="s-timeout">上游超时（秒）</Label>
-          <Input id="s-timeout" v-model="form.gateway.requestTimeoutSecs" type="number" />
+          <Label for="s-timeout">上游超时</Label>
+          <Input id="s-timeout" v-model="form.gateway.requestTimeoutSecs" type="number" placeholder="60" />
         </div>
         <div class="flex items-center gap-2 md:col-span-2">
           <input id="s-auto" v-model="form.autoStart" type="checkbox" class="size-4 accent-primary" />

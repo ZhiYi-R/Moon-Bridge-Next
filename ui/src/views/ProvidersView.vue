@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { Pencil, Plus, Trash2 } from "lucide-vue-next";
-import { onMounted, reactive, ref } from "vue";
+import { ChevronDown, ChevronRight, Pencil, Plus, Search, Trash2 } from "lucide-vue-next";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 
 import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
@@ -8,11 +8,15 @@ import Card from "@/components/ui/Card.vue";
 import Input from "@/components/ui/Input.vue";
 import Label from "@/components/ui/Label.vue";
 import Modal from "@/components/ui/Modal.vue";
+import Pagination from "@/components/ui/Pagination.vue";
 import Select from "@/components/ui/Select.vue";
 import { useConfirm } from "@/composables/useConfirm";
 import {
   errMsg,
+  modelApi,
   pluginApi,
+  type ModelDef,
+  type Offer,
   type PluginBinding,
   type PluginRecord,
   type Provider,
@@ -80,6 +84,110 @@ function removeEndpoint(i: number) {
   if (form.endpoints.length === 0) form.endpoints.push(emptyEndpoint());
 }
 
+// ── 端点 ↔ 模型绑定：写入报价的 endpointProtocol，保存时统一 diff ──
+const allModels = ref<ModelDef[]>([]);
+const providerOffers = ref<Offer[]>([]);
+/** 打开弹窗时的报价快照，保存时对比出需要写入的绑定变更 */
+const originalOffers = ref<Offer[]>([]);
+const expandedEndpoint = ref<number | null>(null);
+const epModelQuery = ref("");
+const epModelPage = ref(1);
+/** 勾选面板每页行数：models.dev 全量导入后模型可达上万，避免一次渲染 */
+const EP_PAGE_SIZE = 50;
+
+const filteredEpModels = computed(() => {
+  const q = epModelQuery.value.trim().toLowerCase();
+  const list = q
+    ? allModels.value.filter(
+        (m) => m.slug.toLowerCase().includes(q) || (m.displayName ?? "").toLowerCase().includes(q),
+      )
+    : allModels.value;
+  const pageCount = Math.max(1, Math.ceil(list.length / EP_PAGE_SIZE));
+  return {
+    total: list.length,
+    pageCount,
+    items: list.slice((epModelPage.value - 1) * EP_PAGE_SIZE, epModelPage.value * EP_PAGE_SIZE),
+  };
+});
+watch([epModelQuery, expandedEndpoint], () => {
+  epModelPage.value = 1;
+});
+watch(
+  () => filteredEpModels.value.pageCount,
+  (c) => {
+    if (epModelPage.value > c) epModelPage.value = c;
+  },
+);
+
+/** 当前展开端点协议下的已勾选模型集合（同协议端点共享） */
+const checkedModels = computed(() => {
+  const ep = expandedEndpoint.value != null ? form.endpoints[expandedEndpoint.value] : undefined;
+  return new Set(providerOffers.value.filter((o) => o.endpointProtocol === ep?.protocol).map((o) => o.modelSlug));
+});
+
+function boundCount(protocol: string): number {
+  return providerOffers.value.filter((o) => o.endpointProtocol === protocol).length;
+}
+
+function offerFor(slug: string): Offer | undefined {
+  return providerOffers.value.find((o) => o.modelSlug === slug);
+}
+
+/** 勾选 = 仅走该协议端点组（保留已有定价）；取消勾选 = 回退「全部端点」 */
+function toggleEndpointModel(protocol: string, slug: string) {
+  const cur = offerFor(slug);
+  if (cur?.endpointProtocol === protocol) {
+    providerOffers.value = providerOffers.value.map((o) =>
+      o.modelSlug === slug ? { ...o, endpointProtocol: null } : o,
+    );
+  } else if (cur) {
+    providerOffers.value = providerOffers.value.map((o) =>
+      o.modelSlug === slug ? { ...o, endpointProtocol: protocol } : o,
+    );
+  } else {
+    providerOffers.value = [
+      ...providerOffers.value,
+      { providerKey: form.key, modelSlug: slug, pricing: null, endpointProtocol: protocol },
+    ];
+  }
+}
+
+function toggleEndpointPanel(i: number) {
+  if (expandedEndpoint.value === i) {
+    expandedEndpoint.value = null;
+  } else {
+    expandedEndpoint.value = i;
+    epModelQuery.value = "";
+  }
+}
+
+async function loadModelsOnce() {
+  if (allModels.value.length > 0) return;
+  allModels.value = await modelApi.list().catch(() => [] as ModelDef[]);
+}
+
+async function loadOfferBindings(providerKey: string) {
+  if (!providerKey) {
+    providerOffers.value = [];
+    originalOffers.value = [];
+    return;
+  }
+  const list = await modelApi.offerList(providerKey).catch(() => [] as Offer[]);
+  providerOffers.value = list.map((o) => ({ ...o }));
+  originalOffers.value = list.map((o) => ({ ...o }));
+}
+
+/** 写入绑定 diff：仅保存 protocol 有变化的报价；新建 provider 时 form.key 已在前一步落库 */
+async function saveOfferChanges() {
+  const orig = new Map(originalOffers.value.map((o) => [o.modelSlug, o]));
+  for (const o of providerOffers.value) {
+    const prev = orig.get(o.modelSlug);
+    if (!prev || prev.endpointProtocol !== o.endpointProtocol) {
+      await modelApi.offerSave({ ...o, providerKey: form.key });
+    }
+  }
+}
+
 async function loadPluginStates(providerKey: string) {
   const list = await pluginApi.list().catch(() => [] as PluginRecord[]);
   pluginList.value = list;
@@ -103,6 +211,10 @@ function newProvider() {
   Object.assign(form, emptyProvider());
   error.value = null;
   editing.value = true;
+  expandedEndpoint.value = null;
+  providerOffers.value = [];
+  originalOffers.value = [];
+  void loadModelsOnce();
   void loadPluginStates("");
 }
 
@@ -117,6 +229,9 @@ async function editProvider(p: Provider) {
   Object.assign(form, JSON.parse(JSON.stringify(p)));
   error.value = null;
   editing.value = true;
+  expandedEndpoint.value = null;
+  void loadModelsOnce();
+  await loadOfferBindings(p.key);
   await loadPluginStates(p.key);
 }
 
@@ -154,6 +269,8 @@ async function save() {
     }
     // binding 在网关启动时装配进门控表，变更后需重启生效
     if (bindingsChanged) await gateway.restart();
+    // 端点勾选的模型绑定 diff 写入报价
+    await saveOfferChanges();
     closeModal();
   } catch (e) {
     error.value = errMsg(e);
@@ -204,7 +321,7 @@ onMounted(() => {
           <Input id="p-key" v-model="form.key" placeholder="如 deepseek" :disabled="!!form.createdAt" />
         </div>
         <div class="space-y-1.5">
-          <Label for="p-version">协议版本头（可选）</Label>
+          <Label for="p-version">协议版本头</Label>
           <Input id="p-version" v-model="form.version" placeholder="2023-06-01" />
         </div>
         <div class="flex items-center gap-2 md:col-span-2">
@@ -237,6 +354,56 @@ onMounted(() => {
           <Button variant="ghost" size="icon" class="size-8" @click="removeEndpoint(i)">
             <Trash2 class="size-3.5 text-destructive" />
           </Button>
+          <!-- 服务模型：写入报价的端点绑定；同协议端点共享同一组勾选 -->
+          <div class="col-span-4">
+            <button
+              type="button"
+              class="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+              @click="toggleEndpointPanel(i)"
+            >
+              <ChevronDown v-if="expandedEndpoint === i" class="size-3.5" />
+              <ChevronRight v-else class="size-3.5" />
+              可用模型（{{ boundCount(ep.protocol) }}）
+            </button>
+            <div v-if="expandedEndpoint === i" class="mt-2 rounded-md border p-3">
+              <div v-if="allModels.length > 0" class="relative mb-2">
+                <Search class="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Input v-model="epModelQuery" placeholder="搜索模型…" class="pl-8" />
+              </div>
+              <div
+                v-if="allModels.length === 0"
+                class="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground"
+              >
+                暂无模型定义，请先到「模型」页创建。
+              </div>
+              <div v-else class="scrollbar-thin max-h-48 space-y-1 overflow-y-auto">
+                <label
+                  v-for="m in filteredEpModels.items"
+                  :key="m.slug"
+                  class="flex cursor-pointer items-center gap-2 py-0.5 text-sm"
+                >
+                  <input
+                    type="checkbox"
+                    class="size-4 accent-primary"
+                    :checked="checkedModels.has(m.slug)"
+                    @change="toggleEndpointModel(ep.protocol, m.slug)"
+                  />
+                  <span class="font-mono text-xs">{{ m.slug }}</span>
+                  <span v-if="m.displayName" class="text-xs text-muted-foreground">{{ m.displayName }}</span>
+                </label>
+                <p
+                  v-if="filteredEpModels.total > EP_PAGE_SIZE"
+                  class="border-t pt-2"
+                >
+                  <Pagination
+                    v-model:page="epModelPage"
+                    :page-count="filteredEpModels.pageCount"
+                    :total="filteredEpModels.total"
+                  />
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
         <Button variant="outline" size="sm" @click="addEndpoint">
           <Plus class="size-4" /> 添加端点
@@ -257,7 +424,7 @@ onMounted(() => {
           >
             <span class="min-w-0 truncate font-mono text-xs text-muted-foreground">
               {{ p.name }}
-              <span v-if="!p.enabled" class="text-warning">（全局停用）</span>
+              <span v-if="!p.enabled" class="text-warning">已全局停用</span>
             </span>
             <div class="w-32 shrink-0">
               <Select v-model="pluginStates[p.name]" :options="TRI_OPTIONS" small />

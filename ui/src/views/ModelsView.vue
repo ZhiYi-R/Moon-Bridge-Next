@@ -1,20 +1,23 @@
 <script setup lang="ts">
-import { Pencil, Plus, Trash2 } from "lucide-vue-next";
-import { computed, onMounted, reactive, ref } from "vue";
+import { CloudDownload, Pencil, Plus, Search, Trash2 } from "lucide-vue-next";
+import { computed, onMounted, reactive, ref, watch, type Ref } from "vue";
 
 import Button from "@/components/ui/Button.vue";
 import Card from "@/components/ui/Card.vue";
 import Input from "@/components/ui/Input.vue";
 import Label from "@/components/ui/Label.vue";
 import Modal from "@/components/ui/Modal.vue";
+import Pagination from "@/components/ui/Pagination.vue";
 import Select from "@/components/ui/Select.vue";
 import StringListInput from "@/components/ui/StringListInput.vue";
 import { useConfirm } from "@/composables/useConfirm";
-import type { KvEntry } from "@/components/ui/KvListInput.vue";
+import { useAutoPageSize } from "@/composables/useAutoPageSize";
 import {
+  catalogApi,
   errMsg,
   modelApi,
   providerApi,
+  type CatalogModel,
   type ModelDef,
   type Offer,
   type Provider,
@@ -23,6 +26,11 @@ import { formatCtx } from "@/lib/utils";
 
 const error = ref<string | null>(null);
 const { confirm } = useConfirm();
+/** 分页切片：按页号取子集，并保证页号不越界。 */
+function paginate<T>(list: T[], page: Ref<number>, pageSize: number): T[] {
+  return list.slice((page.value - 1) * pageSize, page.value * pageSize);
+}
+
 const textareaClass =
   "flex w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 /** 节头内嵌小号下拉。 */
@@ -31,6 +39,14 @@ const modelOptions = computed(() => models.value.map((m) => ({ value: m.slug, la
 
 // ───────────────────────── 模型定义 CRUD ─────────────────────────
 const models = ref<ModelDef[]>([]);
+const defScroll = ref<HTMLElement | null>(null);
+const { pageSize: defPageSize } = useAutoPageSize(defScroll);
+const defPage = ref(1);
+const defPageCount = computed(() => Math.max(1, Math.ceil(models.value.length / defPageSize.value)));
+const pagedModels = computed(() => paginate(models.value, defPage, defPageSize.value));
+watch(defPageCount, (c) => {
+  if (defPage.value > c) defPage.value = c;
+});
 const editing = ref(false);
 const isNew = ref(false);
 const busy = ref(false);
@@ -41,14 +57,8 @@ interface ModelForm {
   contextWindow: string;
   modalities: string[];
   reasoningLevels: string[];
-  /** 默认定价：五类已知 token 单价（USD/1M），留空表示不单独定价。 */
-  pricing: { input: string; output: string; cacheRead: string; cacheWrite: string; reasoning: string };
-  /** 定价中的未知键（保留原值，保存时合并回写）。 */
-  pricingExtra: KvEntry[];
   extraText: string;
 }
-
-const emptyPricing = () => ({ input: "", output: "", cacheRead: "", cacheWrite: "", reasoning: "" });
 
 /** 模态预置选项：text 为所有 LLM 天然支持，不作为勾选项（保存时始终隐含）；未知值动态追加。 */
 const KNOWN_MODALITIES = ["pdf", "image", "audio", "video"] as const;
@@ -71,27 +81,8 @@ const form = reactive<ModelForm>({
   contextWindow: "",
   modalities: [],
   reasoningLevels: [],
-  pricing: emptyPricing(),
-  pricingExtra: [],
   extraText: "{}",
 });
-
-/** 已知结构的对象 ↔ KV 编辑行互转。 */
-function objectToKv(v: unknown): KvEntry[] {
-  if (v === null || typeof v !== "object" || Array.isArray(v)) return [];
-  return Object.entries(v).map(([key, val]) => ({ key, value: String(val) }));
-}
-
-function kvToObject(entries: KvEntry[]): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const { key, value } of entries) {
-    const k = key.trim();
-    if (!k) continue;
-    const t = value.trim();
-    out[k] = t !== "" && !Number.isNaN(Number(t)) ? Number(t) : t;
-  }
-  return out;
-}
 
 async function loadModels() {
   try {
@@ -109,8 +100,6 @@ function newModel() {
     contextWindow: "",
     modalities: [],
     reasoningLevels: [],
-    pricing: emptyPricing(),
-    pricingExtra: [],
     extraText: "{}",
   });
   error.value = null;
@@ -119,9 +108,6 @@ function newModel() {
 
 function editModel(m: ModelDef) {
   isNew.value = false;
-  const p = (m.pricing ?? {}) as Record<string, unknown>;
-  const num = (k: string) => (typeof p[k] === "number" ? String(p[k]) : "");
-  const known = new Set(["input", "output", "cache_read", "cache_write", "reasoning"]);
   Object.assign(form, {
     slug: m.slug,
     displayName: m.displayName ?? "",
@@ -130,14 +116,6 @@ function editModel(m: ModelDef) {
       ? (m.modalities as string[]).filter((v) => v !== "text")
       : [],
     reasoningLevels: Array.isArray(m.reasoningLevels) ? (m.reasoningLevels as string[]) : [],
-    pricing: {
-      input: num("input"),
-      output: num("output"),
-      cacheRead: num("cache_read"),
-      cacheWrite: num("cache_write"),
-      reasoning: num("reasoning"),
-    },
-    pricingExtra: objectToKv(p).filter((e) => !known.has(e.key)),
     extraText: m.extra == null ? "{}" : JSON.stringify(m.extra, null, 2),
   });
   error.value = null;
@@ -166,33 +144,12 @@ async function saveModel() {
       return;
     }
   }
-  // 默认定价：五个已知键 + 未知键合并回写
-  const pricingObj: Record<string, unknown> = {};
-  const knownPrices: Array<[string, string]> = [
-    ["input", form.pricing.input],
-    ["output", form.pricing.output],
-    ["cache_read", form.pricing.cacheRead],
-    ["cache_write", form.pricing.cacheWrite],
-    ["reasoning", form.pricing.reasoning],
-  ];
-  for (const [key, raw] of knownPrices) {
-    const t = raw.trim();
-    if (!t) continue;
-    const n = Number(t);
-    if (Number.isNaN(n)) {
-      error.value = "默认定价须为数字";
-      return;
-    }
-    pricingObj[key] = n;
-  }
-  Object.assign(pricingObj, kvToObject(form.pricingExtra));
   const rec: ModelDef = {
     slug,
     displayName: form.displayName.trim() || null,
     contextWindow,
     modalities: form.modalities.length ? ["text", ...form.modalities] : null,
     reasoningLevels: form.reasoningLevels.length ? form.reasoningLevels : null,
-    pricing: Object.keys(pricingObj).length ? pricingObj : null,
     extra,
   };
   busy.value = true;
@@ -217,16 +174,143 @@ async function removeModel(slug: string) {
   }
 }
 
+// ───────────────────────── 从 models.dev 导入 ─────────────────────────
+const importModal = ref(false);
+const importLoading = ref(false);
+const importBusy = ref(false);
+const importError = ref<string | null>(null);
+const catalog = ref<CatalogModel[]>([]);
+const catalogLoaded = ref(false);
+const importQuery = ref("");
+/** 勾选集合，键为 `providerKey::id`（models.dev 允许不同 provider 有同名模型）。 */
+const importSelected = ref<Set<string>>(new Set());
+
+const catalogKey = (m: CatalogModel) => `${m.providerKey}::${m.id}`;
+/** 已存在于本地的 slug 集合，用于在列表里标注「已导入」。 */
+const existingSlugs = computed(() => new Set(models.value.map((m) => m.slug)));
+
+/** 搜索过滤：匹配模型 id、显示名、provider 名（大小写不敏感）。 */
+const filteredCatalog = computed(() => {
+  const q = importQuery.value.trim().toLowerCase();
+  if (!q) return catalog.value;
+  return catalog.value.filter(
+    (m) =>
+      m.id.toLowerCase().includes(q) ||
+      (m.name ?? "").toLowerCase().includes(q) ||
+      m.providerName.toLowerCase().includes(q),
+  );
+});
+
+// 导入目录同样分页：models.dev 全量上万条，一次渲染会卡顿；页大小按弹窗内可视高度自动计算
+const importScroll = ref<HTMLElement | null>(null);
+const { pageSize: importPageSize } = useAutoPageSize(importScroll);
+const importPage = ref(1);
+const importPageCount = computed(() => Math.max(1, Math.ceil(filteredCatalog.value.length / importPageSize.value)));
+const pagedCatalog = computed(() => paginate(filteredCatalog.value, importPage, importPageSize.value));
+watch(importQuery, () => {
+  importPage.value = 1;
+});
+
+async function openImport() {
+  importError.value = null;
+  importQuery.value = "";
+  importSelected.value = new Set();
+  importModal.value = true;
+  // 首次打开才拉取；后续复用（models.dev 数据大，避免重复拉取）
+  if (catalogLoaded.value) return;
+  importLoading.value = true;
+  try {
+    catalog.value = await catalogApi.fetch();
+    catalogLoaded.value = true;
+  } catch (e) {
+    importError.value = errMsg(e);
+  } finally {
+    importLoading.value = false;
+  }
+}
+
+async function refreshCatalog() {
+  importError.value = null;
+  importLoading.value = true;
+  try {
+    catalog.value = await catalogApi.fetch();
+    catalogLoaded.value = true;
+  } catch (e) {
+    importError.value = errMsg(e);
+  } finally {
+    importLoading.value = false;
+  }
+}
+
+function toggleSelect(m: CatalogModel) {
+  const key = catalogKey(m);
+  const next = new Set(importSelected.value);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  importSelected.value = next;
+}
+
+/** 全选/清空当前过滤结果。 */
+function toggleSelectAllFiltered() {
+  const keys = filteredCatalog.value.map(catalogKey);
+  const allSelected = keys.length > 0 && keys.every((k) => importSelected.value.has(k));
+  const next = new Set(importSelected.value);
+  if (allSelected) keys.forEach((k) => next.delete(k));
+  else keys.forEach((k) => next.add(k));
+  importSelected.value = next;
+}
+
+const allFilteredSelected = computed(() => {
+  const keys = filteredCatalog.value.map(catalogKey);
+  return keys.length > 0 && keys.every((k) => importSelected.value.has(k));
+});
+
+async function confirmImport() {
+  const chosen = catalog.value.filter((m) => importSelected.value.has(catalogKey(m)));
+  if (chosen.length === 0) {
+    importError.value = "请至少勾选一个模型";
+    return;
+  }
+  importError.value = null;
+  importBusy.value = true;
+  try {
+    await catalogApi.import(chosen);
+    importModal.value = false;
+    await loadModels();
+  } catch (e) {
+    importError.value = errMsg(e);
+  } finally {
+    importBusy.value = false;
+  }
+}
+
+/** 定价紧凑展示：input/output（USD/1M）。 */
+function catalogPrice(m: CatalogModel): string {
+  const i = m.pricing.input;
+  const o = m.pricing.output;
+  if (i == null && o == null) return "—";
+  return `$${i ?? "?"} / $${o ?? "?"}`;
+}
+
 // ───────────────────────── Offer 管理（provider 维度）─────────────────────────
 const providers = ref<Provider[]>([]);
 const selectedProvider = ref("");
 const offers = ref<Offer[]>([]);
+const offerScroll = ref<HTMLElement | null>(null);
+const { pageSize: offerPageSize } = useAutoPageSize(offerScroll);
+const offerPage = ref(1);
+const offerPageCount = computed(() => Math.max(1, Math.ceil(offers.value.length / offerPageSize.value)));
+const pagedOffers = computed(() => paginate(offers.value, offerPage, offerPageSize.value));
+watch(offerPageCount, (c) => {
+  if (offerPage.value > c) offerPage.value = c;
+});
 const offerBusy = ref(false);
 /** 定价弹窗：五类 token 独立定价（单位 USD / 1M tokens），留空表示未单独定价。 */
 const offerModal = ref(false);
 const offerError = ref<string | null>(null);
 const offerForm = reactive({
   modelSlug: "",
+  endpointProtocol: "",
   inputPrice: "",
   outputPrice: "",
   cacheReadPrice: "",
@@ -234,9 +318,20 @@ const offerForm = reactive({
   reasoningPrice: "",
 });
 
+/** 当前所选 provider 的端点协议去重列表（供 offer 绑定端点下拉）。 */
+const endpointProtocolOptions = computed(() => {
+  const p = providers.value.find((x) => x.key === selectedProvider.value);
+  const protos = Array.from(new Set((p?.endpoints ?? []).map((e) => e.protocol)));
+  return [
+    { value: "", label: "全部端点（按序故障转移）" },
+    ...protos.map((pr) => ({ value: pr, label: pr })),
+  ];
+});
+
 function openAddOffer() {
   offerError.value = null;
   Object.assign(offerForm, {
+    endpointProtocol: "",
     inputPrice: "",
     outputPrice: "",
     cacheReadPrice: "",
@@ -251,6 +346,7 @@ function editOffer(o: Offer) {
   const p = (o.pricing ?? {}) as Record<string, unknown>;
   const num = (k: string) => (typeof p[k] === "number" ? String(p[k]) : "");
   offerForm.modelSlug = o.modelSlug;
+  offerForm.endpointProtocol = o.endpointProtocol ?? "";
   Object.assign(offerForm, {
     inputPrice: num("input"),
     outputPrice: num("output"),
@@ -291,6 +387,7 @@ async function confirmOffer() {
       providerKey: selectedProvider.value,
       modelSlug: offerForm.modelSlug,
       pricing,
+      endpointProtocol: offerForm.endpointProtocol || null,
     });
     offerModal.value = false;
     await loadOffers();
@@ -326,6 +423,7 @@ async function loadOffers() {
 }
 
 async function onProviderChange() {
+  offerPage.value = 1;
   await loadOffers();
 }
 
@@ -375,7 +473,7 @@ onMounted(async () => {
           <Input id="m-name" v-model="form.displayName" placeholder="Claude Sonnet 4" />
         </div>
         <div class="space-y-1.5 md:col-span-2">
-          <Label for="m-ctx">上下文窗口（token，可选）</Label>
+          <Label for="m-ctx">上下文窗口</Label>
           <Input id="m-ctx" v-model="form.contextWindow" placeholder="200000" inputmode="numeric" />
         </div>
         <div class="space-y-1.5">
@@ -397,36 +495,11 @@ onMounted(async () => {
           </div>
         </div>
         <div class="space-y-1.5">
-          <Label>推理档位（各家支持的档位名不同，逐个添加）</Label>
+          <Label>推理档位</Label>
           <StringListInput v-model="form.reasoningLevels" placeholder="如 high 后回车添加" />
         </div>
         <div class="space-y-1.5 md:col-span-2">
-          <Label>默认定价（USD / 1M tokens，可选）</Label>
-          <div class="grid grid-cols-2 gap-3 sm:grid-cols-5">
-            <div class="space-y-1">
-              <span class="text-xs text-muted-foreground">输入</span>
-              <Input v-model="form.pricing.input" placeholder="3" inputmode="decimal" />
-            </div>
-            <div class="space-y-1">
-              <span class="text-xs text-muted-foreground">输出</span>
-              <Input v-model="form.pricing.output" placeholder="15" inputmode="decimal" />
-            </div>
-            <div class="space-y-1">
-              <span class="text-xs text-muted-foreground">缓存读</span>
-              <Input v-model="form.pricing.cacheRead" placeholder="0.3" inputmode="decimal" />
-            </div>
-            <div class="space-y-1">
-              <span class="text-xs text-muted-foreground">缓存写</span>
-              <Input v-model="form.pricing.cacheWrite" placeholder="3.75" inputmode="decimal" />
-            </div>
-            <div class="space-y-1">
-              <span class="text-xs text-muted-foreground">推理</span>
-              <Input v-model="form.pricing.reasoning" placeholder="5" inputmode="decimal" />
-            </div>
-          </div>
-        </div>
-        <div class="space-y-1.5 md:col-span-2">
-          <Label for="m-extra">扩展字段（自由 JSON）</Label>
+          <Label for="m-extra">扩展字段</Label>
           <textarea id="m-extra" v-model="form.extraText" rows="3" spellcheck="false" :class="textareaClass"></textarea>
         </div>
       </div>
@@ -436,41 +509,148 @@ onMounted(async () => {
       </template>
     </Modal>
 
+    <!-- 从 models.dev 导入弹窗 -->
+    <Modal
+      :open="importModal"
+      title="从 models.dev 导入模型"
+      width="max-w-3xl"
+      @close="importModal = false"
+    >
+      <div v-if="importError" class="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        {{ importError }}
+      </div>
+
+      <!-- 搜索 + 操作条 -->
+      <div class="mb-3 flex items-center gap-2">
+        <div class="relative flex-1">
+          <Search class="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input v-model="importQuery" placeholder="搜索模型 / provider…" class="pl-8" :disabled="importLoading" />
+        </div>
+        <Button variant="outline" size="sm" :disabled="importLoading" @click="refreshCatalog">
+          {{ importLoading ? "拉取中…" : "刷新" }}
+        </Button>
+      </div>
+
+      <div v-if="importLoading" class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">
+        正在从 models.dev 拉取模型库…
+      </div>
+      <div
+        v-else-if="catalog.length === 0"
+        class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
+      >
+        未获取到模型。点「刷新」重试，或检查网络。
+      </div>
+      <template v-else>
+        <div class="mb-2 flex items-center justify-between text-xs text-muted-foreground">
+          <label class="flex cursor-pointer items-center gap-1.5">
+            <input
+              type="checkbox"
+              class="size-4 accent-primary"
+              :checked="allFilteredSelected"
+              @change="toggleSelectAllFiltered"
+            />
+            <span>全选当前结果（{{ filteredCatalog.length }}）</span>
+          </label>
+          <span>已选 {{ importSelected.size }}</span>
+        </div>
+        <div ref="importScroll" class="scrollbar-thin max-h-[52vh] overflow-y-auto rounded-md border">
+          <table class="w-full text-center text-sm">
+            <thead class="thead-glass">
+              <tr class="text-center text-muted-foreground">
+                <th class="w-8 py-2"></th>
+                <th class="py-2 font-medium">模型</th>
+                <th class="py-2 font-medium">Provider</th>
+                <th class="py-2 font-medium">上下文</th>
+                <th class="py-2 font-medium">输入/输出</th>
+                <th class="py-2 font-medium">状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="m in pagedCatalog"
+                :key="catalogKey(m)"
+                class="cursor-pointer border-b last:border-0 hover:bg-accent/40"
+                @click="toggleSelect(m)"
+              >
+                <td class="py-1.5">
+                  <input
+                    type="checkbox"
+                    class="size-4 accent-primary"
+                    :checked="importSelected.has(catalogKey(m))"
+                    @click.stop="toggleSelect(m)"
+                  />
+                </td>
+                <td class="py-1.5">
+                  <div class="font-mono text-xs">{{ m.id }}</div>
+                  <div v-if="m.name" class="text-xs text-muted-foreground">{{ m.name }}</div>
+                </td>
+                <td class="py-1.5 text-xs text-muted-foreground">{{ m.providerName }}</td>
+                <td class="py-1.5 tabular-nums text-muted-foreground">{{ formatCtx(m.contextWindow) }}</td>
+                <td class="py-1.5 tabular-nums text-muted-foreground">{{ catalogPrice(m) }}</td>
+                <td class="py-1.5">
+                  <span v-if="existingSlugs.has(m.id)" class="text-xs text-muted-foreground">已存在</span>
+                  <span v-else class="text-xs text-emerald-600">新增</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="filteredCatalog.length > importPageSize" class="mt-2">
+          <Pagination v-model:page="importPage" :page-count="importPageCount" :total="filteredCatalog.length" />
+        </div>
+        <p class="mt-2 text-xs text-muted-foreground">
+          导入将写入模型定义；定价写入对应上游服务的报价（已有报价保留现价）。同名模型会被覆盖更新。
+        </p>
+      </template>
+
+      <template #footer>
+        <Button variant="ghost" size="sm" @click="importModal = false">取消</Button>
+        <Button size="sm" :disabled="importBusy || importSelected.size === 0" @click="confirmImport">
+          {{ importBusy ? "导入中…" : `导入所选（${importSelected.size}）` }}
+        </Button>
+      </template>
+    </Modal>
+
     <!-- 模型定义 + 模型报价：单卡双节，满版填满视口 -->
     <Card class="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <!-- 节：模型定义 -->
-      <section class="shrink-0">
+      <!-- 节：模型定义（均分高度，内部滚动） -->
+      <section class="flex min-h-0 flex-1 flex-col">
         <div class="flex items-center justify-between border-b px-5 py-3">
           <h3 class="card-title">模型定义</h3>
-          <Button size="sm" @click="newModel">
-            <Plus class="size-4" /> 新建模型
-          </Button>
+          <div class="flex items-center gap-2">
+            <Button variant="outline" size="sm" @click="openImport">
+              <CloudDownload class="size-4" /> 从 models.dev 导入
+            </Button>
+            <Button size="sm" @click="newModel">
+              <Plus class="size-4" /> 新建模型
+            </Button>
+          </div>
         </div>
-        <div class="px-5 py-4">
+        <div ref="defScroll" class="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">
           <div
             v-if="models.length === 0"
             class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
           >
             暂无模型定义，点击「新建模型」添加。
           </div>
-          <table v-else class="w-full text-sm">
-            <thead>
-              <tr class="border-b text-left text-muted-foreground">
-                <th class="pb-2 font-medium">标识</th>
-                <th class="pb-2 font-medium">显示名</th>
-                <th class="pb-2 text-right font-medium">上下文窗口</th>
-                <th class="pb-2 text-right font-medium">操作</th>
+          <table v-else class="w-full text-center text-sm">
+            <thead class="thead-glass">
+              <tr class="text-center text-muted-foreground">
+                <th class="py-2 font-medium">标识</th>
+                <th class="py-2 font-medium">显示名</th>
+                <th class="py-2 font-medium">上下文窗口</th>
+                <th class="py-2 font-medium">操作</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="m in models" :key="m.slug" class="border-b last:border-0">
+              <tr v-for="m in pagedModels" :key="m.slug" class="border-b last:border-0">
                 <td class="py-2 font-mono text-xs">{{ m.slug }}</td>
                 <td class="py-2">{{ m.displayName ?? "—" }}</td>
-                <td class="py-2 text-right tabular-nums text-muted-foreground">
+                <td class="py-2 tabular-nums text-muted-foreground">
                   {{ formatCtx(m.contextWindow) }}
                 </td>
                 <td class="py-2">
-                  <div class="flex justify-end gap-0.5">
+                  <div class="flex justify-center gap-0.5">
                     <Button variant="ghost" size="icon" class="size-7" @click="editModel(m)">
                       <Pencil class="size-3.5" />
                     </Button>
@@ -483,9 +663,12 @@ onMounted(async () => {
             </tbody>
           </table>
         </div>
+        <div v-if="models.length > defPageSize" class="shrink-0 border-t px-5 py-2">
+          <Pagination v-model:page="defPage" :page-count="defPageCount" :total="models.length" />
+        </div>
       </section>
 
-      <!-- 节：模型报价 -->
+      <!-- 节：模型报价（均分高度，内部滚动） -->
       <section class="flex min-h-0 flex-1 flex-col border-t">
         <div class="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b px-5 py-3">
           <h3 class="card-title">模型报价</h3>
@@ -494,7 +677,7 @@ onMounted(async () => {
             <Select v-model="selectedProvider" :options="providerOptions" small @update:model-value="onProviderChange" />
           </div>
         </div>
-        <div class="scrollbar-thin min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
+        <div ref="offerScroll" class="scrollbar-thin min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
           <div
             v-if="!selectedProvider"
             class="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground"
@@ -506,7 +689,7 @@ onMounted(async () => {
             <div class="flex items-end gap-3">
               <div class="flex-1 space-y-1.5">
                 <Label>模型</Label>
-                <Select v-model="offerForm.modelSlug" :options="modelOptions" placeholder="选择模型…" />
+                <Select v-model="offerForm.modelSlug" :options="modelOptions" placeholder="选择模型…" searchable />
               </div>
               <Button size="sm" class="h-9" :disabled="!offerForm.modelSlug" @click="openAddOffer">
                 <Plus class="size-4" /> 添加报价
@@ -520,28 +703,30 @@ onMounted(async () => {
             >
               该 provider 暂无报价。
             </div>
-            <table v-else class="w-full text-sm">
-              <thead>
-                <tr class="border-b text-left text-muted-foreground">
-                  <th class="pb-2 font-medium">模型</th>
-                  <th class="pb-2 text-right font-medium">输入</th>
-                  <th class="pb-2 text-right font-medium">输出</th>
-                  <th class="pb-2 text-right font-medium">缓存读</th>
-                  <th class="pb-2 text-right font-medium">缓存写</th>
-                  <th class="pb-2 text-right font-medium">推理</th>
-                  <th class="pb-2 text-right font-medium">操作</th>
+            <table v-else class="w-full text-center text-sm">
+              <thead class="thead-glass">
+                <tr class="text-center text-muted-foreground">
+                  <th class="py-2 font-medium">模型</th>
+                  <th class="py-2 font-medium">绑定端点</th>
+                  <th class="py-2 font-medium">输入</th>
+                  <th class="py-2 font-medium">输出</th>
+                  <th class="py-2 font-medium">缓存读</th>
+                  <th class="py-2 font-medium">缓存写</th>
+                  <th class="py-2 font-medium">推理</th>
+                  <th class="py-2 font-medium">操作</th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="o in offers" :key="o.modelSlug" class="border-b last:border-0">
+                <tr v-for="o in pagedOffers" :key="o.modelSlug" class="border-b last:border-0">
                   <td class="py-2 font-mono text-xs">{{ o.modelSlug }}</td>
-                  <td class="py-2 text-right tabular-nums">{{ price(o.pricing, "input") }}</td>
-                  <td class="py-2 text-right tabular-nums">{{ price(o.pricing, "output") }}</td>
-                  <td class="py-2 text-right tabular-nums">{{ price(o.pricing, "cache_read") }}</td>
-                  <td class="py-2 text-right tabular-nums">{{ price(o.pricing, "cache_write") }}</td>
-                  <td class="py-2 text-right tabular-nums">{{ price(o.pricing, "reasoning") }}</td>
+                  <td class="py-2 font-mono text-xs text-muted-foreground">{{ o.endpointProtocol || "全部" }}</td>
+                  <td class="py-2 tabular-nums">{{ price(o.pricing, "input") }}</td>
+                  <td class="py-2 tabular-nums">{{ price(o.pricing, "output") }}</td>
+                  <td class="py-2 tabular-nums">{{ price(o.pricing, "cache_read") }}</td>
+                  <td class="py-2 tabular-nums">{{ price(o.pricing, "cache_write") }}</td>
+                  <td class="py-2 tabular-nums">{{ price(o.pricing, "reasoning") }}</td>
                   <td class="py-2">
-                    <div class="flex justify-end gap-0.5">
+                    <div class="flex justify-center gap-0.5">
                       <Button variant="ghost" size="icon" class="size-7" title="编辑定价" @click="editOffer(o)">
                         <Pencil class="size-3.5" />
                       </Button>
@@ -555,6 +740,9 @@ onMounted(async () => {
             </table>
           </template>
         </div>
+        <div v-if="offers.length > offerPageSize" class="shrink-0 border-t px-5 py-2">
+          <Pagination v-model:page="offerPage" :page-count="offerPageCount" :total="offers.length" />
+        </div>
       </section>
     </Card>
 
@@ -567,6 +755,13 @@ onMounted(async () => {
     >
       <div v-if="offerError" class="mb-4 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
         {{ offerError }}
+      </div>
+      <div class="mb-4 space-y-1.5">
+        <Label>绑定端点</Label>
+        <Select v-model="offerForm.endpointProtocol" :options="endpointProtocolOptions" />
+        <p class="text-xs text-muted-foreground">
+          选择该模型走 provider 的哪个协议端点。选「全部端点」则按端点顺序故障转移（旧行为）。
+        </p>
       </div>
       <p class="mb-4 text-xs text-muted-foreground">单位：USD / 1M tokens；留空表示该项不单独定价。</p>
       <div class="grid gap-4 sm:grid-cols-2">
