@@ -9,6 +9,7 @@ use std::sync::Arc;
 use moonbridge_gateway::{parse_script_ref, ScriptRef};
 use moonbridge_store::{PluginBinding, PluginRecord};
 use serde::Serialize;
+use serde_json::Value;
 use tauri::State;
 
 use crate::commands::CmdResult;
@@ -44,8 +45,29 @@ pub fn plugin_get(state: State<'_, Arc<ManagedState>>, name: String) -> CmdResul
 }
 
 /// 新增或更新插件记录。
+///
+/// 启用动作（新建即启用 / 停用 → 启用）会校验插件 `MB.requires` 声明的网关设置，
+/// 不满足时拒绝并返回 [`REQUIREMENTS_ERROR_PREFIX`] 开头的结构化错误——前端弹提示框，
+/// 不自动修改设置。
 #[tauri::command]
 pub fn plugin_save(state: State<'_, Arc<ManagedState>>, plugin: PluginRecord) -> CmdResult<()> {
+    let old_enabled = state
+        .db
+        .get_plugin(&plugin.name)?
+        .map(|p| p.enabled)
+        .unwrap_or(false);
+    if plugin.enabled && !old_enabled {
+        let script = match script_file(&state, &plugin.script_ref)? {
+            Some(f) if f.is_file() => std::fs::read_to_string(&f).map_err(|e| e.to_string())?,
+            Some(_) => String::new(), // 文件脚本尚未落盘
+            None => plugin.script_ref.clone(), // 内联脚本即内容
+        };
+        let cfg = serde_json::to_value(state.config().gateway).map_err(|e| e.to_string())?;
+        let unmet = unmet_requirements(&cfg, &extract_lua_requires(&script));
+        if !unmet.is_empty() {
+            return Err(format!("{REQUIREMENTS_ERROR_PREFIX}\n{}", unmet.join("\n")).into());
+        }
+    }
     Ok(state.db.upsert_plugin(&plugin)?)
 }
 
@@ -147,6 +169,96 @@ pub struct PluginImportOutcome {
     pub message: Option<String>,
 }
 
+/// 启用门控：从 Lua 脚本尽力提取 `MB.requires = { key = value, ... }` 声明。
+///
+/// 键为网关配置（GatewayConfig）的 camelCase 字段名，值支持 true/false/整数/浮点数/
+/// 带引号字符串。行级剥离 `--` 注释后匹配，与 [`extract_lua_string_list`] 同一取舍。
+fn extract_lua_requires(script: &str) -> Vec<(String, Value)> {
+    let cleaned = script
+        .lines()
+        .map(|l| match l.find("--") {
+            Some(i) => &l[..i],
+            None => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut out = Vec::new();
+    let Some(pos) = cleaned.find("requires") else {
+        return out;
+    };
+    let Some(rest) = cleaned[pos + "requires".len()..].trim_start().strip_prefix('=') else {
+        return out;
+    };
+    let Some(open) = rest.find('{') else {
+        return out;
+    };
+    let rest = &rest[open..];
+    let Some(close) = rest.find('}') else {
+        return out;
+    };
+    for item in rest[1..close].split(',') {
+        let item = item.trim();
+        let Some(eq) = item.find('=') else {
+            continue;
+        };
+        let key = item[..eq].trim().trim_matches('"').to_string();
+        let raw = item[eq + 1..].trim();
+        let value = if raw == "true" {
+            Value::Bool(true)
+        } else if raw == "false" {
+            Value::Bool(false)
+        } else if let Ok(n) = raw.parse::<i64>() {
+            Value::Number(n.into())
+        } else if let Ok(n) = raw.parse::<f64>() {
+            serde_json::Number::from_f64(n).map(Value::Number).unwrap_or(Value::Null)
+        } else {
+            Value::String(raw.trim_matches(|c| c == '"' || c == '\'').to_string())
+        };
+        if !key.is_empty() {
+            out.push((key, value));
+        }
+    }
+    out
+}
+
+/// 校验消息里设置的中文别名（缺省回退字段名）。
+fn setting_label(key: &str) -> &str {
+    match key {
+        "sessionMarker" => "会话水印",
+        "traceRecordBodies" => "trace 记录请求/响应体",
+        _ => key,
+    }
+}
+
+/// 值的可读形式：bool 显示 开启/关闭，其余显示 JSON。
+fn fmt_setting(v: &Value) -> String {
+    match v {
+        Value::Bool(true) => "开启".to_string(),
+        Value::Bool(false) => "关闭".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// 对照当前网关配置计算未满足项；空 = 全部满足。
+fn unmet_requirements(cfg: &Value, requires: &[(String, Value)]) -> Vec<String> {
+    requires
+        .iter()
+        .filter(|(k, want)| cfg.get(k.as_str()) != Some(want))
+        .map(|(k, want)| {
+            let cur = cfg.get(k).unwrap_or(&Value::Null);
+            format!(
+                "「{}」需为 {}，当前 {}",
+                setting_label(k),
+                fmt_setting(want),
+                fmt_setting(cur)
+            )
+        })
+        .collect()
+}
+
+/// 启用门控错误前缀：前端据此弹出「设置不满足」提示框而非普通错误横幅。
+pub const REQUIREMENTS_ERROR_PREFIX: &str = "REQUIREMENTS";
+
 /// 从磁盘导入 `.lua` 插件文件：以文件名（去扩展名）为插件名，脚本拷贝进
 /// `plugins_dir` 并落库；同名插件已存在时跳过（不覆盖）。scopes/capabilities
 /// 尽力从脚本 `MB = { scopes = {...}, capabilities = {...} }` 声明提取，缺省
@@ -192,11 +304,19 @@ fn import_one(state: &ManagedState, path: &Path) -> PluginImportOutcome {
     if capabilities.is_empty() {
         capabilities = vec!["core".to_string()];
     }
+    // 导入即启用，但 `MB.requires` 未满足时保持停用（在结果 message 说明，不阻断导入）；
+    // 配置序列化失败时视为不校验（保持启用，不阻断导入）
+    let cfg = serde_json::to_value(state.config().gateway).unwrap_or(Value::Null);
+    let unmet = if cfg.is_null() {
+        Vec::new()
+    } else {
+        unmet_requirements(&cfg, &extract_lua_requires(&content))
+    };
     let rec = PluginRecord {
         name: name.clone(),
         source: "lua".to_string(),
         script_ref: format!("{name}.lua"),
-        enabled: true,
+        enabled: unmet.is_empty(),
         config: serde_json::Value::Null,
         scopes,
         capabilities,
@@ -213,7 +333,11 @@ fn import_one(state: &ManagedState, path: &Path) -> PluginImportOutcome {
         path: path_string,
         name,
         status: "imported".to_string(),
-        message: None,
+        message: if unmet.is_empty() {
+            None
+        } else {
+            Some(format!("已导入但保持停用：{}；可在设置中调整后启用", unmet.join("；")))
+        },
     }
 }
 
@@ -246,4 +370,46 @@ pub fn binding_delete(
     scope_key: String,
 ) -> CmdResult<()> {
     Ok(state.db.delete_binding(&plugin_name, &scope, &scope_key)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn extracts_requires_with_types_and_strips_comments() {
+        let script = r#"
+MB = {
+  version = "0.1.0",
+  -- requires = { fake = true } 注释里的声明不提取
+  requires = { sessionMarker = true, logLevel = "debug", maxBodyBytes = 1024, ratio = 0.5 },
+}
+"#;
+        let reqs = extract_lua_requires(script);
+        assert_eq!(reqs[0], ("sessionMarker".to_string(), json!(true)));
+        assert_eq!(reqs[1], ("logLevel".to_string(), json!("debug")));
+        assert_eq!(reqs[2], ("maxBodyBytes".to_string(), json!(1024)));
+        assert_eq!(reqs[3], ("ratio".to_string(), json!(0.5)));
+    }
+
+    #[test]
+    fn no_requires_or_malformed_yields_empty() {
+        assert!(extract_lua_requires("MB = { version = '0.1.0' }").is_empty());
+        assert!(extract_lua_requires("local requires = 42").is_empty());
+        assert!(extract_lua_requires("requires = { broken").is_empty());
+    }
+
+    #[test]
+    fn unmet_requirements_reports_current_and_expected() {
+        // 未满足：消息含中文别名与双方值
+        let unmet = unmet_requirements(&json!({ "sessionMarker": false }), &[("sessionMarker".into(), json!(true))]);
+        assert_eq!(unmet.len(), 1);
+        assert!(unmet[0].contains("会话水印"), "{}", unmet[0]);
+        assert!(unmet[0].contains("开启") && unmet[0].contains("关闭"));
+        // 满足：空
+        assert!(unmet_requirements(&json!({ "sessionMarker": true }), &[("sessionMarker".into(), json!(true))]).is_empty());
+        // 配置缺字段视为不满足
+        assert_eq!(unmet_requirements(&json!({}), &[("nope".into(), json!(true))]).len(), 1);
+    }
 }

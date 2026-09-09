@@ -8,6 +8,7 @@ import Card from "@/components/ui/Card.vue";
 import Input from "@/components/ui/Input.vue";
 import Label from "@/components/ui/Label.vue";
 import CodeEditor from "@/components/ui/CodeEditor.vue";
+import Modal from "@/components/ui/Modal.vue";
 import Switch from "@/components/ui/Switch.vue";
 import { useConfirm } from "@/composables/useConfirm";
 import { errMsg, isTauriRuntime, pluginApi, type PluginImportOutcome, type PluginRecord } from "@/lib/api";
@@ -147,9 +148,22 @@ async function save() {
     notice.value = `插件 “${name}” 已保存，重启网关后生效。`;
     await load();
   } catch (e) {
-    error.value = errMsg(e);
+    handleSaveError(e);
   } finally {
     busy.value = false;
+  }
+}
+
+/** 启用门控：`MB.requires` 未满足时后端返回该前缀的结构化错误，弹提示框而非横幅。 */
+const REQUIREMENTS_PREFIX = "REQUIREMENTS";
+const reqError = ref<string[] | null>(null);
+
+function handleSaveError(e: unknown) {
+  const msg = errMsg(e);
+  if (msg.startsWith(REQUIREMENTS_PREFIX)) {
+    reqError.value = msg.slice(REQUIREMENTS_PREFIX.length).split("\n").filter(Boolean);
+  } else {
+    error.value = msg;
   }
 }
 
@@ -160,7 +174,7 @@ async function toggleEnabled(p: PluginRecord) {
     needsRestart.value = true;
     await load();
   } catch (e) {
-    error.value = errMsg(e);
+    handleSaveError(e);
   }
 }
 
@@ -476,5 +490,19 @@ onMounted(() => {
         </ul>
       </div>
     </Card>
+
+    <!-- 启用门控：插件 MB.requires 声明的设置未满足时弹框提示，不自动修改 -->
+    <Modal :open="reqError !== null" title="无法启用插件" width="max-w-md" @close="reqError = null">
+      <p class="text-sm text-muted-foreground">以下网关设置未满足插件要求，请在「设置」中调整后重试：</p>
+      <ul class="mt-3 space-y-1.5 text-sm">
+        <li v-for="r in reqError" :key="r" class="flex gap-2">
+          <span class="shrink-0 text-destructive">•</span>
+          <span>{{ r }}</span>
+        </li>
+      </ul>
+      <template #footer>
+        <Button variant="outline" size="sm" @click="reqError = null">知道了</Button>
+      </template>
+    </Modal>
   </div>
 </template>
