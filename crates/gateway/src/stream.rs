@@ -17,6 +17,7 @@ use futures::StreamExt;
 use moonbridge_core::{CoreStreamEvent, Protocol, Usage};
 use moonbridge_protocol::{ChunkVerdict, RawBody, RawChunk, ReqCtx};
 use moonbridge_store::Database;
+use serde_json::Value;
 
 use crate::state::AppState;
 use crate::trace::TraceRecord;
@@ -63,6 +64,10 @@ struct StreamAudit {
     ctx: ReqCtx,
     upstream_model: String,
     trace_dir: Option<String>,
+    /// 请求/响应体可选记录：关闭时落盘前抹掉报文体。
+    record_bodies: bool,
+    /// trace 保留条数（0 = 不清理）。
+    trace_retention: usize,
     trace: Option<TraceRecord>,
     acc: Usage,
     ttft_ms: Option<i64>,
@@ -106,7 +111,10 @@ impl Drop for StreamAudit {
             t.ttft_ms = self.ttft_ms.map(|v| v as u64);
             t.status = status.to_string();
             t.error = err;
-            crate::trace::write(self.trace_dir.as_deref(), &t);
+            if !self.record_bodies {
+                t.client_request = Value::Null;
+            }
+            crate::trace::write(self.trace_dir.as_deref(), &t, self.trace_retention);
         }
     }
 }
@@ -139,6 +147,8 @@ pub fn build_stream_response(
         ctx: ctx.clone(),
         upstream_model,
         trace_dir: state.config.trace_dir.clone(),
+        record_bodies: state.config.trace_record_bodies,
+        trace_retention: state.config.trace_retention,
         trace: Some(trace),
         acc: Usage::default(),
         ttft_ms: None,
@@ -300,6 +310,8 @@ mod tests {
             ctx: ReqCtx::new("r1", Protocol::OpenAiResponse),
             upstream_model: "m-up".into(),
             trace_dir: None,
+            record_bodies: true,
+            trace_retention: 0,
             trace: None,
             acc: Usage::default(),
             ttft_ms: None,

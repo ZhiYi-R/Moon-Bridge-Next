@@ -209,8 +209,8 @@ pub async fn handle_request(
         Some(used_protocol),
         serde_json::json!({
             "method": up.method.to_string(),
-            "url": up.url,
-            "headers": up.headers,
+            "url": redact_url(&up.url),
+            "headers": redact_headers(&up.headers),
             "body": up.body,
         }),
     );
@@ -224,7 +224,10 @@ pub async fn handle_request(
             .await
             .unwrap_or_else(|_| text.clone());
         trace.status = "error".to_string();
-        trace.error = Some(msg.clone());
+        // 完整响应体归位 upstream_response 快照；error 只留简短摘要，
+        // 否则上游 4xx/5xx 的 HTML 错误页会整页塞进 trace.error。
+        trace.upstream_response = body_snapshot(&RawBody::Text { text });
+        trace.error = Some(format!("上游返回 HTTP {status}"));
         finish_audit(&state, &ctx, &mut trace, start, &Usage::default(), "error");
         return Err(GatewayError::Upstream {
             status: status.as_u16(),
@@ -541,8 +544,8 @@ fn outbound_trace(
         Some(outbound.protocol),
         serde_json::json!({
             "method": outbound.method,
-            "url": outbound.url,
-            "headers": outbound.headers,
+            "url": outbound.url.as_deref().map(redact_url),
+            "headers": redact_headers(&outbound.headers),
             "body": body_snapshot(&outbound.body),
         }),
     )
@@ -558,6 +561,50 @@ fn body_snapshot(body: &RawBody) -> Value {
     }
 }
 
+/// trace 快照中的请求头脱敏：疑似鉴权头的值整体替换为 `[REDACTED]`，
+/// 防止 Bearer Token / API Key / Cookie 泄漏进落盘的 trace 文件。
+fn redact_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            let n = name.to_ascii_lowercase();
+            let sensitive = n.contains("auth")
+                || n.contains("api-key")
+                || n.contains("apikey")
+                || n.contains("token")
+                || n.contains("cookie")
+                || n.contains("secret");
+            if sensitive {
+                (name.clone(), "[REDACTED]".to_string())
+            } else {
+                (name.clone(), value.clone())
+            }
+        })
+        .collect()
+}
+
+/// URL 查询参数中的密钥脱敏（如 Google 风格 `?key=API_KEY`）。
+fn redact_url(url: &str) -> String {
+    let Some((base, query)) = url.split_once('?') else {
+        return url.to_string();
+    };
+    let redacted: Vec<String> = query
+        .split('&')
+        .map(|pair| {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            let kl = k.to_ascii_lowercase();
+            if kl.contains("key") || kl.contains("token") || kl.contains("secret") {
+                format!("{k}=[REDACTED]")
+            } else if v.is_empty() {
+                k.to_string()
+            } else {
+                format!("{k}={v}")
+            }
+        })
+        .collect();
+    format!("{base}?{}", redacted.join("&"))
+}
+
 /// 收尾落审计：一行 usage + 一份 trace 文件。
 ///
 /// `trace` 的 `status` 与各报文快照由调用方**事先填好**，错误消息取 `trace.error`；
@@ -571,6 +618,16 @@ fn finish_audit(
     usage: &Usage,
     usage_status: &str,
 ) {
+    // 请求/响应体可选记录：关闭时只留元数据（方法/URL/头/用量），体一律不落盘。
+    // 在收口处统一抹除，覆盖成功/错误/短路/故障转移全部路径。
+    if !state.config.trace_record_bodies {
+        trace.client_request = Value::Null;
+        trace.client_response = Value::Null;
+        trace.upstream_response = Value::Null;
+        if let Some(obj) = trace.upstream_request.as_object_mut() {
+            obj.insert("body".to_string(), Value::Null);
+        }
+    }
     usage::record(
         &state.db,
         ctx,
@@ -582,7 +639,7 @@ fn finish_audit(
         None,
     );
     trace.latency_ms = start.elapsed().as_millis() as u64;
-    trace::write(state.config.trace_dir.as_deref(), trace);
+    trace::write(state.config.trace_dir.as_deref(), trace, state.config.trace_retention);
 }
 
 /// 插件短路直答：**照常**落 usage 与 trace 后，把插件给的报文回给客户端。
@@ -648,6 +705,31 @@ fn short_circuit(status: u16, headers: Vec<(String, String)>, body: RawBody) -> 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn redacts_sensitive_headers_and_url_keys() {
+        let headers = vec![
+            ("content-type".to_string(), "application/json".to_string()),
+            ("Authorization".to_string(), "Bearer sk-ant-secret".to_string()),
+            ("x-api-key".to_string(), "sk-123".to_string()),
+            ("X-Goog-Api-Key".to_string(), "goog-key".to_string()),
+            ("Cookie".to_string(), "session=abc".to_string()),
+        ];
+        let redacted = redact_headers(&headers);
+        assert_eq!(redacted[0].1, "application/json"); // 非鉴权头原样保留
+        for (name, value) in &redacted[1..] {
+            assert_eq!(value, "[REDACTED]", "{name} 应被脱敏");
+        }
+    }
+
+    #[test]
+    fn redacts_key_query_params_but_keeps_others() {
+        assert_eq!(
+            redact_url("https://x/v1?a=1&key=API_KEY&b=2"),
+            "https://x/v1?a=1&key=[REDACTED]&b=2"
+        );
+        assert_eq!(redact_url("https://x/v1/messages"), "https://x/v1/messages");
+    }
 
     fn upstream_req() -> UpstreamRequest {
         UpstreamRequest {

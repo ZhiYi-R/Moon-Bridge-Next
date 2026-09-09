@@ -35,6 +35,13 @@ pub struct GatewayConfig {
     /// trace 落盘目录；`None` 表示不落盘。
     #[serde(default)]
     pub trace_dir: Option<String>,
+    /// trace 是否记录请求/响应**体**；关闭时只留元数据（方法/URL/头/用量）。
+    /// 体可能含用户对话内容与敏感业务数据，按需开关。
+    #[serde(default = "default_trace_record_bodies")]
+    pub trace_record_bodies: bool,
+    /// trace 保留条数：落盘后按 mtime 只保留最近 N 条，`0` 表示不清理。
+    #[serde(default = "default_trace_retention")]
+    pub trace_retention: usize,
     /// 会话水印开关：把 `[mb:xxxxxx]` 附在助手**纯文本**输出末尾，靠客户端下一轮带回
     /// 来识别会话。入站会先剥净再转发上游，上游模型永远看不到它。
     ///
@@ -62,6 +69,12 @@ fn default_timeout() -> u64 {
 fn default_session_marker() -> bool {
     true
 }
+fn default_trace_record_bodies() -> bool {
+    true
+}
+fn default_trace_retention() -> usize {
+    500
+}
 fn default_session_depth() -> usize {
     64
 }
@@ -76,6 +89,8 @@ impl Default for GatewayConfig {
             plugins_dir: None,
             request_timeout_secs: default_timeout(),
             trace_dir: None,
+            trace_record_bodies: default_trace_record_bodies(),
+            trace_retention: default_trace_retention(),
             session_marker: default_session_marker(),
             session_table_depth: default_session_depth(),
         }
@@ -109,6 +124,12 @@ impl GatewayConfig {
         if let Some(v) = partial.trace_dir {
             cfg.trace_dir = Some(v);
         }
+        if let Some(v) = partial.trace_record_bodies {
+            cfg.trace_record_bodies = v;
+        }
+        if let Some(v) = partial.trace_retention {
+            cfg.trace_retention = v;
+        }
         if let Some(v) = partial.session_marker {
             cfg.session_marker = v;
         }
@@ -129,6 +150,8 @@ struct PartialConfig {
     plugins_dir: Option<String>,
     request_timeout_secs: Option<u64>,
     trace_dir: Option<String>,
+    trace_record_bodies: Option<bool>,
+    trace_retention: Option<usize>,
     session_marker: Option<bool>,
     session_table_depth: Option<usize>,
 }

@@ -4,7 +4,7 @@
 //! 文档约定一致。仅当 [`crate::config::GatewayConfig::trace_dir`] 有值时写入；
 //! 任何失败只告警，绝不影响主请求链路。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use moonbridge_core::Usage;
@@ -98,8 +98,11 @@ fn sanitize(s: &str) -> String {
     }
 }
 
-/// 写入一条 trace。`trace_dir` 为 `None`/空或写入失败时静默跳过（仅告警）。
-pub fn write(trace_dir: Option<&str>, rec: &TraceRecord) {
+/// 写入一条 trace，并按保留条数清理最老的记录。
+///
+/// `trace_dir` 为 `None`/空或写入失败时静默跳过（仅告警）；`retention` 为保留的
+/// 最大文件数（按修改时间从老到新），`0` 表示不清理。
+pub fn write(trace_dir: Option<&str>, rec: &TraceRecord, retention: usize) {
     let Some(dir) = trace_dir else { return };
     if dir.trim().is_empty() {
         return;
@@ -130,12 +133,91 @@ pub fn write(trace_dir: Option<&str>, rec: &TraceRecord) {
         }
         Err(e) => tracing::warn!(error = %e, "序列化 trace 失败"),
     }
+    prune(Path::new(dir), retention);
+}
+
+/// 按 mtime 保留最近 `retention` 条 trace，删除超出的最老文件，并清掉空目录。
+fn prune(dir: &Path, retention: usize) {
+    if retention == 0 {
+        return;
+    }
+    let mut files: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+    collect_json_files(dir, &mut files);
+    if files.len() <= retention {
+        return;
+    }
+    files.sort_by_key(|(_, m)| *m); // 最老的在前
+    for (path, _) in files.iter().take(files.len() - retention) {
+        if let Err(e) = std::fs::remove_file(path) {
+            tracing::warn!(error = %e, path = %path.display(), "清理过期 trace 失败");
+        }
+    }
+    remove_empty_dirs(dir);
+}
+
+fn collect_json_files(dir: &Path, out: &mut Vec<(PathBuf, std::time::SystemTime)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_json_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "json") {
+            let mtime = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            out.push((path, mtime));
+        }
+    }
+}
+
+/// 自底向上尝试删除空目录（非空时 remove_dir 失败即静默保留）。
+fn remove_empty_dirs(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            remove_empty_dirs(&path);
+            let _ = std::fs::remove_dir(&path);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn prunes_oldest_beyond_retention_and_keeps_newest() {
+        let dir = std::env::temp_dir().join(format!("mb-trace-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("s")).unwrap();
+        for i in 0..3 {
+            std::fs::write(dir.join("s").join(format!("{i}.json")), "{}").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20)); // 保证 mtime 可区分
+        }
+        prune(&dir, 2);
+        assert!(!dir.join("s").join("0.json").exists(), "最老的应被清理");
+        assert!(dir.join("s").join("1.json").exists());
+        assert!(dir.join("s").join("2.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn zero_retention_disables_prune() {
+        let dir = std::env::temp_dir().join(format!("mb-trace-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.json"), "{}").unwrap();
+        prune(&dir, 0);
+        assert!(dir.join("a.json").exists(), "0 表示不清理");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn sample(session: Option<&str>, model: &str) -> TraceRecord {
         TraceRecord {
@@ -173,7 +255,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mb-trace-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let rec = sample(Some("sess-1"), "claude-x");
-        write(Some(dir.to_str().unwrap()), &rec);
+        write(Some(dir.to_str().unwrap()), &rec, 0);
 
         let expected = dir.join("sess-1").join("claude-x");
         let entries: Vec<_> = std::fs::read_dir(&expected).unwrap().map(|e| e.unwrap().path()).collect();
@@ -188,8 +270,8 @@ mod tests {
     #[test]
     fn no_dir_is_noop() {
         // trace_dir 为 None / 空时应静默跳过，不 panic
-        write(None, &sample(None, "m"));
-        write(Some("  "), &sample(None, "m"));
+        write(None, &sample(None, "m"), 0);
+        write(Some("  "), &sample(None, "m"), 0);
     }
 
     /// 回归：`usage` 必须随外层一起序列化为 camelCase。
