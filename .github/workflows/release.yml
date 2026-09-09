@@ -1,10 +1,17 @@
 name: Release
 
-# 触发：推送 Release 前缀的 tag（如 Release/0.1.0、Release-0.1.0）。
+# 触发：
+#   * 每次推送到主干/开发分支 —— 全矩阵构建（CI 验证，不发布）
+#   * 推送 Release 前缀的 tag（如 Release/0.1.0、Release-0.1.0）—— 构建 + 发布
 on:
   push:
+    branches:
+      - main
+      - master
+      - develop
     tags:
       - "Release*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -130,6 +137,8 @@ jobs:
     name: Publish Release
     runs-on: ubuntu-latest
     needs: build
+    # 仅 Release tag 触发发布；分支推送只做构建验证
+    if: startsWith(github.ref, 'refs/tags/Release')
     permissions:
       contents: write
     steps:
