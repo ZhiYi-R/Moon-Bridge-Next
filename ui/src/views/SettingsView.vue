@@ -25,6 +25,7 @@ const form = reactive<AppConfig>({
     traceDir: null,
     traceRecordBodies: true,
     traceRetention: 500,
+    sessionMarker: true,
   },
   logLevel: "info",
   autoStart: true,
@@ -164,6 +165,15 @@ async function save(restart = false) {
             />
           </div>
           <div class="col-span-2 flex flex-col gap-2.5 border-t pt-4">
+            <div class="flex items-center gap-2">
+              <input
+                id="s-marker"
+                v-model="form.gateway.sessionMarker"
+                type="checkbox"
+                class="size-4 accent-primary"
+              />
+              <Label for="s-marker">会话水印</Label>
+            </div>
             <div class="flex items-center gap-2">
               <input
                 id="s-bodies"

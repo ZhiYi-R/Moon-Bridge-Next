@@ -196,6 +196,8 @@ export interface GatewayConfig {
   traceRecordBodies?: boolean;
   /** trace 保留条数（按 mtime 保留最近 N 条，0 = 不清理）。变更后需重启网关生效。 */
   traceRetention?: number;
+  /** 会话水印：往助手纯文本输出末尾附 [mb:xxxxxx] 标记以识别会话。变更后需重启网关生效。 */
+  sessionMarker?: boolean;
 }
 
 export interface AppConfig {
