@@ -1504,6 +1504,61 @@ async fn e2e_session_marker_stream_appends_own_text_block() {
     );
 }
 
+/// 流式跨协议回归：OpenAI Chat 系上游不为正文发 `BlockStart`（content 是裸
+/// BlockDelta）。旧水印判定只认 `BlockStart(Text)` ⇒ 这类流永不打标，客户端
+/// transcript 里没有水印可带回，每轮都被判成新会话（trace 侧 sessionId 逐轮漂移）。
+#[tokio::test]
+async fn e2e_session_marker_stream_chat_upstream_no_block_start() {
+    let base_url = spawn_mock_openai_chat().await;
+    let (state, _db) = setup_with("openai-chat", base_url, "gpt-4o", "test-model").await;
+
+    let body = json!({
+        "model": "test-model", "max_tokens": 64,
+        "messages": [{ "role": "user", "content": "Hi" }], "stream": true
+    });
+    let resp = dispatch::handle_request(state, Protocol::Anthropic, body, vec![], None)
+        .await
+        .expect("dispatch 应成功");
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let sse = String::from_utf8_lossy(&bytes).to_string();
+
+    assert!(sse.contains("Hello"), "正文增量不受影响: {sse}");
+    let tag = sse_tag(&sse).expect("chat 上游的纯文本流也应带水印: {sse}");
+
+    // 逐帧解析：正文块 0 由惰性开块补出块头，marker 自成一块且 start/stop 配对；
+    // chat 上游无正文 BlockStop，故正文块 0 不收尾（既有行为，非本次引入）
+    let frames: Vec<Value> = sse
+        .lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
+        .collect();
+    let starts: Vec<u64> = frames
+        .iter()
+        .filter(|f| f["type"] == "content_block_start")
+        .map(|f| f["index"].as_u64().unwrap())
+        .collect();
+    assert_eq!(starts, vec![0, 1], "正文块 0 应有块头、marker 应为块 1: {sse}");
+    let stops: Vec<u64> = frames
+        .iter()
+        .filter(|f| f["type"] == "content_block_stop")
+        .map(|f| f["index"].as_u64().unwrap())
+        .collect();
+    assert_eq!(stops, vec![1], "marker 块的 start/stop 必须配对: {sse}");
+    assert!(
+        frames.iter().any(|f| {
+            f["type"] == "content_block_delta"
+                && f["index"] == 1
+                && f["delta"]["text"] == format!("[mb:{tag}]")
+        }),
+        "marker 增量应只含完整水印: {sse}"
+    );
+    assert_eq!(
+        frames.last().and_then(|f| f["type"].as_str()),
+        Some("message_stop"),
+        "水印必须插在 message_stop 之前: {sse}"
+    );
+}
+
 /// 流式对照组：整轮出现过 `tool_use` ⇒ 一个 marker 都不该出现。
 #[tokio::test]
 async fn e2e_session_marker_absent_in_stream_with_tool_use() {

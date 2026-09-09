@@ -274,6 +274,20 @@ impl ClientStreamAdapter for AnthropicAdapter {
             CoreStreamEvent::BlockDelta { index, delta } => {
                 match delta {
                     StreamDelta::Text { text } => {
+                        // 惰性开块：chat 系上游（OpenAI Chat 等）正文只有裸
+                        // BlockDelta、无 BlockStart，必须补 content_block_start，
+                        // 否则客户端收到没有块头的孤立增量。上游已发过
+                        // BlockStart（anthropic/gemini/responses 路径）时
+                        // open_blocks 已含该 index，insert 返回 false 不重复。
+                        if st.open_blocks.insert(*index) {
+                            out.push(client_sse(
+                                "content_block_start",
+                                json!({
+                                    "type": "content_block_start", "index": index,
+                                    "content_block": { "type": "text", "text": "" }
+                                }),
+                            ));
+                        }
                         out.push(client_sse(
                             "content_block_delta",
                             json!({

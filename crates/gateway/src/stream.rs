@@ -14,7 +14,7 @@ use std::time::Instant;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
-use moonbridge_core::{CoreStreamEvent, Protocol, Usage};
+use moonbridge_core::{CoreStreamEvent, Protocol, StreamDelta, Usage};
 use moonbridge_protocol::{ChunkVerdict, RawBody, RawChunk, ReqCtx, StreamEncodeState};
 use moonbridge_store::Database;
 use serde_json::Value;
@@ -212,14 +212,30 @@ pub fn build_stream_response(
 
             // 先按本批事件更新水印判定状态，再决定注入 —— 顺序反了会漏判
             // 同批里 MessageStop 之前刚出现的 tool_use 块。
+            // BlockDelta 也要算：chat 系上游从不为正文发 BlockStart（OpenAI Chat
+            // 的 content / reasoning 是裸 delta），只看 BlockStart 会把这类流误判
+            // 成「没有输出文本」⇒ 水印永不注入、客户端 transcript 里没有可带回的
+            // marker，每轮都被判成新会话。delta 携带的 index 同样要挤占 next_index，
+            // 否则 marker 块会与惰性承接正文的 0 号块撞车。
             for ev in &events {
-                if let CoreStreamEvent::BlockStart { index, block } = ev {
-                    next_index = next_index.max(*index + 1);
-                    match block {
-                        moonbridge_core::ContentBlock::ToolUse { .. } => saw_tool = true,
-                        moonbridge_core::ContentBlock::Text { .. } => saw_text = true,
-                        _ => {}
+                match ev {
+                    CoreStreamEvent::BlockStart { index, block } => {
+                        next_index = next_index.max(*index + 1);
+                        match block {
+                            moonbridge_core::ContentBlock::ToolUse { .. } => saw_tool = true,
+                            moonbridge_core::ContentBlock::Text { .. } => saw_text = true,
+                            _ => {}
+                        }
                     }
+                    CoreStreamEvent::BlockDelta { index, delta } => {
+                        next_index = next_index.max(*index + 1);
+                        match delta {
+                            StreamDelta::Text { .. } => saw_text = true,
+                            StreamDelta::ToolInput { .. } => saw_tool = true,
+                            _ => {}
+                        }
+                    }
+                    _ => {}
                 }
             }
             // [CORE] 会话水印：在 MessageStop 之前插一段独立的 marker 文本块。
