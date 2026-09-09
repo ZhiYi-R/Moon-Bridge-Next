@@ -58,6 +58,11 @@ pub enum ContentBlock {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
+        /// 原始形态为 Anthropic `redacted_thinking`（凭据在 data、不可解出明文）。
+        /// 与 `display:"omitted"` 的空文本 thinking 块是不同形态，回传时
+        /// 必须按原形态还原，否则上游 400（thinking blocks cannot be modified）。
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        redacted: bool,
     },
 }
 

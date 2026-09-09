@@ -402,6 +402,7 @@ mod tests {
             content: vec![ContentBlock::Reasoning {
                 text: "hmm".into(),
                 signature: None,
+                redacted: false,
             }],
             ..with_tool.clone()
         };

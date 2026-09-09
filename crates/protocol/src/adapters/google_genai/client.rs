@@ -11,11 +11,12 @@
 //! 请求体不含 `model`；此处优先取体内 `model` 字段，回退到 `ctx.model_alias`。
 
 use async_trait::async_trait;
-use moonbridge_core::{CoreRequest, CoreResponse, Protocol, Result};
+use moonbridge_core::{CoreRequest, CoreResponse, Protocol, Reasoning, Result};
 use serde_json::{json, Value};
 
 use super::dto;
 use super::GoogleGenAiAdapter;
+use crate::adapters::effort_from_budget;
 use crate::adapter::ClientAdapter;
 use crate::context::ReqCtx;
 
@@ -60,6 +61,25 @@ impl ClientAdapter for GoogleGenAiAdapter {
             req.top_p = gc.get("topP").and_then(|v| v.as_f64()).map(|v| v as f32);
             if let Some(stops) = gc.get("stopSequences").and_then(|v| v.as_array()) {
                 req.stop = stops.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+            }
+            // thinkingConfig → req.reasoning：thinkingLevel 直接映射；
+            // thinkingBudget 经档位表逆推 effort（与上游出站方向互逆）
+            if let Some(tc) = gc.get("thinkingConfig") {
+                let effort = tc
+                    .get("thinkingLevel")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .or_else(|| {
+                        tc.get("thinkingBudget")
+                            .and_then(|v| v.as_u64())
+                            .map(|b| effort_from_budget(b as u32).to_string())
+                    });
+                if let Some(effort) = effort.filter(|s| !s.is_empty()) {
+                    req.reasoning = Some(Reasoning {
+                        effort: Some(effort),
+                        summary: None,
+                    });
+                }
             }
         }
 
@@ -142,5 +162,17 @@ mod tests {
         assert_eq!(out["candidates"][0]["finishReason"], "STOP");
         assert_eq!(out["usageMetadata"]["promptTokenCount"], 6);
         assert_eq!(out["modelVersion"], "gemini-2.0-flash");
+    }
+
+    #[tokio::test]
+    async fn parses_thinking_config_to_reasoning() {
+        let adapter = GoogleGenAiAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::GoogleGenai);
+        let req = adapter.to_core_request(&ctx, json!({
+            "model": "gemini",
+            "generationConfig": { "thinkingConfig": { "thinkingLevel": "high" } },
+            "contents": [{ "role": "user", "parts": [{ "text": "Hi" }] }]
+        })).await.unwrap();
+        assert_eq!(req.reasoning.as_ref().and_then(|r| r.effort.as_deref()), Some("high"));
     }
 }

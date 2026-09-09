@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 
 use super::dto::{map_finish_reason, unmap_stop_reason, usage_from_gemini, usage_object};
 use super::GoogleGenAiAdapter;
-use crate::adapter::{ClientStreamAdapter, ProviderStreamAdapter};
+use crate::adapter::{ClientStreamAdapter, ProviderStreamAdapter, StreamEncodeState};
 use crate::context::ReqCtx;
 use crate::raw::{ChunkStage, RawBody, RawChunk};
 
@@ -129,6 +129,23 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
                         signature,
                     }),
                 });
+            } else {
+                // 官方流式形态：thoughtSignature 可能在末块以空 text part 返回
+                // （官方文档：解析器必须检查空文本部分）。带非空文本的 part 不在此
+                // 处理——凭据属于文本块，无独立承载位，丢弃不影响强校验场景。
+                let has_text = p.get("text").and_then(|v| v.as_str()).is_some_and(|t| !t.is_empty());
+                if !has_text {
+                    if let Some(sig) = p
+                        .get("thoughtSignature")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                    {
+                        out.push(CoreStreamEvent::BlockDelta {
+                            index: 0,
+                            delta: StreamDelta::ReasoningSignature { signature: sig.to_string() },
+                        });
+                    }
+                }
             }
         }
 
@@ -173,7 +190,12 @@ impl ClientStreamAdapter for GoogleGenAiAdapter {
     /// 局限：入口方向的工具参数增量（ToolInput）无状态难以累积为完整 `args`，
     /// 故 functionCall 在 BlockStart 时以已知 input 一次性下发（Gemini 入口为次要
     /// 链路，未挂载 HTTP 路由，主要用于矩阵完整性与测试）。
-    fn encode(&self, _ctx: &ReqCtx, ev: &CoreStreamEvent) -> Result<Vec<RawChunk>> {
+    fn encode(
+        &self,
+        _ctx: &ReqCtx,
+        ev: &CoreStreamEvent,
+        _st: &mut StreamEncodeState,
+    ) -> Result<Vec<RawChunk>> {
         let mut out = Vec::new();
         match ev {
             CoreStreamEvent::MessageStart { .. } => {}
@@ -233,6 +255,29 @@ mod tests {
 
     fn chunk(v: Value) -> RawChunk {
         RawChunk::json(ChunkStage::UpstreamChunk, Protocol::GoogleGenai, None, v)
+    }
+
+    /// 官方流式形态：签名可能在末块以空 text part 返回，需转为凭据增量。
+    #[test]
+    fn decodes_signature_only_trailing_part() {
+        let adapter = GoogleGenAiAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::GoogleGenai);
+        let evs = adapter
+            .decode(
+                &ctx,
+                &chunk(json!({
+                    "candidates": [{ "content": { "role": "model", "parts": [
+                        { "text": "", "thoughtSignature": "SIG" }
+                    ] } }]
+                })),
+            )
+            .unwrap();
+        match &evs[0] {
+            CoreStreamEvent::BlockDelta { delta: StreamDelta::ReasoningSignature { signature }, .. } => {
+                assert_eq!(signature, "SIG");
+            }
+            other => panic!("expected signature delta, got {other:?}"),
+        }
     }
 
     #[test]
@@ -327,7 +372,7 @@ mod tests {
         let ctx = ReqCtx::new("r1", Protocol::GoogleGenai);
 
         let evs = adapter
-            .encode(&ctx, &CoreStreamEvent::BlockDelta { index: 0, delta: StreamDelta::Text { text: "Hi".into() } })
+            .encode(&ctx, &CoreStreamEvent::BlockDelta { index: 0, delta: StreamDelta::Text { text: "Hi".into() } }, &mut StreamEncodeState::default())
             .unwrap();
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].data.as_json().unwrap()["candidates"][0]["content"]["parts"][0]["text"], "Hi");
@@ -339,6 +384,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     usage: Some(Usage { input_tokens: 3, output_tokens: 2, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0 }),
                 },
+                &mut StreamEncodeState::default(),
             )
             .unwrap();
         let data = evs[0].data.as_json().unwrap();
@@ -350,7 +396,7 @@ mod tests {
     fn encode_message_start_and_stop_are_silent() {
         let adapter = GoogleGenAiAdapter;
         let ctx = ReqCtx::new("r1", Protocol::GoogleGenai);
-        assert!(adapter.encode(&ctx, &CoreStreamEvent::MessageStart { id: "x".into(), model: "g".into() }).unwrap().is_empty());
-        assert!(adapter.encode(&ctx, &CoreStreamEvent::MessageStop).unwrap().is_empty());
+        assert!(adapter.encode(&ctx, &CoreStreamEvent::MessageStart { id: "x".into(), model: "g".into() }, &mut StreamEncodeState::default()).unwrap().is_empty());
+        assert!(adapter.encode(&ctx, &CoreStreamEvent::MessageStop, &mut StreamEncodeState::default()).unwrap().is_empty());
     }
 }

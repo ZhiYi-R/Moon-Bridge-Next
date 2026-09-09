@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 
 use super::dto::{map_finish_reason, unmap_stop_reason, usage_from_chat, usage_object};
 use super::OpenAiChatAdapter;
-use crate::adapter::{ClientStreamAdapter, ProviderStreamAdapter};
+use crate::adapter::{ClientStreamAdapter, ProviderStreamAdapter, StreamEncodeState};
 use crate::context::ReqCtx;
 use crate::raw::{ChunkStage, RawBody, RawChunk};
 
@@ -63,7 +63,12 @@ impl ClientStreamAdapter for OpenAiChatAdapter {
         Protocol::OpenAiChat
     }
 
-    fn encode(&self, ctx: &ReqCtx, ev: &CoreStreamEvent) -> Result<Vec<RawChunk>> {
+    fn encode(
+        &self,
+        ctx: &ReqCtx,
+        ev: &CoreStreamEvent,
+        _st: &mut StreamEncodeState,
+    ) -> Result<Vec<RawChunk>> {
         let model = ctx.model_alias.as_str();
         let mut out = Vec::new();
         match ev {
@@ -252,12 +257,12 @@ mod tests {
         ctx.model_alias = "gpt-4o".to_string();
 
         let evs = adapter
-            .encode(&ctx, &CoreStreamEvent::BlockDelta { index: 0, delta: StreamDelta::Text { text: "Hi".into() } })
+            .encode(&ctx, &CoreStreamEvent::BlockDelta { index: 0, delta: StreamDelta::Text { text: "Hi".into() } }, &mut StreamEncodeState::default())
             .unwrap();
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].data.as_json().unwrap()["choices"][0]["delta"]["content"], "Hi");
 
-        let evs = adapter.encode(&ctx, &CoreStreamEvent::MessageStop).unwrap();
+        let evs = adapter.encode(&ctx, &CoreStreamEvent::MessageStop, &mut StreamEncodeState::default()).unwrap();
         match &evs[0].data {
             RawBody::Text { text } => assert_eq!(text, "[DONE]"),
             other => panic!("expected [DONE] text, got {other:?}"),
@@ -270,7 +275,7 @@ mod tests {
         let mut ctx = ReqCtx::new("r1", Protocol::OpenAiChat);
         ctx.model_alias = "m".to_string();
         let evs = adapter
-            .encode(&ctx, &CoreStreamEvent::BlockDelta { index: 0, delta: StreamDelta::Reasoning { text: "think".into() } })
+            .encode(&ctx, &CoreStreamEvent::BlockDelta { index: 0, delta: StreamDelta::Reasoning { text: "think".into() } }, &mut StreamEncodeState::default())
             .unwrap();
         let d = &evs[0].data.as_json().unwrap()["choices"][0]["delta"];
         assert_eq!(d["reasoning_content"], "think", "DeepSeek 约定");

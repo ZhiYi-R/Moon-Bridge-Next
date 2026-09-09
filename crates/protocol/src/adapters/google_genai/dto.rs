@@ -131,7 +131,7 @@ pub fn core_to_contents(messages: &[Message]) -> Vec<Value> {
                         "functionResponse": { "name": name, "response": { "result": text_of(content) } }
                     }));
                 }
-                ContentBlock::Reasoning { text, signature } => {
+                ContentBlock::Reasoning { text, signature, .. } => {
                     // 历史 thought 回传：Gemini 2.5 多轮 function calling 要求
                     // thoughtSignature 原样带回（缺失会被拒或退化）。
                     let mut part = json!({ "thought": true });
@@ -148,7 +148,26 @@ pub fn core_to_contents(messages: &[Message]) -> Vec<Value> {
             }
         }
         if !parts.is_empty() {
-            out.push(json!({ "role": role, "parts": parts }));
+            // 连续 Tool 消息合并为单个 user content：官方要求当前回合内
+            // 所有 functionResponse 紧跟全部 functionCall，拆成多个 user
+            // 回合可能触发严格校验 400
+            let merged = m.role == Role::Tool
+                && out
+                    .last()
+                    .and_then(|c: &Value| c.get("role"))
+                    .and_then(|r| r.as_str())
+                    == Some("user");
+            if merged {
+                if let Some(arr) = out
+                    .last_mut()
+                    .and_then(|c| c.get_mut("parts"))
+                    .and_then(|p| p.as_array_mut())
+                {
+                    arr.extend(parts);
+                }
+            } else {
+                out.push(json!({ "role": role, "parts": parts }));
+            }
         }
     }
     out
@@ -264,7 +283,7 @@ pub fn core_to_parts(content: &[ContentBlock]) -> Vec<Value> {
                     parts.push(json!({ "inlineData": { "mimeType": media_type, "data": data } }));
                 }
             }
-            ContentBlock::Reasoning { text, signature } => {
+            ContentBlock::Reasoning { text, signature, .. } => {
                 // thought part 回传：凭据（thoughtSignature）随 part 原样带回
                 let mut part = json!({ "thought": true });
                 if !text.is_empty() {
@@ -317,19 +336,19 @@ pub fn part_to_blocks(p: &Value) -> Vec<ContentBlock> {
         if !t.is_empty() {
             if thought {
                 // thought part：明文 + thoughtSignature（回传凭据）→ Reasoning 块
-                out.push(ContentBlock::Reasoning { text: t.to_string(), signature });
+                out.push(ContentBlock::Reasoning { text: t.to_string(), signature, redacted: false });
             } else {
                 out.push(ContentBlock::text(t));
             }
         } else if let Some(sig) = signature {
             // 无文本但带凭据的 part：凭据不能丢，否则多轮回传缺失
-            out.push(ContentBlock::Reasoning { text: String::new(), signature: Some(sig) });
+            out.push(ContentBlock::Reasoning { text: String::new(), signature: Some(sig), redacted: false });
         }
     } else if p.get("functionCall").is_none() {
         // 非文本且非 functionCall 的 part 带凭据：凭据不能丢；
         // functionCall part 的凭据归 ToolUse 块（见下），不在此处理
         if let Some(sig) = signature {
-            out.push(ContentBlock::Reasoning { text: String::new(), signature: Some(sig) });
+            out.push(ContentBlock::Reasoning { text: String::new(), signature: Some(sig), redacted: false });
         }
     }
     if let Some(fc) = p.get("functionCall") {
@@ -534,7 +553,7 @@ mod tests {
         let part = json!({ "text": "thinking...", "thought": true, "thoughtSignature": "SIG" });
         let blocks = part_to_blocks(&part);
         match &blocks[0] {
-            ContentBlock::Reasoning { text, signature: Some(sig) } => {
+            ContentBlock::Reasoning { text, signature: Some(sig), .. } => {
                 assert_eq!(text, "thinking...");
                 assert_eq!(sig, "SIG");
             }
@@ -662,6 +681,37 @@ mod tests {
             msg,
         ]);
         assert_eq!(contents[1]["parts"][0]["functionCall"]["thoughtSignature"], "SIG");
+    }
+
+    /// 连续 Tool 消息合并为单个 user content（官方：FR 紧跟全部 FC，
+    /// 拆多个 user 回合可能触发严格校验 400）。
+    #[test]
+    fn consecutive_tool_results_merge_into_one_user_content() {
+        let msgs = vec![
+            Message::text(Role::User, "q"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::ToolUse { id: "c1".into(), name: "a".into(), namespace: None, input: json!({}), signature: None },
+                    ContentBlock::ToolUse { id: "c2".into(), name: "b".into(), namespace: None, input: json!({}), signature: None },
+                ],
+                ext: Default::default(),
+            },
+            Message {
+                role: Role::Tool,
+                content: vec![ContentBlock::ToolResult { tool_use_id: "c1".into(), content: vec![ContentBlock::text("r1")], is_error: false }],
+                ext: Default::default(),
+            },
+            Message {
+                role: Role::Tool,
+                content: vec![ContentBlock::ToolResult { tool_use_id: "c2".into(), content: vec![ContentBlock::text("r2")], is_error: false }],
+                ext: Default::default(),
+            },
+        ];
+        let contents = core_to_contents(&msgs);
+        assert_eq!(contents.len(), 3, "两个 Tool 结果应合并为一个 user 回合");
+        assert_eq!(contents[2]["role"], "user");
+        assert_eq!(contents[2]["parts"].as_array().unwrap().len(), 2);
     }
 
     #[test]

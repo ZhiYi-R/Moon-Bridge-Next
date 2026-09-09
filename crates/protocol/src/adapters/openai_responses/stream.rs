@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use super::client::usage_from_value;
 use super::dto::{self, event};
 use super::OpenAiResponsesAdapter;
-use crate::adapter::{ClientStreamAdapter, ProviderStreamAdapter};
+use crate::adapter::{ClientStreamAdapter, ProviderStreamAdapter, StreamEncodeState};
 use crate::context::ReqCtx;
 use crate::raw::{ChunkStage, RawChunk};
 
@@ -36,7 +36,12 @@ impl ClientStreamAdapter for OpenAiResponsesAdapter {
         Protocol::OpenAiResponse
     }
 
-    fn encode(&self, ctx: &ReqCtx, ev: &CoreStreamEvent) -> Result<Vec<RawChunk>> {
+    fn encode(
+        &self,
+        ctx: &ReqCtx,
+        ev: &CoreStreamEvent,
+        _st: &mut StreamEncodeState,
+    ) -> Result<Vec<RawChunk>> {
         let mut out = Vec::new();
         match ev {
             CoreStreamEvent::MessageStart { id, model } => {
@@ -143,7 +148,7 @@ impl ClientStreamAdapter for OpenAiResponsesAdapter {
             CoreStreamEvent::BlockStop { index, block } => {
                 // reasoning 块：收尾事件用 reasoning item 形态（含 encrypted_content 凭据），
                 // 客户端累积后下一轮原样回传；其余块维持 message/output_text 形态。
-                if let Some(ContentBlock::Reasoning { text, signature }) = block {
+                if let Some(ContentBlock::Reasoning { text, signature, .. }) = block {
                     let mut item = json!({
                         "type": "reasoning",
                         "id": item_id(*index),
@@ -266,7 +271,7 @@ impl ProviderStreamAdapter for OpenAiResponsesAdapter {
                         signature: None,
                     },
                     // reasoning item：后续 summary/reasoning 文本增量挂同一 output_index
-                    Some("reasoning") => ContentBlock::Reasoning { text: String::new(), signature: None },
+                    Some("reasoning") => ContentBlock::Reasoning { text: String::new(), signature: None, redacted: false },
                     _ => ContentBlock::text(""),
                 };
                 out.push(CoreStreamEvent::BlockStart { index: output_index(&data), block });
@@ -318,7 +323,7 @@ impl ProviderStreamAdapter for OpenAiResponsesAdapter {
                         .filter(|s| !s.is_empty());
                     // 无明文且无凭据：不发 reasoning 形态收尾（encode 回退 message 形态）
                     if !text.is_empty() || signature.is_some() {
-                        block = Some(ContentBlock::Reasoning { text, signature });
+                        block = Some(ContentBlock::Reasoning { text, signature, redacted: false });
                     }
                 }
                 out.push(CoreStreamEvent::BlockStop {
@@ -438,7 +443,7 @@ mod tests {
             .unwrap();
         match &evs[0] {
             CoreStreamEvent::BlockStop {
-                block: Some(ContentBlock::Reasoning { text, signature: Some(enc) }),
+                block: Some(ContentBlock::Reasoning { text, signature: Some(enc), .. }),
                 ..
             } => {
                 assert!(text.is_empty(), "encrypted 不是展示文本");
@@ -448,7 +453,7 @@ mod tests {
         }
 
         // 入口 encode：凭据随 reasoning item 收尾事件原样下发
-        let cchunks = adapter.encode(&ctx, &evs[0]).unwrap();
+        let cchunks = adapter.encode(&ctx, &evs[0], &mut StreamEncodeState::default()).unwrap();
         let raw = serde_json::to_string(
             &cchunks[0]
                 .data

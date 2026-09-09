@@ -64,13 +64,22 @@ pub(super) fn block_to_anthropic(block: &ContentBlock) -> Option<Value> {
             }
             Some(obj)
         }
-        ContentBlock::Reasoning { text, signature } => {
-            // redacted_thinking 的凭据在 data 字段、无可读 thinking：text 空且
-            // signature 有值时按原形态回传（Anthropic 要求 redacted 原样带回）
+        ContentBlock::Reasoning { text, signature, redacted } => {
+            // 两种凭据形态必须按原样还原（Anthropic 要求 thinking/redacted_thinking
+            // 块不可修改，混转会 400）：
+            //   * redacted_thinking：凭据在 data 字段、无可读 thinking；
+            //   * display:"omitted" 的 thinking：空文本 + signature（官方合法形态）。
             if text.is_empty() {
                 if let Some(sig) = signature {
                     if !sig.is_empty() {
-                        return Some(json!({ "type": "redacted_thinking", "data": sig }));
+                        if *redacted {
+                            return Some(json!({ "type": "redacted_thinking", "data": sig }));
+                        }
+                        return Some(json!({
+                            "type": "thinking",
+                            "thinking": "",
+                            "signature": sig,
+                        }));
                     }
                 }
                 return None; // 空推理且无凭据，无回传价值
@@ -129,12 +138,14 @@ pub(super) fn anthropic_to_block(v: &Value) -> Option<ContentBlock> {
         "thinking" => Some(ContentBlock::Reasoning {
             text: v.get("thinking").and_then(|t| t.as_str()).unwrap_or_default().to_string(),
             signature: v.get("signature").and_then(|s| s.as_str()).map(|s| s.to_string()),
+            redacted: false,
         }),
         // redacted_thinking：凭据在 data 字段（无可读 thinking）→ signature 承载，
         // 多轮回传时原样还原，丢失会 400
         "redacted_thinking" => Some(ContentBlock::Reasoning {
             text: String::new(),
             signature: v.get("data").and_then(|s| s.as_str()).map(|s| s.to_string()),
+            redacted: true,
         }),
         _ => None,
     }
@@ -379,13 +390,34 @@ mod tests {
     use super::*;
     use moonbridge_core::{Message, Reasoning};
 
+    /// display:"omitted" 的空文本 thinking 块：回传时必须保持 thinking 形态，
+    /// 不得误转 redacted_thinking（Anthropic 要求块不可修改，混转 400）。
+    #[test]
+    fn omitted_thinking_keeps_thinking_form() {
+        let block = json!({ "type": "thinking", "thinking": "", "signature": "SIG" });
+        let core = anthropic_to_block(&block).unwrap();
+        match &core {
+            ContentBlock::Reasoning { text, signature: Some(sig), redacted } => {
+                assert_eq!(text, "");
+                assert_eq!(sig, "SIG");
+                assert!(!redacted);
+            }
+            other => panic!("expected reasoning, got {other:?}"),
+        }
+        let back = block_to_anthropic(&core).unwrap();
+        assert_eq!(back["type"], "thinking");
+        assert_eq!(back["thinking"], "");
+        assert_eq!(back["signature"], "SIG");
+        assert!(back.get("data").is_none());
+    }
+
     /// redacted_thinking：data 凭据 → signature，回传时还原 redacted 形态。
     #[test]
     fn redacted_thinking_roundtrips() {
         let block = json!({ "type": "redacted_thinking", "data": "ENC" });
         let core = anthropic_to_block(&block).unwrap();
         match &core {
-            ContentBlock::Reasoning { text, signature: Some(enc) } => {
+            ContentBlock::Reasoning { text, signature: Some(enc), redacted: true } => {
                 assert_eq!(text, "");
                 assert_eq!(enc, "ENC");
             }

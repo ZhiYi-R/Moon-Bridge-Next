@@ -234,7 +234,7 @@ impl ClientAdapter for OpenAiResponsesAdapter {
                             }
                             req.messages.push(Message {
                                 role: Role::Assistant,
-                                content: vec![ContentBlock::Reasoning { text, signature }],
+                                content: vec![ContentBlock::Reasoning { text, signature, redacted: false }],
                                 ext: Default::default(),
                             });
                         }
@@ -297,7 +297,7 @@ impl ClientAdapter for OpenAiResponsesAdapter {
                 ContentBlock::Text { text } => {
                     text_buf.push_str(text);
                 }
-                ContentBlock::Reasoning { text, signature } => {
+                ContentBlock::Reasoning { text, signature, .. } => {
                     let mut item = json!({
                         "type": "reasoning",
                         "id": format!("rs_{}", { item_seq += 1; item_seq }),

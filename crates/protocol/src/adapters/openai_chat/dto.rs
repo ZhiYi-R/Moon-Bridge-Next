@@ -139,6 +139,7 @@ pub fn chat_to_core_messages(msgs: &[Value]) -> Vec<Message> {
                     ContentBlock::Reasoning {
                         text: reasoning_text,
                         signature,
+                        redacted: false,
                     },
                 );
             }
@@ -322,7 +323,7 @@ pub fn chat_choice_to_core(choice: &Value) -> (Vec<ContentBlock>, Option<StopRea
         if !text.is_empty() || signature.is_some() {
             content.insert(
                 0,
-                ContentBlock::Reasoning { text, signature },
+                ContentBlock::Reasoning { text, signature, redacted: false },
             );
         }
     }
@@ -389,7 +390,7 @@ pub fn core_to_chat_response_message(content: &[ContentBlock]) -> Value {
                 "id": id, "type": "function",
                 "function": { "name": name, "arguments": input.to_string() },
             })),
-            ContentBlock::Reasoning { text, signature } => {
+            ContentBlock::Reasoning { text, signature, .. } => {
                 if !text.is_empty() {
                     reasoning_parts.push(text);
                 }
@@ -471,7 +472,7 @@ mod tests {
         assert_eq!(finish, Some(StopReason::EndTurn));
         assert_eq!(content.len(), 2);
         match &content[0] {
-            ContentBlock::Reasoning { text, signature } => {
+            ContentBlock::Reasoning { text, signature, .. } => {
                 assert_eq!(text, "let me think");
                 assert!(signature.is_none());
             }
@@ -500,14 +501,14 @@ mod tests {
     fn reasoning_credential_roundtrips_via_mb_cot_marker() {
         // 下发：凭据（不可读文本）拼在 reasoning_content 尾部
         let msg = core_to_chat_response_message(&[
-            ContentBlock::Reasoning { text: "thought".into(), signature: Some("ENC".into()) },
+            ContentBlock::Reasoning { text: "thought".into(), signature: Some("ENC".into()), redacted: false },
             ContentBlock::text("Hi"),
         ]);
         assert_eq!(msg["reasoning_content"], "thought<mb-cot>ENC</mb-cot>");
         assert_eq!(msg["reasoning"], "thought<mb-cot>ENC</mb-cot>");
         // 无凭据时不带标记
         let plain = core_to_chat_response_message(&[
-            ContentBlock::Reasoning { text: "pure".into(), signature: None },
+            ContentBlock::Reasoning { text: "pure".into(), signature: None, redacted: false },
         ]);
         assert_eq!(plain["reasoning_content"], "pure");
 
@@ -518,7 +519,7 @@ mod tests {
             "reasoning_content": "thought<mb-cot>ENC</mb-cot>"
         })]);
         match &msgs[0].content[0] {
-            ContentBlock::Reasoning { text, signature: Some(enc) } => {
+            ContentBlock::Reasoning { text, signature: Some(enc), .. } => {
                 assert_eq!(text, "thought");
                 assert_eq!(enc, "ENC");
             }
@@ -533,7 +534,7 @@ mod tests {
         })]);
         assert!(matches!(
             &msgs2[0].content[0],
-            ContentBlock::Reasoning { text, signature: Some(enc) } if text.is_empty() && enc == "ENC"
+            ContentBlock::Reasoning { text, signature: Some(enc), .. } if text.is_empty() && enc == "ENC"
         ));
 
         // 无标记的普通上游明文（如 DeepSeek）→ 整体为展示文本，无凭据
@@ -544,7 +545,7 @@ mod tests {
         })]);
         assert!(matches!(
             &msgs3[0].content[0],
-            ContentBlock::Reasoning { text, signature: None } if text == "plain upstream thought"
+            ContentBlock::Reasoning { text, signature: None, .. } if text == "plain upstream thought"
         ));
     }
 }

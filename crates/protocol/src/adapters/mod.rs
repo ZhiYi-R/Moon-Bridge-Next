@@ -40,6 +40,17 @@ pub(crate) fn reasoning_effort(req: &CoreRequest) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
+/// token 预算 → effort 档位（`thinking_budget` 的逆映射，取不超过预算的最大档）。
+/// 供以预算表达思考强度的入口（anthropic/gemini）解析客户端配置。
+pub(crate) fn effort_from_budget(budget: u32) -> &'static str {
+    THINKING_BUDGETS
+        .iter()
+        .rev()
+        .find(|(_, v)| budget >= *v)
+        .map(|(k, _)| *k)
+        .unwrap_or("minimal")
+}
+
 /// effort 对应的 token 预算；未知 effort 回落到 `medium` 档（保守：不因此关掉思考）。
 fn thinking_budget(effort: &str) -> u32 {
     THINKING_BUDGETS

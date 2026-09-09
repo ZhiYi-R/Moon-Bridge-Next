@@ -9,13 +9,15 @@
 
 use async_trait::async_trait;
 use moonbridge_core::{
-    ContentBlock, CoreRequest, CoreResponse, Message, Protocol, Result, Role, Tool, ToolChoice,
+    ContentBlock, CoreRequest, CoreResponse, Message, Protocol, Reasoning, Result, Role, Tool,
+    ToolChoice,
 };
 use serde_json::{json, Value};
 
 use super::provider::{anthropic_to_block, block_to_anthropic, unmap_stop_reason};
 use super::AnthropicAdapter;
 use crate::adapter::ClientAdapter;
+use crate::adapters::effort_from_budget;
 use crate::context::ReqCtx;
 
 /// 解析 Anthropic message 的 content（字符串或 block 数组）为 Core 内容块。
@@ -108,6 +110,30 @@ impl ClientAdapter for AnthropicAdapter {
             req.tool_choice = parse_tool_choice(tc);
         }
 
+        // thinking 配置 → req.reasoning（官方形态：enabled+budget_tokens /
+        // adaptive+output_config.effort；不传则上游按默认行为处理）
+        if let Some(t) = raw.get("thinking").and_then(|v| v.as_object()) {
+            let effort = match t.get("type").and_then(|v| v.as_str()) {
+                Some("enabled") => t
+                    .get("budget_tokens")
+                    .and_then(|v| v.as_u64())
+                    .map(|b| effort_from_budget(b as u32)),
+                Some("adaptive") => Some(
+                    raw.get("output_config")
+                        .and_then(|o| o.get("effort"))
+                        .and_then(|e| e.as_str())
+                        .unwrap_or("high"),
+                ),
+                _ => None, // disabled 或未知：不下发，交由上游默认
+            };
+            if let Some(effort) = effort {
+                req.reasoning = Some(Reasoning {
+                    effort: Some(effort.to_string()),
+                    summary: None,
+                });
+            }
+        }
+
         req.max_tokens = raw.get("max_tokens").and_then(|v| v.as_u64()).map(|v| v as u32);
         req.temperature = raw.get("temperature").and_then(|v| v.as_f64()).map(|v| v as f32);
         req.top_p = raw.get("top_p").and_then(|v| v.as_f64()).map(|v| v as f32);
@@ -178,6 +204,30 @@ mod tests {
         assert!(matches!(req.tool_choice, Some(ToolChoice::Auto)));
         assert_eq!(req.max_tokens, Some(1024));
         assert!(req.stream);
+    }
+
+    /// thinking 配置应传递到 req.reasoning（否则上游推理模型不会思考）。
+    #[tokio::test]
+    async fn parses_thinking_config_to_reasoning() {
+        let adapter = AnthropicAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::Anthropic);
+
+        // enabled + budget_tokens → 档位逆推 effort
+        let req = adapter.to_core_request(&ctx, json!({
+            "model": "claude", "max_tokens": 16000,
+            "thinking": { "type": "enabled", "budget_tokens": 16384 },
+            "messages": [{ "role": "user", "content": "Hi" }]
+        })).await.unwrap();
+        assert_eq!(req.reasoning.as_ref().and_then(|r| r.effort.as_deref()), Some("high"));
+
+        // adaptive → output_config.effort 或默认 high
+        let req = adapter.to_core_request(&ctx, json!({
+            "model": "claude", "max_tokens": 16000,
+            "thinking": { "type": "adaptive" },
+            "output_config": { "effort": "low" },
+            "messages": [{ "role": "user", "content": "Hi" }]
+        })).await.unwrap();
+        assert_eq!(req.reasoning.as_ref().and_then(|r| r.effort.as_deref()), Some("low"));
     }
 
     #[tokio::test]

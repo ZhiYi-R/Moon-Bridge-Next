@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 use super::provider::unmap_stop_reason;
 use super::AnthropicAdapter;
-use crate::adapter::{ClientStreamAdapter, ProviderStreamAdapter};
+use crate::adapter::{ClientStreamAdapter, ProviderStreamAdapter, StreamEncodeState};
 use crate::context::ReqCtx;
 use crate::raw::{ChunkStage, RawChunk};
 
@@ -87,15 +87,41 @@ impl ProviderStreamAdapter for AnthropicAdapter {
                         input: cb.get("input").cloned().unwrap_or_else(|| Value::Null),
                         signature: None,
                     },
-                    Some("thinking") | Some("redacted_thinking") => ContentBlock::Reasoning {
+                    Some("thinking") => ContentBlock::Reasoning {
                         text: cb.get("thinking").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
                         signature: None,
+                        redacted: false,
+                    },
+                    // redacted_thinking 流式形态：content_block_start 直接携带完整
+                    // data，无后续增量，立即收尾
+                    Some("redacted_thinking") => ContentBlock::Reasoning {
+                        text: String::new(),
+                        signature: cb.get("data").and_then(|v| v.as_str()).map(String::from),
+                        redacted: true,
                     },
                     _ => ContentBlock::text(
                         cb.get("text").and_then(|v| v.as_str()).unwrap_or_default(),
                     ),
                 };
+                // redacted 完整块的凭据转为凭据增量流出：入口 encode 的惰性开块
+                // 逻辑据它以 redacted_thinking 形态还原给客户端（否则整块丢失）
+                let redacted_sig = if let ContentBlock::Reasoning {
+                    signature: Some(sig),
+                    redacted: true,
+                    ..
+                } = &block
+                {
+                    Some(sig.clone())
+                } else {
+                    None
+                };
                 out.push(CoreStreamEvent::BlockStart { index, block });
+                if let Some(sig) = redacted_sig {
+                    out.push(CoreStreamEvent::BlockDelta {
+                        index,
+                        delta: StreamDelta::ReasoningSignature { signature: sig },
+                    });
+                }
             }
             "content_block_delta" => {
                 let index = data.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -199,7 +225,20 @@ impl ClientStreamAdapter for AnthropicAdapter {
     }
 
     /// Core 流事件 → Anthropic Messages SSE（与上游 decode 互为逆向）。
-    fn encode(&self, _ctx: &ReqCtx, ev: &CoreStreamEvent) -> Result<Vec<RawChunk>> {
+    ///
+    /// 推理块惰性开启：上游 reasoning item 可能零明文零凭据（如仅含
+    /// encrypted_content 且凭据增量未到时不可预知）。若在 BlockStart 直接
+    /// 开 thinking 块，零 delta 收尾会产生空 thinking 块（违反 Anthropic
+    /// 规范，客户端报 reasoning part not found）。因此：
+    ///   * 第一个 thinking_delta 到达时才开 thinking 块；
+    ///   * 凭据先于明文到达时，按 redacted_thinking 完整块形态开启；
+    ///   * 全程无内容的推理块不产生任何事件。
+    fn encode(
+        &self,
+        _ctx: &ReqCtx,
+        ev: &CoreStreamEvent,
+        st: &mut StreamEncodeState,
+    ) -> Result<Vec<RawChunk>> {
         let mut out = Vec::new();
         match ev {
             CoreStreamEvent::MessageStart { id, model } => {
@@ -216,43 +255,93 @@ impl ClientStreamAdapter for AnthropicAdapter {
                 ));
             }
             CoreStreamEvent::BlockStart { index, block } => {
+                // 推理块不开：等首个 delta 到达再惰性开启（见 fn 文档）
+                if matches!(block, ContentBlock::Reasoning { .. }) {
+                    return Ok(out);
+                }
                 let cb = match block {
                     ContentBlock::ToolUse { id, name, .. } => {
                         json!({ "type": "tool_use", "id": id, "name": name, "input": {} })
                     }
-                    ContentBlock::Reasoning { .. } => json!({ "type": "thinking", "thinking": "" }),
                     _ => json!({ "type": "text", "text": "" }),
                 };
+                st.open_blocks.insert(*index);
                 out.push(client_sse(
                     "content_block_start",
                     json!({ "type": "content_block_start", "index": index, "content_block": cb }),
                 ));
             }
             CoreStreamEvent::BlockDelta { index, delta } => {
-                let d = match delta {
-                    StreamDelta::Text { text } => json!({ "type": "text_delta", "text": text }),
+                match delta {
+                    StreamDelta::Text { text } => {
+                        out.push(client_sse(
+                            "content_block_delta",
+                            json!({
+                                "type": "content_block_delta", "index": index,
+                                "delta": { "type": "text_delta", "text": text }
+                            }),
+                        ));
+                    }
                     StreamDelta::ToolInput { partial_json } => {
-                        json!({ "type": "input_json_delta", "partial_json": partial_json })
+                        out.push(client_sse(
+                            "content_block_delta",
+                            json!({
+                                "type": "content_block_delta", "index": index,
+                                "delta": { "type": "input_json_delta", "partial_json": partial_json }
+                            }),
+                        ));
                     }
                     StreamDelta::Reasoning { text } => {
-                        json!({ "type": "thinking_delta", "thinking": text })
+                        // 惰性开启：首个推理明文增量到达时才开 thinking 块
+                        if st.open_blocks.insert(*index) {
+                            out.push(client_sse(
+                                "content_block_start",
+                                json!({
+                                    "type": "content_block_start", "index": index,
+                                    "content_block": { "type": "thinking", "thinking": "" }
+                                }),
+                            ));
+                        }
+                        out.push(client_sse(
+                            "content_block_delta",
+                            json!({
+                                "type": "content_block_delta", "index": index,
+                                "delta": { "type": "thinking_delta", "thinking": text }
+                            }),
+                        ));
                     }
                     // 加密 CoT 回传凭据：客户端在 content_block_stop 前累积进
-                    // thinking 块的 signature，下一轮原样回传
+                    // thinking 块的 signature，下一轮原样回传。若凭据先于任何
+                    // 明文到达，该块按 redacted_thinking 完整块形态开启
                     StreamDelta::ReasoningSignature { signature } => {
-                        json!({ "type": "signature_delta", "signature": signature })
+                        if st.open_blocks.insert(*index) {
+                            out.push(client_sse(
+                                "content_block_start",
+                                json!({
+                                    "type": "content_block_start", "index": index,
+                                    "content_block": { "type": "redacted_thinking", "data": signature }
+                                }),
+                            ));
+                        } else {
+                            out.push(client_sse(
+                                "content_block_delta",
+                                json!({
+                                    "type": "content_block_delta", "index": index,
+                                    "delta": { "type": "signature_delta", "signature": signature }
+                                }),
+                            ));
+                        }
                     }
-                };
-                out.push(client_sse(
-                    "content_block_delta",
-                    json!({ "type": "content_block_delta", "index": index, "delta": d }),
-                ));
+                }
             }
             CoreStreamEvent::BlockStop { index, .. } => {
-                out.push(client_sse(
-                    "content_block_stop",
-                    json!({ "type": "content_block_stop", "index": index }),
-                ));
+                // 仅对已开启的块收尾；从未开启的（空推理块）不产生任何事件
+                if st.open_blocks.remove(index) {
+                    out.push(client_sse(
+                        "content_block_stop",
+                        json!({ "type": "content_block_stop", "index": index }),
+                    ));
+                }
             }
             CoreStreamEvent::MessageDelta { stop_reason, usage } => {
                 let sr = stop_reason.map(unmap_stop_reason).unwrap_or("end_turn");
@@ -300,13 +389,51 @@ mod tests {
         }
         let mut c = ReqCtx::new("r1", Protocol::Anthropic);
         c.model_alias = "m".into();
+        // 凭据先于任何明文到达：按 redacted_thinking 完整块形态开启（惰性开块）
         let chunks = adapter.encode(&c, &CoreStreamEvent::BlockDelta {
             index: 0,
             delta: StreamDelta::ReasoningSignature { signature: "SIG".into() },
-        }).unwrap();
-        let d = &chunks[0].data.as_json().unwrap()["delta"];
-        assert_eq!(d["type"], "signature_delta");
-        assert_eq!(d["signature"], "SIG");
+        }, &mut StreamEncodeState::default()).unwrap();
+        assert_eq!(chunks.len(), 1);
+        let cb = &chunks[0].data.as_json().unwrap();
+        assert_eq!(cb["type"], "content_block_start");
+        assert_eq!(cb["content_block"]["type"], "redacted_thinking");
+        assert_eq!(cb["content_block"]["data"], "SIG");
+
+        // 块已开启（明文已流出）：凭据增量正常发 signature_delta
+        let mut st = StreamEncodeState::default();
+        adapter.encode(&c, &CoreStreamEvent::BlockDelta {
+            index: 0,
+            delta: StreamDelta::Reasoning { text: "think".into() },
+        }, &mut st).unwrap();
+        let chunks = adapter.encode(&c, &CoreStreamEvent::BlockDelta {
+            index: 0,
+            delta: StreamDelta::ReasoningSignature { signature: "SIG".into() },
+        }, &mut st).unwrap();
+        assert_eq!(chunks.len(), 1);
+        let d = &chunks[0].data.as_json().unwrap();
+        assert_eq!(d["type"], "content_block_delta");
+        assert_eq!(d["delta"]["type"], "signature_delta");
+        assert_eq!(d["delta"]["signature"], "SIG");
+    }
+
+    /// 空推理块（零明文零凭据）：不产生任何 content_block 事件，
+    /// 避免空 thinking 块（客户端报 reasoning part not found）。
+    #[test]
+    fn empty_reasoning_block_emits_nothing() {
+        let adapter = AnthropicAdapter;
+        let mut ctx = ReqCtx::new("r1", Protocol::Anthropic);
+        ctx.model_alias = "m".into();
+        let mut st = StreamEncodeState::default();
+
+        let chunks = adapter.encode(&ctx, &CoreStreamEvent::BlockStart {
+            index: 0,
+            block: ContentBlock::Reasoning { text: String::new(), signature: None, redacted: false },
+        }, &mut st).unwrap();
+        assert!(chunks.is_empty(), "BlockStart 不应开块");
+
+        let chunks = adapter.encode(&ctx, &CoreStreamEvent::BlockStop { index: 0, block: None }, &mut st).unwrap();
+        assert!(chunks.is_empty(), "未开启的块不应收尾");
     }
 
 

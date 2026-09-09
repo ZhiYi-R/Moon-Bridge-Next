@@ -1,7 +1,7 @@
 //! OpenAI Chat Completions 入口 Adapter —— 非流式部分。
 
 use async_trait::async_trait;
-use moonbridge_core::{CoreRequest, CoreResponse, Protocol, Result};
+use moonbridge_core::{CoreRequest, CoreResponse, Protocol, Reasoning, Result};
 use serde_json::{json, Value};
 
 use super::dto;
@@ -34,6 +34,22 @@ impl ClientAdapter for OpenAiChatAdapter {
         }
         if let Some(tc) = raw.get("tool_choice") {
             req.tool_choice = dto::parse_tool_choice(tc);
+        }
+        // 推理强度：reasoning_effort（OpenAI Chat 扩展）或 reasoning.effort（兼容写法）
+        if let Some(effort) = raw
+            .get("reasoning_effort")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                raw.get("reasoning")
+                    .and_then(|v| v.get("effort"))
+                    .and_then(|v| v.as_str())
+            })
+            .filter(|s| !s.is_empty())
+        {
+            req.reasoning = Some(Reasoning {
+                effort: Some(effort.to_string()),
+                summary: None,
+            });
         }
         req.max_tokens = raw
             .get("max_tokens")
@@ -111,7 +127,7 @@ mod tests {
             id: "chatcmpl-2".into(),
             model: "m".into(),
             content: vec![
-                ContentBlock::Reasoning { text: "thought".into(), signature: None },
+                ContentBlock::Reasoning { text: "thought".into(), signature: None, redacted: false },
                 ContentBlock::text("Hi"),
             ],
             stop_reason: Some(StopReason::EndTurn),
@@ -126,6 +142,17 @@ mod tests {
         assert_eq!(msg["content"], "Hi");
         assert_eq!(msg["reasoning_content"], "thought", "DeepSeek 约定");
         assert_eq!(msg["reasoning"], "thought", "OpenRouter/vLLM 约定");
+    }
+
+    #[tokio::test]
+    async fn parses_reasoning_effort() {
+        let adapter = OpenAiChatAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::OpenAiChat);
+        let req = adapter.to_core_request(&ctx, json!({
+            "model": "m", "reasoning_effort": "high",
+            "messages": [{ "role": "user", "content": "Hi" }]
+        })).await.unwrap();
+        assert_eq!(req.reasoning.as_ref().and_then(|r| r.effort.as_deref()), Some("high"));
     }
 
     #[tokio::test]

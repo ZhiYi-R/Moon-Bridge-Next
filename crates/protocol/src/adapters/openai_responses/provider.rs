@@ -79,7 +79,12 @@ fn build_input(req: &CoreRequest) -> Vec<Value> {
         }
         for block in &msg.content {
             match block {
-                ContentBlock::Text { text } => parts.push(json!({ "type": "input_text", "text": text })),
+                // 文本 part 类型按角色区分：user 用 input_text，assistant 用
+                // output_text（Responses 协议强制，assistant 带 input_text 会 400）
+                ContentBlock::Text { text } => {
+                    let ty = if msg.role == Role::Assistant { "output_text" } else { "input_text" };
+                    parts.push(json!({ "type": ty, "text": text }));
+                }
                 ContentBlock::Image { data, media_type } => {
                     let url = if media_type == "url" {
                         data.clone()
@@ -287,7 +292,7 @@ impl ProviderAdapter for OpenAiResponsesAdapter {
                             .map(String::from)
                             .filter(|s| !s.is_empty());
                         if !text.is_empty() || signature.is_some() {
-                            content.push(ContentBlock::Reasoning { text, signature });
+                            content.push(ContentBlock::Reasoning { text, signature, redacted: false });
                         }
                     }
                     _ => {}
@@ -358,7 +363,7 @@ mod tests {
         });
         let resp3 = adapter.to_core_response(&ctx, raw3).await.unwrap();
         match &resp3.content[0] {
-            ContentBlock::Reasoning { text, signature: Some(enc) } => {
+            ContentBlock::Reasoning { text, signature: Some(enc), .. } => {
                 assert_eq!(text, "", "encrypted 不是展示文本");
                 assert_eq!(enc, "ENC");
             }
@@ -407,7 +412,7 @@ mod tests {
         let mut req = CoreRequest::new("m");
         req.messages.push(Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::Reasoning { text: "thought".into(), signature: None }],
+            content: vec![ContentBlock::Reasoning { text: "thought".into(), signature: None, redacted: false }],
             ext: Default::default(),
         });
         req.messages.push(Message::text(Role::User, "go"));
@@ -455,6 +460,33 @@ mod tests {
         assert_eq!(up.body["tools"][0]["name"], "get_time");
         assert_eq!(up.body["max_output_tokens"], 512);
         assert!(up.headers.iter().any(|(k, v)| k == "authorization" && v == "Bearer sk-test"));
+    }
+
+    /// 文本 part 类型按角色区分：assistant 历史必须用 output_text
+    /// （上游 400：content type `input_text` is not valid on `assistant` messages）。
+    #[tokio::test]
+    async fn assistant_history_text_uses_output_text() {
+        let mut req = CoreRequest::new("gpt-x");
+        req.messages.push(Message::text(Role::User, "Hi"));
+        req.messages.push(Message::text(Role::Assistant, "Hello!"));
+        req.messages.push(Message::text(Role::User, "thanks"));
+
+        let adapter = OpenAiResponsesAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::Anthropic);
+        let up = adapter.from_core_request(&ctx, &req, &endpoint()).await.unwrap();
+
+        let input = up.body["input"].as_array().unwrap();
+        let assistant = input
+            .iter()
+            .find(|it| it["type"] == "message" && it["role"] == "assistant")
+            .expect("assistant 历史应生成 message item");
+        assert_eq!(assistant["content"][0]["type"], "output_text");
+        assert_eq!(assistant["content"][0]["text"], "Hello!");
+        let user = input
+            .iter()
+            .find(|it| it["type"] == "message" && it["role"] == "user")
+            .unwrap();
+        assert_eq!(user["content"][0]["type"], "input_text");
     }
 
     #[tokio::test]

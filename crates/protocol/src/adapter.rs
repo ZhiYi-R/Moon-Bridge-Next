@@ -84,7 +84,22 @@ pub trait ClientStreamAdapter: Send + Sync {
     /// 把一个 Core 流事件编码为 0..n 个客户端 SSE chunk。
     ///
     /// gateway 会在写出前对每个 chunk 触发 `on_client_chunk_raw` 钩子。
-    fn encode(&self, ctx: &ReqCtx, ev: &CoreStreamEvent) -> Result<Vec<RawChunk>>;
+    /// `st` 为每流状态（gateway 每个流式请求持有一份）：部分协议需跨事件
+    /// 决策（如 anthropic 推理块惰性开启，避免产生空 thinking 块）。
+    fn encode(
+        &self,
+        ctx: &ReqCtx,
+        ev: &CoreStreamEvent,
+        st: &mut StreamEncodeState,
+    ) -> Result<Vec<RawChunk>>;
+}
+
+/// encode 的每流状态。adapter 本体为并发共享单例，可变状态由 gateway
+/// 按请求持有，encode 保持可重入。
+#[derive(Default)]
+pub struct StreamEncodeState {
+    /// 已向客户端开启（content_block_start 已发出）的块索引。
+    pub open_blocks: std::collections::HashSet<usize>,
 }
 
 /// Core ↔ 上游协议（非流式）。例：CoreRequest → Anthropic Messages 请求。

@@ -15,7 +15,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
 use moonbridge_core::{CoreStreamEvent, Protocol, Usage};
-use moonbridge_protocol::{ChunkVerdict, RawBody, RawChunk, ReqCtx};
+use moonbridge_protocol::{ChunkVerdict, RawBody, RawChunk, ReqCtx, StreamEncodeState};
 use moonbridge_store::Database;
 use serde_json::Value;
 
@@ -173,6 +173,8 @@ pub fn build_stream_response(
         let mut saw_text = false;
         let mut next_index = 0usize;
         let mut tagged = false;
+        // encode 每流状态（anthropic 入口的推理块惰性开块依赖它）
+        let mut enc_state = StreamEncodeState::default();
         // 'stream 标签：解码/编码任一环节出错都要**真正终止**整条流。
         // 编码错误分支原先的 `break` 落在内层 `for ev in events` 里，只放弃了
         // 当前 chunk 的剩余事件，外层 while 继续消费上游并反复刷 error 事件。
@@ -268,7 +270,7 @@ pub fn build_stream_response(
                     _ => {}
                 }
                 // [CORE] 编码为客户端 SSE chunk
-                let cchunks = match client_stream.encode(&ctx, &ev) {
+                let cchunks = match client_stream.encode(&ctx, &ev, &mut enc_state) {
                     Ok(c) => c,
                     Err(e) => {
                         let msg = e.to_string();
