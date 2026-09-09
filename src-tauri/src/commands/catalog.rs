@@ -214,7 +214,9 @@ pub async fn catalog_fetch(_state: State<'_, Arc<ManagedState>>) -> CmdResult<Ve
 }
 
 /// 把用户勾选的候选模型批量导入：模型定义按 slug upsert；models.dev 的定价写入
-/// 对应 provider key 的报价（仅当该报价不存在时，不覆盖用户已配置的定价）。
+/// 对应 provider key 的报价（仅当该报价不存在时，不覆盖用户已配置的定价），并按
+/// slug 给本地已有同模型报价回填定价（仅填 `pricing` 为空的行——目录 key 与本地
+/// provider key 命名空间不同，Provider 页绑定又会先建空定价行，不回填就永久没定价）。
 ///
 /// 返回成功导入的数量。任一条写库失败即中断并返回错误（前端可整体重试）。
 #[tauri::command]
@@ -226,6 +228,9 @@ pub fn catalog_import(
     for m in &models {
         state.db.upsert_model(&m.to_model_def())?;
         state.db.insert_offer_if_absent(&m.to_offer())?;
+        if let Some(pricing) = m.to_offer().pricing {
+            state.db.backfill_offer_pricing(&m.id, &pricing)?;
+        }
         n += 1;
     }
     Ok(n)
@@ -327,5 +332,50 @@ mod tests {
         let def = m.to_model_def();
         assert!(def.modalities.is_none());
         assert!(def.reasoning_levels.is_none());
+    }
+
+    /// 回填只发生在内存库测不了 `catalog_import`（要 Tauri State），但 DAO 语义可测：
+    /// 同 slug 多 provider 行里，只有 `pricing IS NULL` 的被回填，手填过的不动。
+    #[test]
+    fn backfill_only_fills_null_pricing() {
+        use moonbridge_store::Database;
+        let db = Database::open_in_memory().unwrap();
+        let pricing = json!({ "input": 3.0, "output": 15.0 });
+        // 用户 key 下的空定价行（Provider 页绑定的产物）+ 手填过的行 + 目录 key 行
+        for (key, p) in [
+            ("mykey", None),
+            ("mykey2", Some(json!({ "input": 99.0 }))),
+            ("anthropic", None),
+        ] {
+            db.upsert_offer(&Offer {
+                provider_key: key.into(),
+                model_slug: "claude-x".into(),
+                pricing: p,
+                endpoint_protocol: None,
+            })
+            .unwrap();
+        }
+        assert_eq!(db.backfill_offer_pricing("claude-x", &pricing).unwrap(), 2);
+        let get = |key: &str| {
+            db.list_offers(key)
+                .unwrap()
+                .into_iter()
+                .find(|o| o.model_slug == "claude-x")
+                .unwrap()
+                .pricing
+        };
+        assert_eq!(get("mykey"), Some(pricing.clone()), "空行应被回填");
+        assert_eq!(
+            get("mykey2").and_then(|v| v.get("input").and_then(Value::as_f64)),
+            Some(99.0),
+            "手填定价不得被覆盖"
+        );
+        assert_eq!(get("anthropic"), Some(pricing), "目录 key 行同样回填");
+        // 无空行时返回 0 且无副作用
+        assert_eq!(
+            db.backfill_offer_pricing("claude-x", &json!({ "input": 1.0 }))
+                .unwrap(),
+            0
+        );
     }
 }
