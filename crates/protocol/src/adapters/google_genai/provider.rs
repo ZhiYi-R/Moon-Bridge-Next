@@ -37,8 +37,19 @@ impl ProviderAdapter for GoogleGenAiAdapter {
         };
         let url = format!("{}{}", endpoint.base_url.trim_end_matches('/'), path);
 
-        let mut body = json!({ "contents": dto::core_to_contents(&req.messages) });
+        // Gemini→Gemini 的未解析字段（safetySettings/cachedContent/labels 及
+        // generationConfig 内未映射项）经 meta 透传，先并入 body。
+        let mut body = req
+            .meta
+            .get("gemini.extra")
+            .and_then(|v| v.as_object().cloned())
+            .map(Value::Object)
+            .unwrap_or_else(|| json!({}));
         let obj = body.as_object_mut().expect("body is object");
+        obj.insert(
+            "contents".to_string(),
+            json!(dto::core_to_contents(&req.messages)),
+        );
         if let Some(si) = dto::core_to_system_instruction(&req.system, &req.messages) {
             obj.insert("systemInstruction".to_string(), si);
         }
@@ -49,7 +60,17 @@ impl ProviderAdapter for GoogleGenAiAdapter {
             obj.insert("toolConfig".to_string(), tc);
         }
         if let Some(gc) = dto::core_to_generation_config(req) {
-            obj.insert("generationConfig".to_string(), gc);
+            // 与透传的 generationConfig 合并：网关已解析字段优先
+            let mut merged = obj
+                .get("generationConfig")
+                .and_then(|v| v.as_object().cloned())
+                .unwrap_or_default();
+            if let Some(computed) = gc.as_object() {
+                for (k, v) in computed {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
+            obj.insert("generationConfig".to_string(), Value::Object(merged));
         }
 
         // Gemini 官方以 x-goog-api-key 鉴权；兼容网关亦可改用 Bearer（extra.auth=bearer）

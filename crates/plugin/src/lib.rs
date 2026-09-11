@@ -28,7 +28,7 @@ pub use bridge::{HostBridge, HttpRequest, HttpResponse};
 pub use error::{PluginError, Result};
 pub use manifest::{Manifest, CAP_CORE, CAP_RAW_REQUEST, CAP_RAW_RESPONSE, CAP_RAW_STREAM};
 pub use quota::{ExecutionBudget, SandboxLimits};
-pub use registry::LuaPluginRegistry;
+pub use registry::{LuaPluginRegistry, ScopeOverrides};
 pub use runtime::LuaRuntime;
 pub use session::SessionStore;
 

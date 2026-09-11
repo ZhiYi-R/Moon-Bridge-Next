@@ -15,9 +15,10 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
 use moonbridge_core::{CoreStreamEvent, Protocol, StreamDelta, Usage};
-use moonbridge_protocol::{ChunkVerdict, RawBody, RawChunk, ReqCtx, StreamEncodeState};
+use moonbridge_protocol::{
+    ChunkVerdict, RawBody, RawChunk, ReqCtx, StreamDecodeState, StreamEncodeState,
+};
 use moonbridge_store::Database;
-use serde_json::Value;
 
 use crate::state::AppState;
 use crate::trace::TraceRecord;
@@ -49,6 +50,49 @@ fn error_event(msg: &str) -> Event {
     Event::default()
         .event("error")
         .data(serde_json::json!({ "error": { "message": msg } }).to_string())
+}
+
+/// 单个 Core 事件的客户端方向处理管线：流事件钩子 → 内容块过滤 → 协议编码。
+/// 返回编码出的客户端 chunk（被钩子/过滤器丢弃时为空）。
+/// 错误以 `Err(String)` 返回，由调用方决定如何终结。
+async fn process_stream_event(
+    hooks: &Arc<dyn moonbridge_protocol::PluginHooks>,
+    ctx: &ReqCtx,
+    client_stream: &dyn moonbridge_protocol::ClientStreamAdapter,
+    enc_state: &mut StreamEncodeState,
+    dropped_blocks: &mut std::collections::HashSet<usize>,
+    ev: &mut CoreStreamEvent,
+) -> Result<Vec<RawChunk>, String> {
+    // [CORE] 流事件钩子（返回 true 丢弃）
+    match hooks.on_stream_event(ctx, ev).await {
+        Ok(true) => return Ok(Vec::new()),
+        Err(e) => tracing::warn!(error = %e, "on_stream_event 失败，放行"),
+        Ok(false) => {}
+    }
+    // [CORE] 内容块过滤。只有 BlockStart 携带完整块，故只对它问
+    // `filter_content`；被丢的块必须连带压制同 index 的 BlockDelta/BlockStop，
+    // 否则客户端会收到一个没有头（也没有尾）的孤立增量。
+    match ev {
+        CoreStreamEvent::BlockStart { index, block } => {
+            match hooks.filter_content(ctx, block).await {
+                Ok(true) => {
+                    dropped_blocks.insert(*index);
+                    return Ok(Vec::new());
+                }
+                Err(e) => tracing::warn!(error = %e, "filter_content 失败，放行"),
+                Ok(false) => {}
+            }
+        }
+        CoreStreamEvent::BlockDelta { index, .. }
+        | CoreStreamEvent::BlockStop { index, .. }
+            if dropped_blocks.contains(index) =>
+        {
+            return Ok(Vec::new());
+        }
+        _ => {}
+    }
+    // [CORE] 编码为客户端 SSE chunk
+    client_stream.encode(ctx, ev, enc_state).map_err(|e| e.to_string())
 }
 
 /// 流式请求的收尾审计：析构时落 usage 与 trace。
@@ -112,7 +156,7 @@ impl Drop for StreamAudit {
             t.status = status.to_string();
             t.error = err;
             if !self.record_bodies {
-                t.client_request = Value::Null;
+                crate::trace::strip_bodies(&mut t);
             }
             crate::trace::write(self.trace_dir.as_deref(), &t, self.trace_retention);
         }
@@ -175,6 +219,19 @@ pub fn build_stream_response(
         let mut tagged = false;
         // encode 每流状态（anthropic 入口的推理块惰性开块依赖它）
         let mut enc_state = StreamEncodeState::default();
+        // decode 每流状态（Gemini 上游的块索引跨 chunk 分配依赖它）
+        let mut dec_state = StreamDecodeState::default();
+        // 终结状态：上游协议（Chat 的 [DONE]、Gemini 的 finishReason）可能
+        // 不发任何终帧就结束——客户端协议状态机需要一个 MessageStop 兜底。
+        let mut saw_stop = false;
+        // 是否已见过「真正的收尾 delta」（stop_reason 非空）。usage-only 的
+        // MessageDelta 不算——那种帧之后客户端仍等不到 finish_reason。
+        let mut saw_finish = false;
+        let mut saw_start = false;
+        // 上游带内错误帧（协议级 error event，非 decode 失败）：流被上游宣告
+        // 失败——兜底收尾只补 MessageStop，不再伪造 completed 组装帧。
+        let mut saw_err = false;
+
         // 'stream 标签：解码/编码任一环节出错都要**真正终止**整条流。
         // 编码错误分支原先的 `break` 落在内层 `for ev in events` 里，只放弃了
         // 当前 chunk 的剩余事件，外层 while 继续消费上游并反复刷 error 事件。
@@ -184,7 +241,22 @@ pub fn build_stream_response(
                 Err(e) => {
                     let msg = e.to_string();
                     audit.failed = Some(msg.clone());
-                    yield Ok(error_event(&msg));
+                    // 带内错误走客户端协议的 Error 编码（而非裸 error 帧），
+                    // 并补终结帧让客户端状态机正常收尾。
+                    for cc in client_stream
+                        .encode(&ctx, &CoreStreamEvent::Error { message: msg.clone() }, &mut enc_state)
+                        .unwrap_or_default()
+                    {
+                        yield Ok(chunk_to_event(&cc));
+                    }
+                    if !saw_stop {
+                        for cc in client_stream
+                            .encode(&ctx, &CoreStreamEvent::MessageStop, &mut enc_state)
+                            .unwrap_or_default()
+                        {
+                            yield Ok(chunk_to_event(&cc));
+                        }
+                    }
                     break 'stream;
                 }
             };
@@ -200,12 +272,25 @@ pub fn build_stream_response(
             }
 
             // [CORE] 解码为 Core 流事件
-            let mut events = match provider_stream.decode(&ctx, &chunk) {
+            let mut events = match provider_stream.decode(&ctx, &mut dec_state, &chunk) {
                 Ok(ev) => ev,
                 Err(e) => {
                     let msg = e.to_string();
                     audit.failed = Some(msg.clone());
-                    yield Ok(error_event(&msg));
+                    for cc in client_stream
+                        .encode(&ctx, &CoreStreamEvent::Error { message: msg.clone() }, &mut enc_state)
+                        .unwrap_or_default()
+                    {
+                        yield Ok(chunk_to_event(&cc));
+                    }
+                    if !saw_stop {
+                        for cc in client_stream
+                            .encode(&ctx, &CoreStreamEvent::MessageStop, &mut enc_state)
+                            .unwrap_or_default()
+                        {
+                            yield Ok(chunk_to_event(&cc));
+                        }
+                    }
                     break 'stream;
                 }
             };
@@ -235,16 +320,31 @@ pub fn build_stream_response(
                             _ => {}
                         }
                     }
+                    CoreStreamEvent::MessageDelta { stop_reason: Some(_), .. } => {
+                        saw_finish = true;
+                    }
+                    CoreStreamEvent::MessageStop => saw_stop = true,
+                    CoreStreamEvent::MessageStart { .. } => saw_start = true,
+                    CoreStreamEvent::Error { .. } => saw_err = true,
                     _ => {}
                 }
             }
-            // [CORE] 会话水印：在 MessageStop 之前插一段独立的 marker 文本块。
+            // [CORE] 会话水印：marker 必须插在「收尾组装事件」之前——
+            // 第一个带 stop_reason 的 MessageDelta（chat/gemini/responses 的
+            // response.completed 都由它触发组装 output），其次才是 MessageStop。
+            // 只认 MessageStop 会让 marker 排在 completed 之后：客户端按
+            // completed.output 存历史时（OpenCode 等），水印进不了 transcript。
             if let Some(tag) = &session_tag {
-                if !tagged && !saw_tool && saw_text {
-                    if let Some(pos) = events
+                if !tagged && !saw_tool && !saw_err && saw_text {
+                    let pos = events
                         .iter()
-                        .position(|e| matches!(e, CoreStreamEvent::MessageStop))
-                    {
+                        .position(|e| matches!(e, CoreStreamEvent::MessageDelta { stop_reason: Some(_), .. }))
+                        .or_else(|| {
+                            events
+                                .iter()
+                                .position(|e| matches!(e, CoreStreamEvent::MessageStop))
+                        });
+                    if let Some(pos) = pos {
                         events.splice(pos..pos, crate::session::marker_blocks(tag, next_index));
                         tagged = true;
                     }
@@ -255,43 +355,33 @@ pub fn build_stream_response(
                 if let CoreStreamEvent::MessageDelta { usage: Some(u), .. } = &ev {
                     usage::accumulate(&mut audit.acc, u);
                 }
-                // [CORE] 流事件钩子（返回 true 丢弃）
-                match hooks.on_stream_event(&ctx, &mut ev).await {
-                    Ok(true) => continue,
-                    Err(e) => tracing::warn!(error = %e, "on_stream_event 失败，放行"),
-                    Ok(false) => {}
-                }
-                // [CORE] 内容块过滤。只有 BlockStart 携带完整块，故只对它问
-                // `filter_content`；被丢的块必须连带压制同 index 的 BlockDelta/BlockStop，
-                // 否则客户端会收到一个没有头（也没有尾）的孤立增量。
-                match &mut ev {
-                    CoreStreamEvent::BlockStart { index, block } => {
-                        match hooks.filter_content(&ctx, block).await {
-                            Ok(true) => {
-                                dropped_blocks.insert(*index);
-                                continue;
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "filter_content 失败，放行")
-                            }
-                            Ok(false) => {}
-                        }
-                    }
-                    CoreStreamEvent::BlockDelta { index, .. }
-                    | CoreStreamEvent::BlockStop { index, .. }
-                        if dropped_blocks.contains(index) =>
-                    {
-                        continue;
-                    }
-                    _ => {}
-                }
-                // [CORE] 编码为客户端 SSE chunk
-                let cchunks = match client_stream.encode(&ctx, &ev, &mut enc_state) {
+                let cchunks = match process_stream_event(
+                    &hooks,
+                    &ctx,
+                    client_stream.as_ref(),
+                    &mut enc_state,
+                    &mut dropped_blocks,
+                    &mut ev,
+                )
+                .await
+                {
                     Ok(c) => c,
-                    Err(e) => {
-                        let msg = e.to_string();
+                    Err(msg) => {
                         audit.failed = Some(msg.clone());
-                        yield Ok(error_event(&msg));
+                        for cc in client_stream
+                            .encode(&ctx, &CoreStreamEvent::Error { message: msg }, &mut enc_state)
+                            .unwrap_or_default()
+                        {
+                            yield Ok(chunk_to_event(&cc));
+                        }
+                        if !saw_stop {
+                            for cc in client_stream
+                                .encode(&ctx, &CoreStreamEvent::MessageStop, &mut enc_state)
+                                .unwrap_or_default()
+                            {
+                                yield Ok(chunk_to_event(&cc));
+                            }
+                        }
                         break 'stream;
                     }
                 };
@@ -304,6 +394,76 @@ pub fn build_stream_response(
                         Ok(ChunkVerdict::Forward) => {}
                     }
                     yield Ok(chunk_to_event(&cc));
+                }
+            }
+        }
+        // 上游流自然耗尽但未产 MessageStop（协议缺终帧或提前 EOF）：
+        // 合成收尾——已开块补 BlockStop、缺 MessageDelta 补一帧、补 MessageStop，
+        // 否则客户端的块/消息状态机永远收不了尾。带内错误流只补 MessageStop：
+        // 错误帧已是协议终态，再发 completed/delta 反而自相矛盾。
+        if !saw_stop && audit.failed.is_none() {
+            let mut tail: Vec<CoreStreamEvent> = Vec::new();
+            if saw_err {
+                // 上游已发过带内错误帧：只补 MessageStop 让客户端状态机收尾，
+                // 不再补 completed/delta——错误帧之后再说「完成」自相矛盾。
+                tail.push(CoreStreamEvent::MessageStop);
+            } else {
+                // 无 MessageStart 的兜底上游（罕见）：先补一帧，客户端才有
+                // 消息头可挂
+                if !saw_start {
+                    tail.push(CoreStreamEvent::MessageStart {
+                        id: String::new(),
+                        model: String::new(),
+                    });
+                }
+                for idx in std::mem::take(&mut dec_state.open_blocks) {
+                    tail.push(CoreStreamEvent::BlockStop {
+                        index: idx,
+                        block: dec_state.blocks.get(&idx).cloned(),
+                    });
+                }
+                // 兜底帧同样是水印挂点：marker 要排在 MessageDelta 之前，
+                // 否则 responses 入口的 response.completed 组装不到水印 item。
+                if let Some(tag) = &session_tag {
+                    if !tagged && !saw_tool && saw_text {
+                        tail.extend(crate::session::marker_blocks(tag, next_index));
+                        tagged = true;
+                    }
+                }
+                if !saw_finish {
+                    // 流已干净读尽（chunk 错误会走 failed 分支到不了这里）——
+                    // 上游没报停因按 end_turn 收尾：responses 入口缺它就不发
+                    // response.completed，chat 入口缺它就没有 finish_reason，
+                    // 客户端会一直挂着等终帧。
+                    tail.push(CoreStreamEvent::MessageDelta {
+                        stop_reason: Some(moonbridge_core::StopReason::EndTurn),
+                        usage: None,
+                    });
+                }
+                tail.push(CoreStreamEvent::MessageStop);
+            }
+            for mut ev in tail {
+                match process_stream_event(
+                    &hooks,
+                    &ctx,
+                    client_stream.as_ref(),
+                    &mut enc_state,
+                    &mut dropped_blocks,
+                    &mut ev,
+                )
+                .await
+                {
+                    Ok(cchunks) => {
+                        for mut cc in cchunks {
+                            match hooks.on_client_chunk_raw(&ctx, &mut cc).await {
+                                Ok(ChunkVerdict::Drop) => continue,
+                                Err(e) => tracing::warn!(error = %e, "on_client_chunk_raw 失败，放行"),
+                                Ok(ChunkVerdict::Forward) => {}
+                            }
+                            yield Ok(chunk_to_event(&cc));
+                        }
+                    }
+                    Err(e) => tracing::warn!(error = %e, "收尾事件编码失败"),
                 }
             }
         }

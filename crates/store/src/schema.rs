@@ -169,11 +169,17 @@ pub fn migrate(conn: &Connection) -> Result<()> {
 
     for m in MIGRATIONS {
         if m.version > current {
-            conn.execute_batch(m.sql)?;
-            conn.execute(
+            // 每个版本整体包在一个事务里（SQLite 的 DDL 支持事务）：多语句
+            // migration（如 V3 建表+搬数据+删列）中途失败会整体回滚、版本号
+            // 不落，下次启动可干净重试；裸 execute_batch 会留下半成品 schema，
+            // 重跑即报「duplicate column / no such column」，DB 永久损坏。
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(m.sql)?;
+            tx.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (?1, ?2)",
                 rusqlite::params![m.version, now_unix()],
             )?;
+            tx.commit()?;
             tracing::info!(version = m.version, "已应用数据库 migration");
         }
     }

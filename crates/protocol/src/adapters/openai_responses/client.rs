@@ -224,11 +224,12 @@ impl ClientAdapter for OpenAiResponsesAdapter {
                                     }
                                 }
                             }
-                            let signature = item
-                                .get("encrypted_content")
-                                .and_then(|v| v.as_str())
-                                .map(String::from)
-                                .filter(|s| !s.is_empty());
+                            let signature = crate::adapters::tag_signature(
+                                crate::adapters::SIG_OPENAI,
+                                item.get("encrypted_content")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from),
+                            );
                             if text.is_empty() && signature.is_none() {
                                 continue;
                             }
@@ -275,6 +276,34 @@ impl ClientAdapter for OpenAiResponsesAdapter {
             });
         }
 
+        // instructions 是 Responses 的 system 等价物：并入顶层 system，
+        // 供 Anthropic/Gemini 上游按各自形态下发。
+        if let Some(instr) = raw.get("instructions").and_then(|v| v.as_str()) {
+            if !instr.is_empty() {
+                req.system.push(ContentBlock::text(instr));
+            }
+        }
+
+        // 未解析顶层字段透传（Responses→Responses 保真）：previous_response_id、
+        // store、background、include、truncation、parallel_tool_calls、metadata 等
+        // 经 Core 无字段位，整体收进 meta，出站时合并回请求体。
+        if let Some(obj) = raw.as_object() {
+            const KNOWN: &[&str] = &[
+                "model", "input", "tools", "tool_choice", "reasoning",
+                "instructions", "max_output_tokens", "max_tokens", "temperature",
+                "top_p", "stream",
+            ];
+            let extra: serde_json::Map<String, Value> = obj
+                .iter()
+                .filter(|(k, _)| !KNOWN.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            if !extra.is_empty() {
+                req.meta
+                    .insert("responses.extra".to_string(), Value::Object(extra));
+            }
+        }
+
         Ok(req)
     }
 
@@ -303,7 +332,10 @@ impl ClientAdapter for OpenAiResponsesAdapter {
                         "id": format!("rs_{}", { item_seq += 1; item_seq }),
                         "summary": [{ "type": "summary_text", "text": text }],
                     });
-                    if let Some(enc) = signature {
+                    if let Some(enc) = signature
+                        .as_deref()
+                        .map(|s| crate::adapters::emit_signature(crate::adapters::SIG_OPENAI, s))
+                    {
                         if !enc.is_empty() {
                             item["encrypted_content"] = json!(enc);
                         }
@@ -329,17 +361,32 @@ impl ClientAdapter for OpenAiResponsesAdapter {
         }
         flush_text(&mut text_buf, &mut output, &mut item_seq);
 
-        let usage = dto::usage_object(resp.usage.input_tokens, resp.usage.output_tokens);
+        let usage = dto::usage_object(&resp.usage);
 
-        Ok(json!({
+        // status 语义：输出因上限/过滤被截断时是 "incomplete" 而非
+        // "completed"——客户端据此决定是否能直接使用结果。
+        let (status, incomplete) = match resp.stop_reason {
+            Some(moonbridge_core::StopReason::MaxTokens) => {
+                ("incomplete", Some(json!({ "reason": "max_output_tokens" })))
+            }
+            Some(moonbridge_core::StopReason::ContentFilter) => {
+                ("incomplete", Some(json!({ "reason": "content_filter" })))
+            }
+            _ => ("completed", None),
+        };
+        let mut obj = json!({
             "id": resp.id,
             "object": dto::OBJECT_RESPONSE,
             "created_at": now_unix(),
-            "status": "completed",
+            "status": status,
             "model": resp.model,
             "output": output,
             "usage": usage,
-        }))
+        });
+        if let Some(d) = incomplete {
+            obj["incomplete_details"] = d;
+        }
+        Ok(obj)
     }
 }
 

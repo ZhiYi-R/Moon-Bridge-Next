@@ -521,13 +521,16 @@ mod tests {
     }
 
     /// 不同 id 应当分散到不同 tag（哈希退化时这条会先响）。
+    /// 用确定性 id 样本：随机 uuid 采样在 24-bit 空间有约 0.8% 的碰撞率，
+    /// 测试会偶发误报。
     #[test]
     fn tag_from_id_spreads_over_distinct_ids() {
         let mut seen = std::collections::HashSet::new();
-        for i in 0..512 {
+        for i in 0..512u32 {
+            let id = format!("session-{i:08x}-fixed-sample");
             assert!(
-                seen.insert(tag_from_id(&uuid::Uuid::new_v4().to_string())),
-                "id #{i} 的 tag 撞车异常频繁"
+                seen.insert(tag_from_id(&id)),
+                "id {id} 的 tag 撞车异常频繁"
             );
         }
         assert_eq!(seen.len(), 512);

@@ -89,10 +89,12 @@ impl Database {
             sql.push_str(" AND created_at <= ?");
             binds.push(Box::new(until));
         }
-        let limit = if q.limit > 0 { q.limit } else { 100 };
+        // limit 钳制：非正数回退默认 100，无上限的 limit 会把整表读进内存；
+        // 负 offset 在 SQLite 里静默当作 0，显式归一避免口径分歧。
+        let limit = if q.limit > 0 { q.limit.min(500) } else { 100 };
         sql.push_str(" ORDER BY created_at DESC LIMIT ? OFFSET ?");
         binds.push(Box::new(limit));
-        binds.push(Box::new(q.offset));
+        binds.push(Box::new(q.offset.max(0)));
 
         let params: Vec<&dyn ToSql> = binds.iter().map(|b| b.as_ref()).collect();
         let mut stmt = conn.prepare(&sql)?;

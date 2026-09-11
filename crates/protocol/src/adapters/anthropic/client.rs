@@ -14,18 +14,43 @@ use moonbridge_core::{
 };
 use serde_json::{json, Value};
 
-use super::provider::{anthropic_to_block, anthropic_usage_out, block_to_anthropic, unmap_stop_reason};
+use super::provider::{
+    anthropic_to_block, anthropic_usage_out, block_to_anthropic_client, unmap_stop_reason,
+};
 use super::AnthropicAdapter;
 use crate::adapter::ClientAdapter;
 use crate::adapters::effort_from_budget;
 use crate::context::ReqCtx;
 
-/// 解析 Anthropic message 的 content（字符串或 block 数组）为 Core 内容块。
-fn parse_content(v: Option<&Value>) -> Vec<ContentBlock> {
+/// `msg.ext`/`req.meta` 中记录块级 `cache_control` 位置的键：
+/// `{"<content 内块序号>": <cache_control 原始对象>}`。
+/// Anthropic 的 prompt caching 断点挂在块上，Core 块没有字段位，
+/// 以 ext 旁挂位置表保真回传。
+pub(crate) const CACHE_EXT_KEY: &str = "anthropic.cache_control";
+/// `req.meta` 中 system 块 cache_control 位置表的键。
+pub(crate) const SYSTEM_CACHE_META_KEY: &str = "anthropic.system_cache_control";
+/// `req.meta` 中未解析顶层字段透传对象的键（Anthropic→Anthropic 保真）。
+pub(crate) const EXTRA_META_KEY: &str = "anthropic.extra";
+
+/// 解析 Anthropic message 的 content（字符串或 block 数组）为 Core 内容块，
+/// 同时把各块的 `cache_control` 记入位置表。
+fn parse_content(v: Option<&Value>) -> (Vec<ContentBlock>, Value) {
     match v {
-        Some(Value::String(s)) => vec![ContentBlock::text(s.clone())],
-        Some(Value::Array(arr)) => arr.iter().filter_map(anthropic_to_block).collect(),
-        _ => Vec::new(),
+        Some(Value::String(s)) => (vec![ContentBlock::text(s.clone())], Value::Null),
+        Some(Value::Array(arr)) => {
+            let mut cache = json!({});
+            let mut blocks = Vec::new();
+            for raw in arr {
+                if let Some(blk) = anthropic_to_block(raw) {
+                    if let Some(cc) = raw.get("cache_control") {
+                        cache[blocks.len().to_string()] = cc.clone();
+                    }
+                    blocks.push(blk);
+                }
+            }
+            (blocks, cache)
+        }
+        _ => (Vec::new(), Value::Null),
     }
 }
 
@@ -58,14 +83,24 @@ impl ClientAdapter for AnthropicAdapter {
         let mut req = CoreRequest::new(model.clone());
         req.model_alias = model;
 
-        // system：字符串或 block 数组
+        // system：字符串或 block 数组（块的 cache_control 记入 meta 位置表）
         match raw.get("system") {
             Some(Value::String(s)) if !s.is_empty() => req.system.push(ContentBlock::text(s.clone())),
             Some(Value::Array(arr)) => {
+                let mut cache = json!({});
                 for b in arr {
                     if let Some(blk) = anthropic_to_block(b) {
+                        if let Some(cc) = b.get("cache_control") {
+                            cache[req.system.len().to_string()] = cc.clone();
+                        }
                         req.system.push(blk);
                     }
+                }
+                if let Some(obj) = cache.as_object().filter(|o| !o.is_empty()) {
+                    req.meta.insert(
+                        SYSTEM_CACHE_META_KEY.to_string(),
+                        Value::Object(obj.clone()),
+                    );
                 }
             }
             _ => {}
@@ -79,22 +114,26 @@ impl ClientAdapter for AnthropicAdapter {
                     Some("system") => Role::System,
                     _ => Role::User,
                 };
-                let content = parse_content(m.get("content"));
-                req.messages.push(Message {
+                let (content, cache) = parse_content(m.get("content"));
+                let mut msg = Message {
                     role,
                     content,
                     ext: Default::default(),
-                });
+                };
+                if let Some(obj) = cache.as_object().filter(|o| !o.is_empty()) {
+                    msg.ext.insert(CACHE_EXT_KEY.to_string(), Value::Object(obj.clone()));
+                }
+                req.messages.push(msg);
             }
         }
 
-        // tools
+        // tools（工具级 cache_control 记进 Tool.ext）
         if let Some(Value::Array(tools)) = raw.get("tools") {
             for t in tools {
                 let Some(name) = t.get("name").and_then(|v| v.as_str()) else {
                     continue;
                 };
-                req.tools.push(Tool {
+                let mut tool = Tool {
                     name: name.to_string(),
                     description: t.get("description").and_then(|v| v.as_str()).map(String::from),
                     input_schema: t
@@ -102,7 +141,11 @@ impl ClientAdapter for AnthropicAdapter {
                         .cloned()
                         .unwrap_or_else(|| json!({ "type": "object" })),
                     ext: Default::default(),
-                });
+                };
+                if let Some(cc) = t.get("cache_control") {
+                    tool.ext.insert("cache_control".to_string(), cc.clone());
+                }
+                req.tools.push(tool);
             }
         }
 
@@ -145,11 +188,37 @@ impl ClientAdapter for AnthropicAdapter {
         }
         req.stream = raw.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
+        // 未解析顶层字段透传（Anthropic→Anthropic 保真）：top_k/metadata/
+        // service_tier/mcp_servers/context_management 等经 Core 无字段位，
+        // 整体收进 meta，出站时合并回请求体（网关已解析字段优先）。
+        if let Some(obj) = raw.as_object() {
+            const KNOWN: &[&str] = &[
+                "model", "system", "messages", "tools", "tool_choice", "thinking",
+                "output_config", "max_tokens", "temperature", "top_p",
+                "stop_sequences", "stream",
+            ];
+            let extra: serde_json::Map<String, Value> = obj
+                .iter()
+                .filter(|(k, _)| !KNOWN.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            if !extra.is_empty() {
+                req.meta
+                    .insert(EXTRA_META_KEY.to_string(), Value::Object(extra));
+            }
+        }
+
         Ok(req)
     }
 
     async fn from_core_response(&self, _ctx: &ReqCtx, resp: CoreResponse) -> Result<Value> {
-        let content: Vec<Value> = resp.content.iter().filter_map(block_to_anthropic).collect();
+        // 客户端回程：本家签名还原原文、异源凭据带标记透传（回传后由
+        // 归属协议上游解标）——不走 block_to_anthropic 的上游降级语义。
+        let content: Vec<Value> = resp
+            .content
+            .iter()
+            .filter_map(block_to_anthropic_client)
+            .collect();
         let stop_reason = resp.stop_reason.map(unmap_stop_reason).unwrap_or("end_turn");
         Ok(json!({
             "id": resp.id,

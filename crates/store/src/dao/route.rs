@@ -69,10 +69,16 @@ impl Database {
         Ok(())
     }
 
-    /// 删除路由。
+    /// 删除路由（连带删除该别名的 route 维度插件绑定）。
     pub fn delete_route(&self, alias: &str) -> Result<()> {
-        let conn = self.conn.lock();
-        conn.execute("DELETE FROM routes WHERE alias = ?1", params![alias])?;
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM routes WHERE alias = ?1", params![alias])?;
+        tx.execute(
+            "DELETE FROM plugin_bindings WHERE scope = 'route' AND scope_key = ?1",
+            params![alias],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 }

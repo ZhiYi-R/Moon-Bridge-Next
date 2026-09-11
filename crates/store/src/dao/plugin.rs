@@ -86,11 +86,13 @@ impl Database {
         Ok(())
     }
 
-    /// 删除插件（级联删除其 bindings）。
+    /// 删除插件（级联删除其 bindings）。事务化，中途失败整体回滚。
     pub fn delete_plugin(&self, name: &str) -> Result<()> {
-        let conn = self.conn.lock();
-        conn.execute("DELETE FROM plugins WHERE name = ?1", params![name])?;
-        conn.execute("DELETE FROM plugin_bindings WHERE plugin_name = ?1", params![name])?;
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM plugins WHERE name = ?1", params![name])?;
+        tx.execute("DELETE FROM plugin_bindings WHERE plugin_name = ?1", params![name])?;
+        tx.commit()?;
         Ok(())
     }
 

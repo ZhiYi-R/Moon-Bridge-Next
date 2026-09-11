@@ -110,11 +110,6 @@ pub trait PluginHooks: Send + Sync {
         Ok(ChunkVerdict::Forward)
     }
 
-    /// 该插件是否对指定模型别名启用。
-    fn enabled_for_model(&self, _model: &str) -> bool {
-        true
-    }
-
     // ── 生命周期（非请求作用域）───────────────────────────────────
 
     /// 网关开始服务前通知所有插件执行各自的 `MB.init`。默认 no-op。

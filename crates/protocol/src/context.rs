@@ -17,6 +17,11 @@ pub struct ReqCtx {
     pub upstream_protocol: Option<Protocol>,
     /// 命中的 provider key，路由解析后填充。
     pub provider_key: Option<String>,
+    /// 命中的 routes 表别名（仅经别名映射解析的请求有值；裸模型名/限定名为 None）。
+    /// 插件 route 维度 binding 的 scope_key 依据。
+    pub route_alias: Option<String>,
+    /// 上游实际模型名，路由解析后填充（插件 model 维度 binding 的 scope_key 依据）。
+    pub upstream_model: Option<String>,
     /// 是否流式请求。
     pub stream: bool,
     /// 其它元数据（原始 headers 摘录、客户端 UA 等）。
@@ -33,6 +38,8 @@ impl ReqCtx {
             client_protocol,
             upstream_protocol: None,
             provider_key: None,
+            route_alias: None,
+            upstream_model: None,
             stream: false,
             meta: Map::new(),
         }

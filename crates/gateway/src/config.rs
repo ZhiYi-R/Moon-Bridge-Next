@@ -18,7 +18,8 @@ pub struct GatewayConfig {
     /// 所有上游调用的出站代理（HTTP(S)）。
     #[serde(default)]
     pub egress_proxy: Option<String>,
-    /// 报文层钩子处理的 body 上限（字节），超限降级为只读并跳过 Lua。
+    /// body 大小上限（字节）。两处生效：报文层钩子处理（超限降级为只读并
+    /// 跳过 Lua）与上游非流式/错误响应体读取（超限以 502 拒绝）。
     #[serde(default = "default_max_body")]
     pub max_body_bytes: usize,
     /// 插件脚本目录：`script_ref` 里的相对 `.lua` 路径归一到此处，绝对路径也必须
@@ -27,9 +28,10 @@ pub struct GatewayConfig {
     pub plugins_dir: Option<String>,
     /// 上游请求超时（秒）。
     ///
-    /// 注意：当前**仅**用于派生插件沙箱的 `call_timeout`（见 `lib.rs::sandbox_limits`）。
-    /// 上游 HTTP 客户端刻意不设总超时，只设 30s 连接超时——LLM 流式响应可远超此值，
-    /// 见 `upstream.rs::build_client`。故此值不影响上游请求本身。
+    /// 两处生效：非流式上游请求的总超时（`dispatch.rs` 发送 + 响应体读取共用
+    /// 这一预算；流式刻意不受此限——长生成不应被网关截断），以及插件沙箱的
+    /// `call_timeout` 派生基准（见 `lib.rs::sandbox_limits`）。
+    /// 上游 HTTP 客户端本身只设连接超时，见 `upstream.rs::build_client`。
     #[serde(default = "default_timeout")]
     pub request_timeout_secs: u64,
     /// trace 落盘目录；`None` 表示不落盘。
@@ -97,61 +99,4 @@ impl Default for GatewayConfig {
     }
 }
 
-impl GatewayConfig {
-    /// 从 TOML 文本解析（缺失字段用默认值）。
-    pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
-        // 先填充默认，再覆盖，容忍部分字段缺失
-        let mut cfg = GatewayConfig::default();
-        let partial: PartialConfig = toml::from_str(s)?;
-        if let Some(v) = partial.addr {
-            cfg.addr = v;
-        }
-        if let Some(v) = partial.auth_token {
-            cfg.auth_token = Some(v);
-        }
-        if let Some(v) = partial.egress_proxy {
-            cfg.egress_proxy = Some(v);
-        }
-        if let Some(v) = partial.max_body_bytes {
-            cfg.max_body_bytes = v;
-        }
-        if let Some(v) = partial.plugins_dir {
-            cfg.plugins_dir = Some(v);
-        }
-        if let Some(v) = partial.request_timeout_secs {
-            cfg.request_timeout_secs = v;
-        }
-        if let Some(v) = partial.trace_dir {
-            cfg.trace_dir = Some(v);
-        }
-        if let Some(v) = partial.trace_record_bodies {
-            cfg.trace_record_bodies = v;
-        }
-        if let Some(v) = partial.trace_retention {
-            cfg.trace_retention = v;
-        }
-        if let Some(v) = partial.session_marker {
-            cfg.session_marker = v;
-        }
-        if let Some(v) = partial.session_table_depth {
-            cfg.session_table_depth = v;
-        }
-        Ok(cfg)
-    }
-}
 
-/// 部分字段配置（用于宽容解析 TOML）。
-#[derive(Debug, Deserialize)]
-struct PartialConfig {
-    addr: Option<String>,
-    auth_token: Option<String>,
-    egress_proxy: Option<String>,
-    max_body_bytes: Option<usize>,
-    plugins_dir: Option<String>,
-    request_timeout_secs: Option<u64>,
-    trace_dir: Option<String>,
-    trace_record_bodies: Option<bool>,
-    trace_retention: Option<usize>,
-    session_marker: Option<bool>,
-    session_table_depth: Option<usize>,
-}

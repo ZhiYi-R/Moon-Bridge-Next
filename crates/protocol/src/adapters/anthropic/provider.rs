@@ -17,8 +17,23 @@ use crate::adapter::{ProviderAdapter, ProviderEndpoint, UpstreamRequest};
 use crate::adapters::{clamped_thinking_budget, reasoning_effort};
 use crate::context::ReqCtx;
 
-/// Core 内容块 → Anthropic content block。
+/// Core 内容块 → Anthropic content block（上游出站方向：异源凭据丢弃，
+/// 无凭据 thinking 降级为 text——见 Reasoning 分支）。
 pub(super) fn block_to_anthropic(block: &ContentBlock) -> Option<Value> {
+    block_to_anthropic_ex(block, false)
+}
+
+/// Core 内容块 → Anthropic content block（客户端回程方向：本家凭据还原
+/// 原文、异源凭据带标记原样透传，供客户端存入历史后跨协议回传还原）。
+pub(super) fn block_to_anthropic_client(block: &ContentBlock) -> Option<Value> {
+    block_to_anthropic_ex(block, true)
+}
+
+/// `for_client` 区分两条出站路径的凭据语义：
+///   * 上游（false）：只放行 Anthropic 原生签名（ant: 解标），异源凭据透传必 400；
+///   * 客户端（true）：Reasoning 始终还原 thinking/redacted_thinking 形态，
+///     签名经 emit_signature 透传（本家还原、异源带标记），不做降级。
+fn block_to_anthropic_ex(block: &ContentBlock, for_client: bool) -> Option<Value> {
     match block {
         ContentBlock::Text { text } => Some(json!({ "type": "text", "text": text })),
         ContentBlock::Image { data, media_type } => {
@@ -69,28 +84,37 @@ pub(super) fn block_to_anthropic(block: &ContentBlock) -> Option<Value> {
             // 块不可修改，混转会 400）：
             //   * redacted_thinking：凭据在 data 字段、无可读 thinking；
             //   * display:"omitted" 的 thinking：空文本 + signature（官方合法形态）。
-            if text.is_empty() {
-                if let Some(sig) = signature {
-                    if !sig.is_empty() {
-                        if *redacted {
-                            return Some(json!({ "type": "redacted_thinking", "data": sig }));
-                        }
-                        return Some(json!({
-                            "type": "thinking",
-                            "thinking": "",
-                            "signature": sig,
-                        }));
-                    }
-                }
-                return None; // 空推理且无凭据，无回传价值
+            // 异源凭据（Gemini/OpenAI 签名）透传只会被拒——按无凭据降级；
+            // 无凭据的 thinking 块在多轮历史里同样 400，降级为文本块。
+            let sig = if for_client {
+                signature
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| crate::adapters::emit_signature(crate::adapters::SIG_ANTHROPIC, s))
+            } else {
+                crate::adapters::untag_signature(
+                    crate::adapters::SIG_ANTHROPIC,
+                    signature.as_deref(),
+                )
+            };
+            if *redacted {
+                return sig.map(|s| json!({ "type": "redacted_thinking", "data": s }));
             }
-            let mut obj = json!({ "type": "thinking", "thinking": text });
-            if let Some(sig) = signature {
-                if !sig.is_empty() {
-                    obj["signature"] = json!(sig);
+            match sig {
+                Some(sig) => Some(json!({
+                    "type": "thinking",
+                    "thinking": text,
+                    "signature": sig,
+                })),
+                // 客户端侧保留 thinking 形态（无签名也照常下发——客户端只
+                // 读不回传时无损失）；上游侧无签名 thinking 非法，降级处理
+                None if for_client && !text.is_empty() => {
+                    Some(json!({ "type": "thinking", "thinking": text, "signature": "" }))
                 }
+                // 无签名 thinking 非法：非空文本降级为 text，空文本整块丢弃
+                None if text.is_empty() => None,
+                None => Some(json!({ "type": "text", "text": text })),
             }
-            Some(obj)
         }
     }
 }
@@ -151,14 +175,20 @@ pub(super) fn anthropic_to_block(v: &Value) -> Option<ContentBlock> {
         }
         "thinking" => Some(ContentBlock::Reasoning {
             text: v.get("thinking").and_then(|t| t.as_str()).unwrap_or_default().to_string(),
-            signature: v.get("signature").and_then(|s| s.as_str()).map(|s| s.to_string()),
+            signature: crate::adapters::tag_signature(
+                crate::adapters::SIG_ANTHROPIC,
+                v.get("signature").and_then(|s| s.as_str()).map(|s| s.to_string()),
+            ),
             redacted: false,
         }),
         // redacted_thinking：凭据在 data 字段（无可读 thinking）→ signature 承载，
         // 多轮回传时原样还原，丢失会 400
         "redacted_thinking" => Some(ContentBlock::Reasoning {
             text: String::new(),
-            signature: v.get("data").and_then(|s| s.as_str()).map(|s| s.to_string()),
+            signature: crate::adapters::tag_signature(
+                crate::adapters::SIG_ANTHROPIC,
+                v.get("data").and_then(|s| s.as_str()).map(|s| s.to_string()),
+            ),
             redacted: true,
         }),
         _ => None,
@@ -172,6 +202,11 @@ pub(super) fn map_stop_reason(s: &str) -> Option<StopReason> {
         "max_tokens" => Some(StopReason::MaxTokens),
         "stop_sequence" => Some(StopReason::StopSequence),
         "tool_use" => Some(StopReason::ToolUse),
+        // 新形态 stop_reason：refusal（拒答）与 pause_turn（长回合暂停）
+        // 不可吞成 end_turn——客户端要据此决定渲染/续跑。
+        "refusal" => Some(StopReason::Refusal),
+        "pause_turn" => Some(StopReason::PauseTurn),
+        "model_context_window_exceeded" => Some(StopReason::MaxTokens),
         _ => None,
     }
 }
@@ -183,24 +218,47 @@ pub(super) fn unmap_stop_reason(r: StopReason) -> &'static str {
         StopReason::MaxTokens => "max_tokens",
         StopReason::StopSequence => "stop_sequence",
         StopReason::ToolUse => "tool_use",
-        StopReason::ContentFilter => "end_turn",
+        StopReason::ContentFilter => "refusal",
+        StopReason::Refusal => "refusal",
+        StopReason::PauseTurn => "pause_turn",
+    }
+}
+
+/// 按 ext/meta 中的位置表把 `cache_control` 回写到已转换的块上。
+fn apply_cache_control(blocks: &mut [Value], positions: Option<&Value>) {
+    let Some(map) = positions.and_then(|v| v.as_object()) else {
+        return;
+    };
+    for (k, cc) in map {
+        if let Ok(i) = k.parse::<usize>() {
+            if let Some(b) = blocks.get_mut(i) {
+                b["cache_control"] = cc.clone();
+            }
+        }
     }
 }
 
 /// 构建 Anthropic messages 数组：合并连续同 role、把 tool role 归入 user。
+/// role=System 的消息不进 messages（已并入顶层 system，重复发送会让内容双计）。
 fn build_messages(req: &CoreRequest) -> Vec<Value> {
     let mut out: Vec<(String, Vec<Value>)> = Vec::new();
     for msg in &req.messages {
+        if msg.role == Role::System {
+            continue;
+        }
         let role = match msg.role {
             Role::Assistant => "assistant",
-            Role::System => "user", // system 一般走顶层 system 字段；此处兜底为 user
-            Role::User | Role::Tool => "user",
+            _ => "user",
         };
-        let blocks: Vec<Value> = msg
+        let mut blocks: Vec<Value> = msg
             .content
             .iter()
             .filter_map(block_to_anthropic)
             .collect();
+        apply_cache_control(
+            &mut blocks,
+            msg.ext.get(crate::adapters::anthropic::client::CACHE_EXT_KEY),
+        );
         if blocks.is_empty() {
             continue;
         }
@@ -213,34 +271,50 @@ fn build_messages(req: &CoreRequest) -> Vec<Value> {
         }
         out.push((role.to_string(), blocks));
     }
-    out.into_iter()
+    let msgs: Vec<Value> = out
+        .into_iter()
         .map(|(role, content)| json!({ "role": role, "content": content }))
-        .collect()
+        .collect();
+    // Anthropic 要求 messages 非空（空数组直接 400）：上游过滤/插件可能把
+    // 全部内容清空，兜底一条占位 user 消息，宁可语义损失也不构造必拒请求。
+    if msgs.is_empty() {
+        vec![json!({
+            "role": "user",
+            "content": [{ "type": "text", "text": "(empty)" }],
+        })]
+    } else {
+        msgs
+    }
 }
 
-/// 构建 Anthropic 顶层 system 字段。
+/// 构建 Anthropic 顶层 system 字段。system 只接受 text 块
+/// （image/thinking 等会被上游拒收）；cache_control 经 meta 位置表回写。
 fn build_system(req: &CoreRequest) -> Option<Value> {
     let mut blocks: Vec<Value> = Vec::new();
     for b in &req.system {
-        if let Some(v) = block_to_anthropic(b) {
-            blocks.push(v);
+        if let ContentBlock::Text { text } = b {
+            blocks.push(json!({ "type": "text", "text": text }));
         }
     }
     // 消息里 role=System 的文本也并入 system
     for msg in &req.messages {
         if msg.role == Role::System {
             for b in &msg.content {
-                if let Some(v) = block_to_anthropic(b) {
-                    blocks.push(v);
+                if let ContentBlock::Text { text } = b {
+                    blocks.push(json!({ "type": "text", "text": text }));
                 }
             }
         }
     }
     if blocks.is_empty() {
-        None
-    } else {
-        Some(Value::Array(blocks))
+        return None;
     }
+    apply_cache_control(
+        &mut blocks,
+        req.meta
+            .get(crate::adapters::anthropic::client::SYSTEM_CACHE_META_KEY),
+    );
+    Some(Value::Array(blocks))
 }
 
 #[async_trait]
@@ -262,13 +336,20 @@ impl ProviderAdapter for AnthropicAdapter {
         );
 
         let max_tokens = req.max_tokens.unwrap_or(dto::DEFAULT_MAX_TOKENS);
-        let mut body = json!({
-            "model": req.model,
-            "max_tokens": max_tokens,
-            "messages": build_messages(req),
-            "stream": req.stream,
-        });
+        // Anthropic→Anthropic 的未解析字段（top_k/metadata/service_tier/
+        // mcp_servers/context_management…）经 meta 透传，先并入 body——
+        // 网关已解析字段随后覆盖，保证我们的规范化结果优先。
+        let mut body = req
+            .meta
+            .get(crate::adapters::anthropic::client::EXTRA_META_KEY)
+            .and_then(|v| v.as_object().cloned())
+            .map(Value::Object)
+            .unwrap_or_else(|| json!({}));
         let obj = body.as_object_mut().expect("body is object");
+        obj.insert("model".to_string(), json!(req.model));
+        obj.insert("max_tokens".to_string(), json!(max_tokens));
+        obj.insert("messages".to_string(), json!(build_messages(req)));
+        obj.insert("stream".to_string(), json!(req.stream));
 
         if let Some(system) = build_system(req) {
             obj.insert("system".to_string(), system);
@@ -281,6 +362,9 @@ impl ProviderAdapter for AnthropicAdapter {
                     let mut tool = json!({ "name": t.name, "input_schema": t.input_schema });
                     if let Some(desc) = &t.description {
                         tool["description"] = json!(desc);
+                    }
+                    if let Some(cc) = t.ext.get("cache_control") {
+                        tool["cache_control"] = cc.clone();
                     }
                     tool
                 })
@@ -298,24 +382,67 @@ impl ProviderAdapter for AnthropicAdapter {
             };
             obj.insert("tool_choice".to_string(), v);
         }
-        if let Some(t) = req.temperature {
-            obj.insert("temperature".to_string(), json!(t));
+
+        // 推理强度两种上游形态：
+        //   * "adaptive"（默认）：thinking:{type:"adaptive"} + output_config.effort
+        //     ——Claude 4.7+/Opus 5/Sonnet 5/Fable 5 的唯一合法形态；
+        //   * "enabled"（旧模型）：thinking:{type:"enabled", budget_tokens}，
+        //     预算按 effort 档位换算并夹到 < max_tokens。
+        // 端点 extra.thinking_mode = "enabled" 可强制旧形态。
+        let thinking_mode = endpoint
+            .extra
+            .get("thinking_mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("adaptive");
+        let thinking_on = reasoning_effort(req).is_some();
+        if let Some(effort) = reasoning_effort(req) {
+            if thinking_mode == "enabled" {
+                if let Some(budget) = clamped_thinking_budget(effort, max_tokens) {
+                    obj.insert(
+                        "thinking".to_string(),
+                        json!({ "type": "enabled", "budget_tokens": budget }),
+                    );
+                }
+            } else {
+                obj.insert("thinking".to_string(), json!({ "type": "adaptive" }));
+                // Anthropic effort 档位：low/medium/high/xhigh/max；
+                // minimal 归入 low，未知值回退 medium。
+                let e = match effort {
+                    "minimal" => "low",
+                    e @ ("low" | "medium" | "high" | "xhigh" | "max") => e,
+                    _ => "medium",
+                };
+                obj.insert(
+                    "output_config".to_string(),
+                    json!({ "effort": e }),
+                );
+            }
         }
-        if let Some(p) = req.top_p {
-            obj.insert("top_p".to_string(), json!(p));
+
+        // temperature/top_p 剥离规则：
+        //   * thinking 开启（任一形态）：官方明确不兼容，发送即 400；
+        //   * 端点 extra.strip_sampling 为真：Opus 4.7+/Fable 5 等整体移除
+        //     采样参数的模型需要无条件剥离。
+        let strip_sampling = thinking_on
+            || endpoint
+                .extra
+                .get("strip_sampling")
+                .map(|v| v.as_bool().unwrap_or(false))
+                .unwrap_or(false);
+        if !strip_sampling {
+            if let Some(t) = req.temperature {
+                obj.insert("temperature".to_string(), json!(t));
+            }
+            if let Some(p) = req.top_p {
+                obj.insert("top_p".to_string(), json!(p));
+            }
+        } else {
+            obj.remove("temperature");
+            obj.remove("top_p");
+            obj.remove("top_k");
         }
         if !req.stop.is_empty() {
             obj.insert("stop_sequences".to_string(), json!(req.stop));
-        }
-        // 推理强度：Anthropic 用扩展思考的 token 预算表达，且要求
-        // 1024 <= budget_tokens < max_tokens，故经 clamped_thinking_budget 夹紧。
-        if let Some(effort) = reasoning_effort(req) {
-            if let Some(budget) = clamped_thinking_budget(effort, max_tokens) {
-                obj.insert(
-                    "thinking".to_string(),
-                    json!({ "type": "enabled", "budget_tokens": budget }),
-                );
-            }
         }
 
         // headers
@@ -422,7 +549,7 @@ mod tests {
         match &core {
             ContentBlock::Reasoning { text, signature: Some(sig), redacted } => {
                 assert_eq!(text, "");
-                assert_eq!(sig, "SIG");
+                assert_eq!(sig, "ant:SIG", "凭据带来源标记，出站时还原");
                 assert!(!redacted);
             }
             other => panic!("expected reasoning, got {other:?}"),
@@ -442,7 +569,7 @@ mod tests {
         match &core {
             ContentBlock::Reasoning { text, signature: Some(enc), redacted: true } => {
                 assert_eq!(text, "");
-                assert_eq!(enc, "ENC");
+                assert_eq!(enc, "ant:ENC");
             }
             other => panic!("expected reasoning with credential, got {other:?}"),
         }
@@ -543,9 +670,11 @@ mod tests {
         assert!(matches!(resp.content[1], ContentBlock::ToolUse { .. }));
     }
 
-    /// 回归：`reasoning.effort` 必须翻译成 Anthropic 扩展思考的 token 预算。
+    /// 回归：`reasoning.effort` 必须传导到 Anthropic 的 thinking 配置。
+    /// 默认走 adaptive 形态（Claude 4.7+/Opus 5+ 要求）；端点
+    /// `extra.thinking_mode="enabled"` 时回落旧版 budget 形态。
     #[tokio::test]
-    async fn propagates_reasoning_as_thinking_budget() {
+    async fn propagates_reasoning_as_thinking() {
         let adapter = AnthropicAdapter;
         let ctx = ReqCtx::new("r1", Protocol::OpenAiResponse);
 
@@ -560,14 +689,26 @@ mod tests {
             .from_core_request(&ctx, &req, &endpoint())
             .await
             .unwrap();
+        // 默认 adaptive：effort 直传到 output_config，无 budget_tokens
+        assert_eq!(up.body["thinking"]["type"], "adaptive");
+        assert_eq!(up.body["output_config"]["effort"], "high");
+
+        // 旧模型端点：enabled + budget_tokens（按档位换算并夹紧）
+        let mut ep = endpoint();
+        ep.extra.insert("thinking_mode".into(), json!("enabled"));
+        let up = adapter
+            .from_core_request(&ctx, &req, &ep)
+            .await
+            .unwrap();
         assert_eq!(up.body["thinking"]["type"], "enabled");
         assert_eq!(up.body["thinking"]["budget_tokens"], 16384);
+        assert!(up.body.get("output_config").is_none());
 
         // 预算必须严格小于 max_tokens：小 max_tokens 时被夹紧
         let mut tight = req.clone();
         tight.max_tokens = Some(3000);
         let up2 = adapter
-            .from_core_request(&ctx, &tight, &endpoint())
+            .from_core_request(&ctx, &tight, &ep)
             .await
             .unwrap();
         assert_eq!(up2.body["thinking"]["budget_tokens"], 2999);
@@ -576,7 +717,7 @@ mod tests {
         let mut tiny = req.clone();
         tiny.max_tokens = Some(500);
         let up3 = adapter
-            .from_core_request(&ctx, &tiny, &endpoint())
+            .from_core_request(&ctx, &tiny, &ep)
             .await
             .unwrap();
         assert!(up3.body.get("thinking").is_none(), "不应发出非法 thinking");
@@ -588,5 +729,51 @@ mod tests {
             .await
             .unwrap();
         assert!(up4.body.get("thinking").is_none());
+    }
+
+    /// 回归：thinking 开启时 temperature/top_p 必须剥离（thinking 模型拒收，
+    /// 发送即 400）；strip_sampling 端点则无条件剥离。
+    #[tokio::test]
+    async fn thinking_strips_sampling_params() {
+        let adapter = AnthropicAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::OpenAiResponse);
+
+        let mut req = CoreRequest::new("claude");
+        req.messages.push(Message::text(Role::User, "Hi"));
+        req.temperature = Some(0.7);
+        req.top_p = Some(0.9);
+        req.reasoning = Some(Reasoning {
+            effort: Some("high".into()),
+            summary: None,
+        });
+        let up = adapter
+            .from_core_request(&ctx, &req, &endpoint())
+            .await
+            .unwrap();
+        assert_eq!(up.body["thinking"]["type"], "adaptive");
+        assert!(up.body.get("temperature").is_none(), "thinking 下不得发 temperature");
+        assert!(up.body.get("top_p").is_none(), "thinking 下不得发 top_p");
+
+        // 无 thinking 时正常透传
+        let mut plain = CoreRequest::new("claude");
+        plain.messages.push(Message::text(Role::User, "Hi"));
+        plain.temperature = Some(0.7);
+        let up = adapter
+            .from_core_request(&ctx, &plain, &endpoint())
+            .await
+            .unwrap();
+        assert!(
+            (up.body["temperature"].as_f64().unwrap() - 0.7).abs() < 1e-6,
+            "f32→f64 精度位差，按容差断言"
+        );
+
+        // strip_sampling 端点：即使无 thinking 也剥离
+        let mut ep = endpoint();
+        ep.extra.insert("strip_sampling".into(), json!(true));
+        let up = adapter
+            .from_core_request(&ctx, &plain, &ep)
+            .await
+            .unwrap();
+        assert!(up.body.get("temperature").is_none());
     }
 }

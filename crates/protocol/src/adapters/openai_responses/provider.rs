@@ -122,7 +122,11 @@ fn build_input(req: &CoreRequest) -> Vec<Value> {
                 ContentBlock::Reasoning { signature, .. } => {
                     // 只回传 encrypted_content（上游原始 CoT 的加密形态，缺失会 400
                     // 或退化）；明文 summary 是独立的展示产物，不回传。
-                    if let Some(enc) = signature.as_deref().filter(|s| !s.is_empty()) {
+                    // 异源凭据（Anthropic/Gemini 签名）透传会被上游拒绝——跳过。
+                    if let Some(enc) = crate::adapters::untag_signature(
+                        crate::adapters::SIG_OPENAI,
+                        signature.as_deref(),
+                    ) {
                         flush_parts!();
                         input.push(json!({
                             "type": "reasoning",
@@ -170,17 +174,36 @@ impl ProviderAdapter for OpenAiResponsesAdapter {
             dto::RESPONSES_PATH
         );
 
-        let mut body = json!({
-            "model": req.model,
-            "input": build_input(req),
-            "stream": req.stream,
-            "max_output_tokens": req.max_tokens.unwrap_or(dto::DEFAULT_MAX_OUTPUT_TOKENS),
-            // 无状态网关：推理明细/回传凭据必须随响应带回（否则多轮 function-call
-            // 循环中 reasoning item 缺失会 400）。对非推理模型无 reasoning item，
-            // 该 include 无副作用。
-            "include": ["reasoning.encrypted_content"],
-        });
+        // Responses→Responses 的未解析字段（previous_response_id/store/
+        // background/truncation/parallel_tool_calls…）经 meta 透传，先并入
+        // body——网关已解析字段随后覆盖。
+        let mut body = req
+            .meta
+            .get("responses.extra")
+            .and_then(|v| v.as_object().cloned())
+            .map(Value::Object)
+            .unwrap_or_else(|| json!({}));
         let obj = body.as_object_mut().expect("body is object");
+        obj.insert("model".to_string(), json!(req.model));
+        obj.insert("input".to_string(), json!(build_input(req)));
+        obj.insert("stream".to_string(), json!(req.stream));
+        obj.insert(
+            "max_output_tokens".to_string(),
+            json!(req.max_tokens.unwrap_or(dto::DEFAULT_MAX_OUTPUT_TOKENS)),
+        );
+        // 无状态网关：推理明细/回传凭据必须随响应带回（否则多轮 function-call
+        // 循环中 reasoning item 缺失会 400）。对非推理模型无 reasoning item，
+        // 该 include 无副作用。客户端自带 include 时合并而非覆盖。
+        {
+            let mut inc: Vec<Value> = obj
+                .get("include")
+                .and_then(|v| v.as_array().cloned())
+                .unwrap_or_default();
+            if !inc.iter().any(|v| v.as_str() == Some("reasoning.encrypted_content")) {
+                inc.push(json!("reasoning.encrypted_content"));
+            }
+            obj.insert("include".to_string(), Value::Array(inc));
+        }
         if let Some(instr) = build_instructions(req) {
             obj.insert("instructions".to_string(), json!(instr));
         }
@@ -286,11 +309,12 @@ impl ProviderAdapter for OpenAiResponsesAdapter {
                                 .unwrap_or_default()
                                 .to_string();
                         }
-                        let signature = item
-                            .get("encrypted_content")
-                            .and_then(|v| v.as_str())
-                            .map(String::from)
-                            .filter(|s| !s.is_empty());
+                        let signature = crate::adapters::tag_signature(
+                            crate::adapters::SIG_OPENAI,
+                            item.get("encrypted_content")
+                                .and_then(|v| v.as_str())
+                                .map(String::from),
+                        );
                         if !text.is_empty() || signature.is_some() {
                             content.push(ContentBlock::Reasoning { text, signature, redacted: false });
                         }
@@ -365,7 +389,7 @@ mod tests {
         match &resp3.content[0] {
             ContentBlock::Reasoning { text, signature: Some(enc), .. } => {
                 assert_eq!(text, "", "encrypted 不是展示文本");
-                assert_eq!(enc, "ENC");
+                assert_eq!(enc, "oai:ENC", "凭据带来源标记，出站时还原");
             }
             other => panic!("expected reasoning, got {other:?}"),
         }
@@ -389,7 +413,7 @@ mod tests {
         let req = adapter.to_core_request(&ctx, raw).await.unwrap();
         assert!(
             req.messages.iter().any(|m| m.content.iter().any(|b| matches!(
-                b, ContentBlock::Reasoning { signature: Some(enc), .. } if enc == "ENC"
+                b, ContentBlock::Reasoning { signature: Some(enc), .. } if enc == "oai:ENC"
             ))),
             "入口侧应保留 encrypted_content 凭据"
         );

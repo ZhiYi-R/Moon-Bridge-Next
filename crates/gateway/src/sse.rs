@@ -34,34 +34,9 @@ pub fn parse_upstream_event(
     }
 }
 
-/// 把客户端方向的 RawChunk 序列化为 SSE 文本帧（`event:` + 多行 `data:` + 空行）。
-pub fn format_client_chunk(chunk: &RawChunk) -> String {
-    let data_str = match &chunk.data {
-        RawBody::Json { value } => value.to_string(),
-        RawBody::Text { text } => text.clone(),
-        RawBody::Binary { data } => String::from_utf8_lossy(data).to_string(),
-        RawBody::Empty => chunk.raw.clone(),
-    };
-    let mut out = String::new();
-    if let Some(ev) = &chunk.event {
-        out.push_str(&format!("event: {ev}\n"));
-    }
-    for line in data_str.split('\n') {
-        out.push_str(&format!("data: {line}\n"));
-    }
-    out.push('\n');
-    out
-}
-
-/// OpenAI 风格结束帧。
-pub fn done_frame() -> String {
-    "data: [DONE]\n\n".to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn parses_json_event() {
@@ -79,19 +54,5 @@ mod tests {
     fn parses_done_as_text() {
         let c = parse_upstream_event(None, "[DONE]", Protocol::OpenAiResponse, None);
         assert!(matches!(c.data, RawBody::Text { .. }));
-    }
-
-    #[test]
-    fn formats_client_chunk() {
-        let chunk = RawChunk::json(
-            ChunkStage::ClientChunk,
-            Protocol::OpenAiResponse,
-            Some("response.output_text.delta".into()),
-            json!({"delta": "hi"}),
-        );
-        let s = format_client_chunk(&chunk);
-        assert!(s.starts_with("event: response.output_text.delta\n"));
-        assert!(s.contains("data: "));
-        assert!(s.ends_with("\n\n"));
     }
 }

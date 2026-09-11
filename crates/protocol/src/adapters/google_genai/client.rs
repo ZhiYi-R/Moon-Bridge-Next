@@ -90,6 +90,45 @@ impl ClientAdapter for GoogleGenAiAdapter {
             .and_then(|v| v.as_bool())
             .unwrap_or(ctx.stream);
 
+        // 未解析顶层字段透传（Gemini→Gemini 保真）：safetySettings、
+        // cachedContent、labels、session 等经 Core 无字段位，收进 meta 回传。
+        // generationConfig 内未映射字段（responseSchema/responseMimeType/
+        // thinkingConfig.includeThoughts 等）按子对象同样透传。
+        if let Some(obj) = raw.as_object() {
+            const KNOWN: &[&str] = &[
+                "model", "systemInstruction", "system_instruction", "contents",
+                "tools", "toolConfig", "tool_config", "generationConfig",
+                "generation_config", "stream",
+            ];
+            let mut extra: serde_json::Map<String, Value> = obj
+                .iter()
+                .filter(|(k, _)| !KNOWN.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            if let Some(gc) = raw
+                .get("generationConfig")
+                .or_else(|| raw.get("generation_config"))
+                .and_then(|v| v.as_object())
+            {
+                const GC_KNOWN: &[&str] = &[
+                    "maxOutputTokens", "temperature", "topP", "stopSequences",
+                    "thinkingConfig",
+                ];
+                let gc_extra: serde_json::Map<String, Value> = gc
+                    .iter()
+                    .filter(|(k, _)| !GC_KNOWN.contains(&k.as_str()))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if !gc_extra.is_empty() {
+                    extra.insert("generationConfig".to_string(), Value::Object(gc_extra));
+                }
+            }
+            if !extra.is_empty() {
+                req.meta
+                    .insert("gemini.extra".to_string(), Value::Object(extra));
+            }
+        }
+
         Ok(req)
     }
 

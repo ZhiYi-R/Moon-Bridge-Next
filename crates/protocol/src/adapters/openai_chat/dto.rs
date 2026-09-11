@@ -27,7 +27,9 @@ pub fn unmap_stop_reason(r: Option<StopReason>) -> &'static str {
     match r {
         Some(StopReason::MaxTokens) => "length",
         Some(StopReason::ToolUse) => "tool_calls",
-        Some(StopReason::ContentFilter) => "content_filter",
+        // refusal（模型拒答）与内容过滤在 Chat 侧同形
+        Some(StopReason::ContentFilter) | Some(StopReason::Refusal) => "content_filter",
+        // pause_turn 没有对应概念，按正常结束处理（下一轮由客户端发起续跑）
         _ => "stop",
     }
 }
@@ -197,6 +199,15 @@ pub fn core_to_chat_messages(system: &[ContentBlock], messages: &[Message]) -> V
         if !tool_results.is_empty() {
             for (tid, txt) in tool_results {
                 out.push(json!({ "role": "tool", "tool_call_id": tid, "content": txt }));
+            }
+            // 混排消息（tool_result + 普通文本同处一条 user 消息）：
+            // 结果照旧展开为 tool 消息，文本另发 user 消息保留——
+            // 直接 continue 会把用户文本静默吞掉。
+            if !text_parts.is_empty() {
+                out.push(json!({
+                    "role": "user",
+                    "content": json!(text_parts.iter().filter_map(content_to_part).collect::<Vec<_>>()),
+                }));
             }
             continue;
         }
@@ -442,12 +453,13 @@ pub fn usage_from_chat(v: &Value) -> Usage {
     }
 }
 
-/// 构造 usage 对象（Chat 命名）。
+/// 构造 usage 对象（Chat 命名，缓存命中/推理 token 放 *_details 子对象）。
 pub fn usage_object(u: &Usage) -> Value {
     json!({
         "prompt_tokens": u.input_tokens,
         "completion_tokens": u.output_tokens,
         "total_tokens": u.input_tokens + u.output_tokens,
+        "prompt_tokens_details": { "cached_tokens": u.cache_read_tokens },
         "completion_tokens_details": { "reasoning_tokens": u.reasoning_tokens },
     })
 }

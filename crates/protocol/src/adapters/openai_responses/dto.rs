@@ -26,6 +26,7 @@ pub mod event {
     pub const FUNC_ARGS_DELTA: &str = "response.function_call_arguments.delta";
     pub const FUNC_ARGS_DONE: &str = "response.function_call_arguments.done";
     pub const COMPLETED: &str = "response.completed";
+    pub const INCOMPLETE: &str = "response.incomplete";
 }
 
 /// 构造一个 response 骨架对象，用于 `response.created` / `response.completed`
@@ -66,11 +67,14 @@ pub fn function_call_item(call_id: &str, name: &str, arguments: &str, status: &s
     })
 }
 
-/// 构造 usage 对象（Responses 使用 input_tokens/output_tokens/total_tokens）。
-pub fn usage_object(input_tokens: u32, output_tokens: u32) -> Value {
+/// 构造 usage 对象（Responses 使用 input_tokens/output_tokens/total_tokens，
+/// 缓存命中与推理 token 放在 *_tokens_details 子对象）。
+pub fn usage_object(u: &moonbridge_core::Usage) -> Value {
     json!({
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "total_tokens": input_tokens + output_tokens,
+        "input_tokens": u.input_tokens,
+        "output_tokens": u.output_tokens,
+        "total_tokens": u.input_tokens + u.output_tokens,
+        "input_tokens_details": { "cached_tokens": u.cache_read_tokens },
+        "output_tokens_details": { "reasoning_tokens": u.reasoning_tokens },
     })
 }

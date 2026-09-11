@@ -1525,8 +1525,8 @@ async fn e2e_session_marker_stream_chat_upstream_no_block_start() {
     assert!(sse.contains("Hello"), "正文增量不受影响: {sse}");
     let tag = sse_tag(&sse).expect("chat 上游的纯文本流也应带水印: {sse}");
 
-    // 逐帧解析：正文块 0 由惰性开块补出块头，marker 自成一块且 start/stop 配对；
-    // chat 上游无正文 BlockStop，故正文块 0 不收尾（既有行为，非本次引入）
+    // 逐帧解析：正文块 0 有头也有尾（上游 finish 时 decode 统一补收尾），
+    // marker 自成一块且 start/stop 配对
     let frames: Vec<Value> = sse
         .lines()
         .filter_map(|l| l.strip_prefix("data:"))
@@ -1543,7 +1543,7 @@ async fn e2e_session_marker_stream_chat_upstream_no_block_start() {
         .filter(|f| f["type"] == "content_block_stop")
         .map(|f| f["index"].as_u64().unwrap())
         .collect();
-    assert_eq!(stops, vec![1], "marker 块的 start/stop 必须配对: {sse}");
+    assert_eq!(stops, vec![0, 1], "正文与 marker 块的 start/stop 都应配对: {sse}");
     assert!(
         frames.iter().any(|f| {
             f["type"] == "content_block_delta"
@@ -1556,6 +1556,56 @@ async fn e2e_session_marker_stream_chat_upstream_no_block_start() {
         frames.last().and_then(|f| f["type"].as_str()),
         Some("message_stop"),
         "水印必须插在 message_stop 之前: {sse}"
+    );
+}
+
+/// 流式跨协议回归：Responses 入口 × chat 上游。正文是纯文本 ⇒ 水印应作为
+/// 独立的 message item 追加在流末（msg_N 序号递增），并出现在
+/// response.completed 的组装 output 里——OpenCode 这类客户端按 output item
+/// 存历史，缺一都会让水印进不了 transcript。
+#[tokio::test]
+async fn e2e_session_marker_stream_responses_client() {
+    let base_url = spawn_mock_openai_chat().await;
+    let (state, _db) = setup_with("openai-chat", base_url, "gpt-4o", "test-model").await;
+
+    let body = json!({
+        "model": "test-model",
+        "input": "Hi",
+        "stream": true
+    });
+    let resp = dispatch::handle_request(state, Protocol::OpenAiResponse, body, vec![], None)
+        .await
+        .expect("dispatch 应成功");
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let sse = String::from_utf8_lossy(&bytes).to_string();
+
+    let tag = sse_tag(&sse).expect("responses 入口的纯文本流也应带水印: {sse}");
+    let frames: Vec<Value> = sse
+        .lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
+        .collect();
+    // 水印增量应挂在一个独立 message item 上（不与正文 item 混编）
+    assert!(
+        frames.iter().any(|f| {
+            f["type"] == "response.output_text.delta"
+                && f["delta"].as_str() == Some(&format!("[mb:{tag}]"))
+        }),
+        "水印应为独立的 output_text delta: {sse}"
+    );
+    // response.completed.output 必须包含水印 item（按 item 存历史的客户端靠它回带）
+    let completed = frames
+        .iter()
+        .find(|f| f["type"] == "response.completed")
+        .expect("应有 response.completed");
+    let output = completed["response"]["output"].as_array().unwrap();
+    assert!(
+        output.iter().any(|it| {
+            it["content"].as_array().map(|c| {
+                c.iter().any(|p| p["text"].as_str() == Some(&format!("[mb:{tag}]")))
+            }).unwrap_or(false)
+        }),
+        "completed.output 应含水印 item: {completed}"
     );
 }
 

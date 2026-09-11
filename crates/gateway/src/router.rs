@@ -21,6 +21,9 @@ pub struct ResolvedRoute {
     pub protocol: Protocol,
     /// 端点列表（按序故障转移）。
     pub endpoints: Vec<ProviderEndpoint>,
+    /// 经 routes 表别名命中时的别名（插件 route 维度 binding 的 scope_key）；
+    /// 裸模型名 / `model(provider)` 限定名解析为 `None`。
+    pub route_alias: Option<String>,
 }
 
 /// 由 store 的 Provider 记录构造协议层端点列表（按配置顺序；故障转移用）。
@@ -89,14 +92,18 @@ impl Router {
 
         // 2. routes 别名
         if let Some(route) = db.resolve_route(model_alias)? {
-            return build(db, &route.provider_key, &route.model_slug, None).and_then(|opt| {
-                opt.ok_or_else(|| {
+            let opt = build(db, &route.provider_key, &route.model_slug, None)?;
+            return opt
+                .map(|mut r| {
+                    r.route_alias = Some(model_alias.to_string());
+                    r
+                })
+                .ok_or_else(|| {
                     GatewayError::Route(format!(
                         "路由 '{model_alias}' 指向的 provider '{}' 未找到",
                         route.provider_key
                     ))
-                })
-            });
+                });
         }
 
         // 3. offers 匹配（遍历启用的 provider）
@@ -153,6 +160,7 @@ fn build(
         upstream_model: upstream_model.to_string(),
         protocol,
         endpoints,
+        route_alias: None,
     }))
 }
 

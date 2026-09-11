@@ -25,13 +25,30 @@ impl ProviderAdapter for OpenAiChatAdapter {
     ) -> Result<UpstreamRequest> {
         let url = format!("{}{}", endpoint.base_url.trim_end_matches('/'), dto::CHAT_PATH);
 
-        let mut body = json!({
-            "model": req.model,
-            "messages": dto::core_to_chat_messages(&req.system, &req.messages),
-            "stream": req.stream,
-            "max_tokens": req.max_tokens.unwrap_or(dto::DEFAULT_MAX_TOKENS),
-        });
+        let mut body = req
+            .meta
+            .get("chat.extra")
+            .and_then(|v| v.as_object().cloned())
+            .map(Value::Object)
+            .unwrap_or_else(|| json!({}));
         let obj = body.as_object_mut().expect("body is object");
+        obj.insert("model".to_string(), json!(req.model));
+        obj.insert(
+            "messages".to_string(),
+            json!(dto::core_to_chat_messages(&req.system, &req.messages)),
+        );
+        obj.insert("stream".to_string(), json!(req.stream));
+        // 现代字段名是 max_completion_tokens（o 系模型拒收旧名 max_tokens）。
+        // 客户端未设上限时不凭空注入——让上游按自己的默认行为处理。
+        if let Some(mt) = req.max_tokens {
+            obj.insert("max_completion_tokens".to_string(), json!(mt));
+            obj.remove("max_tokens");
+        }
+        // 流式必须显式请求 usage 终块，否则上游不回传 token 用量，
+        // 用量统计/计费对该类请求恒为 0（OpenAI 及兼容实现通用约定）。
+        if req.stream {
+            obj.insert("stream_options".to_string(), json!({ "include_usage": true }));
+        }
         if !req.tools.is_empty() {
             obj.insert("tools".to_string(), json!(dto::core_to_chat_tools(&req.tools)));
         }
@@ -124,7 +141,8 @@ mod tests {
         assert_eq!(up.body["messages"][0]["role"], "system");
         assert_eq!(up.body["messages"][0]["content"], "Be brief");
         assert_eq!(up.body["messages"][1]["role"], "user");
-        assert_eq!(up.body["max_tokens"], 128);
+        assert_eq!(up.body["max_completion_tokens"], 128);
+        assert!(up.body.get("max_tokens").is_none(), "现代字段名是 max_completion_tokens");
         assert!(up.headers.iter().any(|(k, v)| k == "authorization" && v == "Bearer sk-test"));
     }
 

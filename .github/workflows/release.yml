@@ -120,9 +120,8 @@ jobs:
 
       - name: Build Tauri app
         shell: bash
-        # tauri CLI 对 beforeBuildCommand 的 cwd 解析与运行目录相关：从仓库根
-        # 跑会落到 ui/ui 双重叠加，显式切到 src-tauri（与本地构建路径一致）
-        working-directory: src-tauri
+        # beforeBuildCommand 在 tauri.conf.json 里用显式 cwd（{script,cwd:"../ui"}），
+        # 从仓库根运行即可：cwd 相对 src-tauri/ 解析，与运行目录无关。
         run: tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
       # 产物自带架构后缀（amd64/arm64、x64/arm64、aarch64），无需重命名

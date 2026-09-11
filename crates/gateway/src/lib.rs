@@ -31,7 +31,7 @@ pub mod usage;
 
 use std::sync::Arc;
 
-use moonbridge_plugin::{LuaPluginRegistry, LuaRuntime, SandboxLimits, SessionStore};
+use moonbridge_plugin::{LuaPluginRegistry, LuaRuntime, SandboxLimits, ScopeOverrides, SessionStore};
 use moonbridge_protocol::{builtin_registry, NoopHooks, PluginHooks, Registry};
 use moonbridge_store::Database;
 
@@ -128,9 +128,9 @@ pub fn parse_script_ref(script_ref: &str, plugins_dir: Option<&std::path::Path>)
 
 /// 从 store 加载 Lua 插件，构造 [`PluginHooks`]。
 ///
-/// 加载条件：插件全局启用，或存在 enabled=1 的 provider 维度 binding
-/// （全局停用但被某 Provider 强制启用的插件仍需加载）。运行时门控：
-/// 请求命中 provider 后由 [`LuaPluginRegistry`] 按三态 binding 逐请求过滤。
+/// 加载条件：插件全局启用，或存在任一维度（route/model/provider/global）
+/// enabled=1 的 binding（全局停用但被某作用域强制启用的插件仍需加载）。
+/// 运行时门控：由 [`LuaPluginRegistry`] 按「就近作用域覆盖」逐请求过滤。
 /// 无插件或全部加载失败时回退 [`NoopHooks`]。单个插件加载失败仅记录错误，
 /// 不影响其它插件与网关启动。
 pub fn load_plugins(
@@ -145,27 +145,32 @@ pub fn load_plugins(
         client.clone(),
         db.clone(),
         registry.clone(),
+        limits.call_timeout,
     ));
     let mut runtimes: Vec<Arc<LuaRuntime>> = Vec::new();
 
-    // provider 维度三态门控表：(plugin_name, provider_key) → enabled
-    let mut overrides = std::collections::HashMap::new();
-    match db.list_bindings_by_scope("provider") {
+    // 全维度三态门控表：plugin_name → 各作用域绑定
+    let mut overrides: std::collections::HashMap<String, ScopeOverrides> =
+        std::collections::HashMap::new();
+    match db.list_bindings_all() {
         Ok(bindings) => {
             for b in bindings {
-                overrides.insert((b.plugin_name, b.scope_key), b.enabled);
+                overrides
+                    .entry(b.plugin_name)
+                    .or_default()
+                    .insert(&b.scope, b.scope_key, b.enabled);
             }
         }
-        Err(e) => tracing::error!(error = %e, "读取 provider 维度插件绑定失败"),
+        Err(e) => tracing::error!(error = %e, "读取插件绑定失败"),
     }
 
     match db.list_plugins() {
         Ok(plugins) => {
             for p in plugins {
-                // 全局停用但被某 Provider 强制启用的插件仍需加载
+                // 全局停用但被某作用域强制启用的插件仍需加载
                 let force_enabled = overrides
-                    .iter()
-                    .any(|((name, _), en)| name == &p.name && *en);
+                    .get(&p.name)
+                    .is_some_and(ScopeOverrides::any_enabled);
                 if !p.enabled && !force_enabled {
                     continue;
                 }

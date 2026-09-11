@@ -72,6 +72,20 @@ pub struct TraceRecord {
     pub error: Option<String>,
 }
 
+/// `trace_record_bodies=false` 时落盘前抹除全部报文体。
+///
+/// `upstream_request` 是 `{ method, url, headers, body }` 快照——URL/headers 已脱敏
+/// 但 body 含完整上游请求报文（全部 prompt/消息），属于敏感数据，必须一并抹除；
+/// 只清 `client_request` 会留下旁路（流式路径曾因此泄漏）。
+pub fn strip_bodies(t: &mut TraceRecord) {
+    t.client_request = Value::Null;
+    t.client_response = Value::Null;
+    t.upstream_response = Value::Null;
+    if let Some(obj) = t.upstream_request.as_object_mut() {
+        obj.insert("body".to_string(), Value::Null);
+    }
+}
+
 /// 当前 epoch 毫秒。
 pub fn now_ms() -> u64 {
     SystemTime::now()

@@ -124,12 +124,20 @@ impl Database {
         Ok(())
     }
 
-    /// 删除 provider（级联删除其端点与 offers）。
+    /// 删除 provider（级联删除其端点、offers、指向它的 routes 与 provider 维度
+    /// 插件绑定——不留悬挂引用）。多步删除包在一个事务里，中途失败整体回滚。
     pub fn delete_provider(&self, key: &str) -> Result<()> {
-        let conn = self.conn.lock();
-        conn.execute("DELETE FROM providers WHERE key = ?1", params![key])?;
-        conn.execute("DELETE FROM provider_endpoints WHERE provider_key = ?1", params![key])?;
-        conn.execute("DELETE FROM offers WHERE provider_key = ?1", params![key])?;
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM providers WHERE key = ?1", params![key])?;
+        tx.execute("DELETE FROM provider_endpoints WHERE provider_key = ?1", params![key])?;
+        tx.execute("DELETE FROM offers WHERE provider_key = ?1", params![key])?;
+        tx.execute("DELETE FROM routes WHERE provider_key = ?1", params![key])?;
+        tx.execute(
+            "DELETE FROM plugin_bindings WHERE scope = 'provider' AND scope_key = ?1",
+            params![key],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 }

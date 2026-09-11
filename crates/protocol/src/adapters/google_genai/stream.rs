@@ -5,16 +5,17 @@
 //! 首块携带 `modelVersion`，末块携带 `finishReason` 与 `usageMetadata`；无 `[DONE]`。
 //! decode 供 Gemini 作上游时解析，encode 供 Gemini 作入口时输出。
 //!
-//! Gemini 无 Anthropic 式的显式块边界事件，故 decode 以「首块」合成 MessageStart +
-//! 文本块起始（index 0），functionCall 归入 index≥1，末块的 finishReason 触发收尾。
+//! Gemini 无 Anthropic 式的显式块边界事件，故 decode 以「首块」合成 MessageStart，
+//! text/thought part 各自惰性开启独立块索引（thought → Reasoning 增量），
+//! functionCall 经每流状态跨 chunk 单调分配索引，末块 finishReason 统一收尾。
 
 use async_trait::async_trait;
-use moonbridge_core::{ContentBlock, CoreStreamEvent, Protocol, Result, StreamDelta};
+use moonbridge_core::{ContentBlock, CoreStreamEvent, Protocol, Result, StreamDelta, Usage};
 use serde_json::{json, Value};
 
 use super::dto::{map_finish_reason, unmap_stop_reason, usage_from_gemini, usage_object};
 use super::GoogleGenAiAdapter;
-use crate::adapter::{ClientStreamAdapter, ProviderStreamAdapter, StreamEncodeState};
+use crate::adapter::{ClientStreamAdapter, ProviderStreamAdapter, StreamDecodeState, StreamEncodeState};
 use crate::context::ReqCtx;
 use crate::raw::{ChunkStage, RawBody, RawChunk};
 
@@ -32,7 +33,12 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
         Protocol::GoogleGenai
     }
 
-    fn decode(&self, _ctx: &ReqCtx, chunk: &RawChunk) -> Result<Vec<CoreStreamEvent>> {
+    fn decode(
+        &self,
+        _ctx: &ReqCtx,
+        st: &mut StreamDecodeState,
+        chunk: &RawChunk,
+    ) -> Result<Vec<CoreStreamEvent>> {
         // 兼容网关可能补发 [DONE]
         if let RawBody::Text { text } = &chunk.data {
             if text.trim() == "[DONE]" {
@@ -45,7 +51,8 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
         let mut out = Vec::new();
 
         // 首块标记：Gemini 仅在首个 chunk 携带 modelVersion
-        if data.get("modelVersion").is_some() {
+        if data.get("modelVersion").is_some() && !st.message_started {
+            st.message_started = true;
             let id = data
                 .get("responseId")
                 .and_then(|v| v.as_str())
@@ -57,11 +64,35 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
                 .unwrap_or_default()
                 .to_string();
             out.push(CoreStreamEvent::MessageStart { id, model });
-            // 打开文本块（index 0）；纯函数调用响应会留下一个空文本块，各入口编码器可容忍
-            out.push(CoreStreamEvent::BlockStart {
-                index: 0,
-                block: ContentBlock::text(""),
-            });
+            // 不再预开文本块：text/reasoning 块随首个对应 part 惰性开启，
+            // 纯函数调用/纯思考响应不再留下空文本块。
+        }
+
+        // prompt 级拒绝/拦截：无 candidates、以 promptFeedback.blockReason
+        // 终止。此前整块被丢弃 → 客户端收到空输出；现映射为内容过滤终止。
+        if data.get("candidates").is_none() || data["candidates"].as_array().map(|a| a.is_empty()).unwrap_or(false) {
+            if let Some(pf) = data.get("promptFeedback") {
+                if let Some(br) = pf.get("blockReason").and_then(|v| v.as_str()) {
+                    let usage = data.get("usageMetadata").map(usage_from_gemini);
+                    out.push(CoreStreamEvent::MessageDelta {
+                        stop_reason: Some(moonbridge_core::StopReason::ContentFilter),
+                        usage,
+                    });
+                    out.push(CoreStreamEvent::Error {
+                        message: format!("gemini prompt blocked: {br}"),
+                    });
+                    out.push(CoreStreamEvent::MessageStop);
+                    return Ok(out);
+                }
+            }
+            // candidates 缺失但携带 usageMetadata：中途用量上报（不伪造 stop_reason）
+            if let Some(u) = data.get("usageMetadata") {
+                out.push(CoreStreamEvent::MessageDelta {
+                    stop_reason: None,
+                    usage: Some(usage_from_gemini(u)),
+                });
+            }
+            return Ok(out);
         }
 
         let candidate = data
@@ -77,16 +108,7 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
             .cloned()
             .unwrap_or_default();
 
-        let mut fc_index = 0usize;
         for p in &parts {
-            if let Some(t) = p.get("text").and_then(|v| v.as_str()) {
-                if !t.is_empty() {
-                    out.push(CoreStreamEvent::BlockDelta {
-                        index: 0,
-                        delta: StreamDelta::Text { text: t.to_string() },
-                    });
-                }
-            }
             if let Some(fc) = p.get("functionCall") {
                 let name = fc.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
                 let id = fc
@@ -96,15 +118,38 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
                     .map(String::from)
                     .unwrap_or_else(|| format!("{name}-call"));
                 let args = fc.get("args").cloned().unwrap_or_else(|| json!({}));
-                // 加密 CoT 凭据：与 function call 强绑定的 thoughtSignature（part 级字段）
-                let signature = p
-                    .get("thoughtSignature")
-                    .or_else(|| fc.get("thoughtSignature"))
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(String::from);
-                let idx = 1 + fc_index;
-                fc_index += 1;
+                // 加密 CoT 凭据：与 function call 强绑定的 thoughtSignature
+                // （part 级字段）。打上 gem: 来源标记，出站解标时异源凭据不互填。
+                let signature = crate::adapters::tag_signature(
+                    crate::adapters::SIG_GEMINI,
+                    p.get("thoughtSignature")
+                        .or_else(|| fc.get("thoughtSignature"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                );
+                // 每个函数调用占独立块索引：Gemini 的 functionCall part 总是完整
+                // 到达（args 不跨 chunk 切分），索引经 st.next_block_index 跨
+                // chunk 单调分配，不与 text/reasoning 槽位或其他调用碰撞。
+                // 非 Gemini 入口（Anthropic/Chat）没有 ToolUse 凭据位，
+                // 故在调用前先发一个「仅凭据」载波推理块（即刻收尾）——
+                // 客户端把它当推理凭据记入历史，回传时经 Core 还原到本 part。
+                if let Some(sig) = &signature {
+                    let c_idx = st.next_block_index;
+                    st.next_block_index += 1;
+                    let carrier = ContentBlock::Reasoning {
+                        text: String::new(),
+                        signature: Some(sig.clone()),
+                        redacted: false,
+                    };
+                    out.push(CoreStreamEvent::BlockStart { index: c_idx, block: carrier.clone() });
+                    out.push(CoreStreamEvent::BlockDelta {
+                        index: c_idx,
+                        delta: StreamDelta::ReasoningSignature { signature: sig.clone() },
+                    });
+                    out.push(CoreStreamEvent::BlockStop { index: c_idx, block: Some(carrier) });
+                }
+                let idx = st.next_block_index;
+                st.next_block_index += 1;
                 out.push(CoreStreamEvent::BlockStart {
                     index: idx,
                     block: ContentBlock::ToolUse {
@@ -129,35 +174,116 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
                         signature,
                     }),
                 });
-            } else {
-                // 官方流式形态：thoughtSignature 可能在末块以空 text part 返回
-                // （官方文档：解析器必须检查空文本部分）。带非空文本的 part 不在此
-                // 处理——凭据属于文本块，无独立承载位，丢弃不影响强校验场景。
-                let has_text = p.get("text").and_then(|v| v.as_str()).is_some_and(|t| !t.is_empty());
-                if !has_text {
-                    if let Some(sig) = p
-                        .get("thoughtSignature")
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                    {
-                        out.push(CoreStreamEvent::BlockDelta {
-                            index: 0,
-                            delta: StreamDelta::ReasoningSignature { signature: sig.to_string() },
+                continue;
+            }
+
+            let thought = p.get("thought").and_then(|v| v.as_bool()).unwrap_or(false);
+            let text = p.get("text").and_then(|v| v.as_str()).unwrap_or_default();
+            // part 级 thoughtSignature：可能在带文本的 part 上，也可能在末块以
+            // 空 text part 返回（官方文档：解析器必须检查空文本部分）。
+            let sig = crate::adapters::tag_signature(
+                crate::adapters::SIG_GEMINI,
+                p.get("thoughtSignature")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+            );
+            if text.is_empty() && sig.is_none() {
+                continue;
+            }
+            // thought part → reasoning 槽位，普通 part → text 槽位，各自独占
+            // 一个块索引（混入同一索引会让入口把思考明文写进 text 块）。
+            // 空文本的仅凭据 part 不开任何槽位块——签名走载波。
+            if !text.is_empty() {
+                let (idx, newly) = st.slot(if thought { "reasoning" } else { "text" });
+                if newly {
+                    st.open_block(idx);
+                    out.push(CoreStreamEvent::BlockStart {
+                        index: idx,
+                        block: if thought {
+                            ContentBlock::Reasoning {
+                                text: String::new(),
+                                signature: None,
+                                redacted: false,
+                            }
+                        } else {
+                            ContentBlock::text("")
+                        },
+                    });
+                }
+                st.push_text(idx, thought, text);
+                out.push(CoreStreamEvent::BlockDelta {
+                    index: idx,
+                    delta: if thought {
+                        StreamDelta::Reasoning { text: text.to_string() }
+                    } else {
+                        StreamDelta::Text { text: text.to_string() }
+                    },
+                });
+            }
+            if let Some(sig) = sig {
+                if thought {
+                    // thought part 的签名是思考块自身属性：挂 reasoning 槽位
+                    let (r_idx, r_new) = st.slot("reasoning");
+                    if r_new {
+                        st.open_block(r_idx);
+                        out.push(CoreStreamEvent::BlockStart {
+                            index: r_idx,
+                            block: ContentBlock::Reasoning {
+                                text: String::new(),
+                                signature: None,
+                                redacted: false,
+                            },
                         });
                     }
+                    st.push_signature(r_idx, &sig);
+                    out.push(CoreStreamEvent::BlockDelta {
+                        index: r_idx,
+                        delta: StreamDelta::ReasoningSignature { signature: sig },
+                    });
+                } else {
+                    // 普通 part 的签名（末块空 part 或文本 part 尾部）：
+                    // 发「仅凭据」载波推理块（即刻收尾）。Core→Gemini 时按
+                    // 「紧邻后继 ToolUse 优先、否则并入前一 part」规则还原。
+                    let c_idx = st.next_block_index;
+                    st.next_block_index += 1;
+                    let carrier = ContentBlock::Reasoning {
+                        text: String::new(),
+                        signature: Some(sig.clone()),
+                        redacted: false,
+                    };
+                    out.push(CoreStreamEvent::BlockStart { index: c_idx, block: carrier.clone() });
+                    out.push(CoreStreamEvent::BlockDelta {
+                        index: c_idx,
+                        delta: StreamDelta::ReasoningSignature { signature: sig },
+                    });
+                    out.push(CoreStreamEvent::BlockStop { index: c_idx, block: Some(carrier) });
                 }
             }
         }
 
-        // 末块：finishReason 触发文本块收尾 + MessageDelta(usage) + MessageStop
+        // 末块：finishReason 触发所有已开块收尾 + MessageDelta(usage) + MessageStop
         if let Some(fr) = candidate.get("finishReason").and_then(|v| v.as_str()) {
-            out.push(CoreStreamEvent::BlockStop { index: 0, block: None });
+            let mut open: Vec<usize> = st.open_blocks.clone();
+            open.sort_unstable();
+            st.open_blocks.clear();
+            for idx in open {
+                out.push(CoreStreamEvent::BlockStop {
+                    index: idx,
+                    block: st.blocks.get(&idx).cloned(),
+                });
+            }
             let usage = data.get("usageMetadata").map(usage_from_gemini);
             out.push(CoreStreamEvent::MessageDelta {
                 stop_reason: map_finish_reason(fr),
                 usage,
             });
             out.push(CoreStreamEvent::MessageStop);
+        } else if let Some(u) = data.get("usageMetadata") {
+            // 无 finishReason 的中途 usage chunk（Gemini 常在内容块间穿插上报）
+            out.push(CoreStreamEvent::MessageDelta {
+                stop_reason: None,
+                usage: Some(usage_from_gemini(u)),
+            });
         }
 
         Ok(out)
@@ -194,7 +320,7 @@ impl ClientStreamAdapter for GoogleGenAiAdapter {
         &self,
         _ctx: &ReqCtx,
         ev: &CoreStreamEvent,
-        _st: &mut StreamEncodeState,
+        st: &mut StreamEncodeState,
     ) -> Result<Vec<RawChunk>> {
         let mut out = Vec::new();
         match ev {
@@ -202,7 +328,10 @@ impl ClientStreamAdapter for GoogleGenAiAdapter {
             CoreStreamEvent::BlockStart { block, .. } => {
                 if let ContentBlock::ToolUse { name, input, signature, .. } = block {
                     let mut fc = json!({ "name": name, "args": input });
-                    if let Some(sig) = signature {
+                    if let Some(sig) = crate::adapters::untag_signature(
+                        crate::adapters::SIG_GEMINI,
+                        signature.as_deref(),
+                    ) {
                         if !sig.is_empty() {
                             fc["thoughtSignature"] = json!(sig);
                         }
@@ -227,12 +356,19 @@ impl ClientStreamAdapter for GoogleGenAiAdapter {
             },
             CoreStreamEvent::BlockStop { .. } => {}
             CoreStreamEvent::MessageDelta { stop_reason, usage } => {
-                let fr = unmap_stop_reason(*stop_reason);
-                out.push(gemini_chunk(
-                    json!([]),
-                    Some(fr),
-                    usage.as_ref().map(usage_object),
-                ));
+                if let Some(u) = usage {
+                    st.merge_usage(u);
+                }
+                // stop_reason 未知（上游中途 usage 更新）时不携带 finishReason——
+                // 伪造 STOP 会让客户端在流中段误判回合结束；usageMetadata 仍随
+                // chunk 正常下发。
+                let fr = stop_reason.map(|r| unmap_stop_reason(Some(r)));
+                let usage = if st.usage_acc == Usage::default() {
+                    None
+                } else {
+                    Some(usage_object(&st.usage_acc))
+                };
+                out.push(gemini_chunk(json!([]), fr, usage));
             }
             CoreStreamEvent::MessageStop => {}
             CoreStreamEvent::Error { message } => {
@@ -257,14 +393,17 @@ mod tests {
         RawChunk::json(ChunkStage::UpstreamChunk, Protocol::GoogleGenai, None, v)
     }
 
-    /// 官方流式形态：签名可能在末块以空 text part 返回，需转为凭据增量。
+    /// 官方流式形态：签名可能在末块以空 text part 返回，需转为凭据增量，
+    /// 挂在 reasoning 槽位（未开启时先合成 BlockStart）。
     #[test]
     fn decodes_signature_only_trailing_part() {
         let adapter = GoogleGenAiAdapter;
         let ctx = ReqCtx::new("r1", Protocol::GoogleGenai);
+        let mut st = StreamDecodeState::default();
         let evs = adapter
             .decode(
                 &ctx,
+                &mut st,
                 &chunk(json!({
                     "candidates": [{ "content": { "role": "model", "parts": [
                         { "text": "", "thoughtSignature": "SIG" }
@@ -272,21 +411,21 @@ mod tests {
                 })),
             )
             .unwrap();
-        match &evs[0] {
-            CoreStreamEvent::BlockDelta { delta: StreamDelta::ReasoningSignature { signature }, .. } => {
-                assert_eq!(signature, "SIG");
-            }
-            other => panic!("expected signature delta, got {other:?}"),
-        }
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            CoreStreamEvent::BlockDelta { delta: StreamDelta::ReasoningSignature { signature }, .. } if signature == "gem:SIG"
+        )), "凭据带来源标记");
     }
 
     #[test]
     fn decodes_first_text_chunk() {
         let adapter = GoogleGenAiAdapter;
         let ctx = ReqCtx::new("r1", Protocol::OpenAiChat);
+        let mut st = StreamDecodeState::default();
         let evs = adapter
             .decode(
                 &ctx,
+                &mut st,
                 &chunk(json!({
                     "candidates": [{ "content": { "role": "model", "parts": [{ "text": "Hello" }] }, "index": 0 }],
                     "modelVersion": "gemini-2.0-flash",
@@ -308,14 +447,95 @@ mod tests {
     fn middle_chunk_only_emits_delta() {
         let adapter = GoogleGenAiAdapter;
         let ctx = ReqCtx::new("r1", Protocol::OpenAiChat);
+        // 首块已分配 text 槽位后，中间块只发增量、不重复合成 BlockStart
+        let mut st = StreamDecodeState::default();
+        adapter
+            .decode(
+                &ctx,
+                &mut st,
+                &chunk(json!({ "candidates": [{ "content": { "role": "model", "parts": [{ "text": "Hello" }] }, "index": 0 }] })),
+            )
+            .unwrap();
         let evs = adapter
             .decode(
                 &ctx,
+                &mut st,
                 &chunk(json!({ "candidates": [{ "content": { "role": "model", "parts": [{ "text": " world" }] }, "index": 0 }] })),
             )
             .unwrap();
-        assert_eq!(evs.len(), 1, "非首块不应合成 MessageStart: {evs:?}");
-        assert!(matches!(evs[0], CoreStreamEvent::BlockDelta { .. }));
+        assert_eq!(evs.len(), 1, "中间块不应合成 MessageStart/BlockStart: {evs:?}");
+        assert!(matches!(evs[0], CoreStreamEvent::BlockDelta { index: 0, delta: StreamDelta::Text { .. } }));
+    }
+
+    /// thought part 必须走独立 reasoning 块——混入 text 块会把 CoT 当正文下发。
+    #[test]
+    fn thought_parts_use_separate_reasoning_block() {
+        let adapter = GoogleGenAiAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::OpenAiChat);
+        let mut st = StreamDecodeState::default();
+        let evs = adapter
+            .decode(
+                &ctx,
+                &mut st,
+                &chunk(json!({
+                    "candidates": [{ "content": { "role": "model", "parts": [
+                        { "thought": true, "text": "ponder" },
+                        { "text": "answer" }
+                    ] }, "index": 0 }]
+                })),
+            )
+            .unwrap();
+        let r_idx = evs
+            .iter()
+            .find_map(|e| match e {
+                CoreStreamEvent::BlockDelta { index, delta: StreamDelta::Reasoning { text } } if text == "ponder" => Some(*index),
+                _ => None,
+            })
+            .expect("thought part 应为 Reasoning 增量");
+        let t_idx = evs
+            .iter()
+            .find_map(|e| match e {
+                CoreStreamEvent::BlockDelta { index, delta: StreamDelta::Text { text } } if text == "answer" => Some(*index),
+                _ => None,
+            })
+            .expect("普通 part 应为 Text 增量");
+        assert_ne!(r_idx, t_idx, "reasoning 与 text 不得共用块索引");
+    }
+
+    /// 函数调用索引跨 chunk 单调分配：不与 text/reasoning 槽位碰撞。
+    #[test]
+    fn function_call_indexes_are_stable_across_chunks() {
+        let adapter = GoogleGenAiAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::OpenAiChat);
+        let mut st = StreamDecodeState::default();
+        adapter
+            .decode(
+                &ctx,
+                &mut st,
+                &chunk(json!({ "candidates": [{ "content": { "role": "model", "parts": [{ "text": "a" }] }, "index": 0 }] })),
+            )
+            .unwrap();
+        let mut idxs = Vec::new();
+        for call in ["f1", "f2"] {
+            let evs = adapter
+                .decode(
+                    &ctx,
+                    &mut st,
+                    &chunk(json!({
+                        "candidates": [{ "content": { "role": "model", "parts": [{ "functionCall": { "name": call, "args": {} } }] }, "index": 0 }]
+                    })),
+                )
+                .unwrap();
+            let (idx, _) = evs
+                .iter()
+                .find_map(|e| match e {
+                    CoreStreamEvent::BlockStart { index, block: ContentBlock::ToolUse { name, .. } } => Some((*index, name.clone())),
+                    _ => None,
+                })
+                .expect("应有 ToolUse BlockStart");
+            idxs.push(idx);
+        }
+        assert_eq!(idxs, vec![1, 2], "跨 chunk 的函数调用须占递增且互不相同的块索引");
     }
 
     #[test]
@@ -325,6 +545,7 @@ mod tests {
         let evs = adapter
             .decode(
                 &ctx,
+                &mut StreamDecodeState::default(),
                 &chunk(json!({
                     "candidates": [{ "content": { "role": "model", "parts": [{ "text": "!" }] }, "finishReason": "STOP", "index": 0 }],
                     "usageMetadata": { "promptTokenCount": 8, "candidatesTokenCount": 4, "totalTokenCount": 12 }
@@ -351,6 +572,7 @@ mod tests {
         let evs = adapter
             .decode(
                 &ctx,
+                &mut StreamDecodeState::default(),
                 &chunk(json!({
                     "candidates": [{ "content": { "role": "model", "parts": [{ "functionCall": { "name": "get_time", "args": {"tz":"UTC"} } }] }, "index": 0 }]
                 })),
@@ -361,7 +583,7 @@ mod tests {
             _ => None,
         });
         let (idx, name) = bs.expect("应有 ToolUse BlockStart");
-        assert_eq!(idx, 1, "函数调用应避让文本块 index 0");
+        assert_eq!(idx, 0, "无前置文本块时函数调用从索引 0 起分配");
         assert_eq!(name, "get_time");
         assert!(evs.iter().any(|e| matches!(e, CoreStreamEvent::BlockDelta { delta: StreamDelta::ToolInput { .. }, .. })));
     }

@@ -53,7 +53,7 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
         .tooltip("Moon Bridge Next — 本地 LLM 网关")
         .on_menu_event(|app, event| match event.id.as_ref() {
             "toggle_gw" => toggle_gateway(app),
-            "quit" => app.exit(0),
+            "quit" => quit_app(app),
             id if id.starts_with("tab:") => open_tab(app, &id["tab:".len()..]),
             _ => {}
         })
@@ -89,6 +89,17 @@ fn show_main_window(app: &AppHandle) {
 fn open_tab(app: &AppHandle, path: &str) {
     show_main_window(app);
     let _ = app.emit("navigate-tab", path);
+}
+
+/// 优雅退出：先优雅关闭网关（发 shutdown 信号 → serve_with_shutdown 尾部跑
+/// 插件 shutdown_all），再退进程。直接 `app.exit` 会跳过插件收尾钩子。
+fn quit_app(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<Arc<ManagedState>>().inner().clone();
+        let _ = state.stop_gateway().await;
+        app.exit(0);
+    });
 }
 
 /// 切换网关运行状态（运行中则停止，否则启动）。

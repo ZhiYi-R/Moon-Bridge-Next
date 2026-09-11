@@ -11,20 +11,14 @@ use moonbridge_core::{
 };
 use serde_json::{json, Value};
 
-use super::provider::{anthropic_usage_out, unmap_stop_reason};
+use super::provider::{anthropic_usage_out, map_stop_reason, unmap_stop_reason};
 use super::AnthropicAdapter;
-use crate::adapter::{ClientStreamAdapter, ProviderStreamAdapter, StreamEncodeState};
+use crate::adapter::{ClientStreamAdapter, ProviderStreamAdapter, StreamDecodeState, StreamEncodeState};
 use crate::context::ReqCtx;
 use crate::raw::{ChunkStage, RawChunk};
 
 fn stop_reason(s: &str) -> Option<StopReason> {
-    match s {
-        "end_turn" => Some(StopReason::EndTurn),
-        "max_tokens" => Some(StopReason::MaxTokens),
-        "stop_sequence" => Some(StopReason::StopSequence),
-        "tool_use" => Some(StopReason::ToolUse),
-        _ => None,
-    }
+    map_stop_reason(s)
 }
 
 fn u32_of(v: &Value, key: &str) -> u32 {
@@ -45,7 +39,12 @@ impl ProviderStreamAdapter for AnthropicAdapter {
         Protocol::Anthropic
     }
 
-    fn decode(&self, _ctx: &ReqCtx, chunk: &RawChunk) -> Result<Vec<CoreStreamEvent>> {
+    fn decode(
+        &self,
+        _ctx: &ReqCtx,
+        _st: &mut StreamDecodeState,
+        chunk: &RawChunk,
+    ) -> Result<Vec<CoreStreamEvent>> {
         let data = match chunk_json(chunk) {
             Some(d) => d,
             None => return Ok(Vec::new()),
@@ -64,13 +63,18 @@ impl ProviderStreamAdapter for AnthropicAdapter {
                     .to_string();
                 out.push(CoreStreamEvent::MessageStart { id, model });
                 if let Some(u) = msg.get("usage") {
+                    // 中途 usage 更新（非终态）：stop_reason=None 表示 stop_reason 未知，
+                    // 各入口 encode 不得据此伪造收尾语义。input 并入缓存读写，与非流式
+                    // to_core_response 的 Core 口径（prompt 总量含缓存）一致。
+                    let cache_r = u32_of(u, "cache_read_input_tokens");
+                    let cache_w = u32_of(u, "cache_creation_input_tokens");
                     out.push(CoreStreamEvent::MessageDelta {
                         stop_reason: None,
                         usage: Some(Usage {
-                            input_tokens: u32_of(u, "input_tokens"),
+                            input_tokens: u32_of(u, "input_tokens") + cache_r + cache_w,
                             output_tokens: u32_of(u, "output_tokens"),
-                            cache_read_tokens: u32_of(u, "cache_read_input_tokens"),
-                            cache_write_tokens: u32_of(u, "cache_creation_input_tokens"),
+                            cache_read_tokens: cache_r,
+                            cache_write_tokens: cache_w,
                             reasoning_tokens: 0,
                         }),
                     });
@@ -96,7 +100,10 @@ impl ProviderStreamAdapter for AnthropicAdapter {
                     // data，无后续增量，立即收尾
                     Some("redacted_thinking") => ContentBlock::Reasoning {
                         text: String::new(),
-                        signature: cb.get("data").and_then(|v| v.as_str()).map(String::from),
+                        signature: crate::adapters::tag_signature(
+                            crate::adapters::SIG_ANTHROPIC,
+                            cb.get("data").and_then(|v| v.as_str()).map(String::from),
+                        ),
                         redacted: true,
                     },
                     _ => ContentBlock::text(
@@ -161,10 +168,13 @@ impl ProviderStreamAdapter for AnthropicAdapter {
                             .get("signature")
                             .and_then(|v| v.as_str())
                             .unwrap_or_default();
-                        if !sig.is_empty() {
+                        if let Some(sig) = crate::adapters::tag_signature(
+                            crate::adapters::SIG_ANTHROPIC,
+                            Some(sig.to_string()),
+                        ) {
                             out.push(CoreStreamEvent::BlockDelta {
                                 index,
-                                delta: StreamDelta::ReasoningSignature { signature: sig.to_string() },
+                                delta: StreamDelta::ReasoningSignature { signature: sig },
                             });
                         }
                     }
@@ -326,14 +336,20 @@ impl ClientStreamAdapter for AnthropicAdapter {
                     }
                     // 加密 CoT 回传凭据：客户端在 content_block_stop 前累积进
                     // thinking 块的 signature，下一轮原样回传。若凭据先于任何
-                    // 明文到达，该块按 redacted_thinking 完整块形态开启
+                    // 明文到达，该块按 redacted_thinking 完整块形态开启。
+                    // 出站解标：本家凭据还原原文；异源凭据（gem:/oai:）带标记
+                    // 原样透传——回传入站时幂等打标、回到归属协议上游才解标。
                     StreamDelta::ReasoningSignature { signature } => {
+                        let sig = crate::adapters::emit_signature(
+                            crate::adapters::SIG_ANTHROPIC,
+                            signature.as_str(),
+                        );
                         if st.open_blocks.insert(*index) {
                             out.push(client_sse(
                                 "content_block_start",
                                 json!({
                                     "type": "content_block_start", "index": index,
-                                    "content_block": { "type": "redacted_thinking", "data": signature }
+                                    "content_block": { "type": "redacted_thinking", "data": sig }
                                 }),
                             ));
                         } else {
@@ -341,7 +357,7 @@ impl ClientStreamAdapter for AnthropicAdapter {
                                 "content_block_delta",
                                 json!({
                                     "type": "content_block_delta", "index": index,
-                                    "delta": { "type": "signature_delta", "signature": signature }
+                                    "delta": { "type": "signature_delta", "signature": sig }
                                 }),
                             ));
                         }
@@ -358,17 +374,24 @@ impl ClientStreamAdapter for AnthropicAdapter {
                 }
             }
             CoreStreamEvent::MessageDelta { stop_reason, usage } => {
-                let sr = stop_reason.map(unmap_stop_reason).unwrap_or("end_turn");
+                if let Some(u) = usage {
+                    st.merge_usage(u);
+                }
                 let mut data = json!({
                     "type": "message_delta",
-                    "delta": { "stop_reason": sr, "stop_sequence": null },
+                    // stop_reason 未知（上游 message_start 的早段 usage 更新）时保持
+                    // null——伪造 "end_turn" 会让客户端在流中段误判回合结束。
+                    "delta": {
+                        "stop_reason": stop_reason.map(unmap_stop_reason),
+                        "stop_sequence": null
+                    },
                 });
-                // 官方 message_delta.usage 为累计口径：output_tokens 必发；
-                // input/cache 一并附带——上游（OpenAI 系）仅在流末给出用量，
-                // 客户端（Claude Code 等）靠它管理上下文，缺了 input_tokens
-                // 会退化为无法估算上下文窗口占用
-                if let Some(u) = usage {
-                    data["usage"] = anthropic_usage_out(u);
+                // 官方 message_delta.usage 为累计口径：发跨 delta 合并后的累计值——
+                // 上游（OpenAI 系）仅在流末给出用量，Anthropic 上游则把 input 放在
+                // message_start；客户端（Claude Code 等）靠它管理上下文，缺了
+                // input_tokens 会退化为无法估算上下文窗口占用
+                if st.usage_acc != Usage::default() {
+                    data["usage"] = anthropic_usage_out(&st.usage_acc);
                 }
                 out.push(client_sse("message_delta", data));
             }
@@ -395,13 +418,13 @@ mod tests {
     fn signature_delta_roundtrips() {
         let adapter = AnthropicAdapter;
         let ctx = ReqCtx::new("r1", Protocol::Anthropic);
-        let evs = adapter.decode(&ctx, &chunk(json!({
+        let evs = adapter.decode(&ctx, &mut StreamDecodeState::default(), &chunk(json!({
             "type": "content_block_delta", "index": 0,
             "delta": { "type": "signature_delta", "signature": "SIG" }
         }))).unwrap();
         match &evs[0] {
             CoreStreamEvent::BlockDelta { delta: StreamDelta::ReasoningSignature { signature }, .. } => {
-                assert_eq!(signature, "SIG");
+                assert_eq!(signature, "ant:SIG", "Core 内部凭据带来源标记");
             }
             other => panic!("expected signature delta, got {other:?}"),
         }
@@ -463,19 +486,20 @@ mod tests {
     fn decodes_text_stream() {
         let adapter = AnthropicAdapter;
         let ctx = ReqCtx::new("r1", Protocol::OpenAiResponse);
+        let mut st = StreamDecodeState::default();
 
         let evs = adapter
-            .decode(&ctx, &chunk(json!({"type":"message_start","message":{"id":"m1","model":"claude","usage":{"input_tokens":7}}})))
+            .decode(&ctx, &mut st, &chunk(json!({"type":"message_start","message":{"id":"m1","model":"claude","usage":{"input_tokens":7}}})))
             .unwrap();
         assert!(matches!(evs[0], CoreStreamEvent::MessageStart { .. }));
 
         let evs = adapter
-            .decode(&ctx, &chunk(json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}})))
+            .decode(&ctx, &mut st, &chunk(json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}})))
             .unwrap();
         assert!(matches!(evs[0], CoreStreamEvent::BlockStart { index: 0, .. }));
 
         let evs = adapter
-            .decode(&ctx, &chunk(json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}})))
+            .decode(&ctx, &mut st, &chunk(json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}})))
             .unwrap();
         match &evs[0] {
             CoreStreamEvent::BlockDelta { delta: StreamDelta::Text { text }, .. } => {
@@ -485,7 +509,7 @@ mod tests {
         }
 
         let evs = adapter
-            .decode(&ctx, &chunk(json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}})))
+            .decode(&ctx, &mut st, &chunk(json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}})))
             .unwrap();
         match &evs[0] {
             CoreStreamEvent::MessageDelta { stop_reason, usage } => {
@@ -501,7 +525,7 @@ mod tests {
         let adapter = AnthropicAdapter;
         let ctx = ReqCtx::new("r1", Protocol::OpenAiResponse);
         let evs = adapter
-            .decode(&ctx, &chunk(json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"a\":"}})))
+            .decode(&ctx, &mut StreamDecodeState::default(), &chunk(json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"a\":"}})))
             .unwrap();
         match &evs[0] {
             CoreStreamEvent::BlockDelta { index, delta: StreamDelta::ToolInput { partial_json } } => {
@@ -516,7 +540,7 @@ mod tests {
     fn ignores_ping() {
         let adapter = AnthropicAdapter;
         let ctx = ReqCtx::new("r1", Protocol::OpenAiResponse);
-        let evs = adapter.decode(&ctx, &chunk(json!({"type":"ping"}))).unwrap();
+        let evs = adapter.decode(&ctx, &mut StreamDecodeState::default(), &chunk(json!({"type":"ping"}))).unwrap();
         assert!(evs.is_empty());
     }
 }

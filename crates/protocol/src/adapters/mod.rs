@@ -67,6 +67,62 @@ pub(crate) fn clamped_thinking_budget(effort: &str, max_tokens: u32) -> Option<u
     (budget >= MIN_THINKING_BUDGET).then_some(budget)
 }
 
+// ============================================================================
+// 推理凭据的来源标记
+// ============================================================================
+//
+// `ContentBlock::Reasoning.signature` / `ToolUse.signature` 承载的是**不透明
+// 回传凭据**（Anthropic thinking signature / OpenAI encrypted_content /
+// Gemini thoughtSignature）。跨协议转发时把 A 家的凭据填进 B 家的字段会被
+// 上游拒绝（或污染推理状态），故入站时给凭据打上来源标记，出站时只放行
+// 同来源凭据、异源凭据按「无凭据」降级处理。
+//
+// 无前缀的凭据（插件注入、旧会话遗留）视为未知来源，保持透传——历史行为。
+
+/// 凭据来源前缀（入站 adapter 打标）。
+pub(crate) const SIG_ANTHROPIC: &str = "ant:";
+pub(crate) const SIG_OPENAI: &str = "oai:";
+pub(crate) const SIG_GEMINI: &str = "gem:";
+
+/// 入站：给凭据打上来源标记（空凭据原样返回 `None`）。已带已知前缀的
+/// 凭据视为先前打标的回传，原样保留（幂等）——凭据经客户端转一圈后
+/// 还会回到本 adapter，二次打标会让 `untag_signature` 错位。
+pub(crate) fn tag_signature(prefix: &str, sig: Option<String>) -> Option<String> {
+    sig.filter(|s| !s.is_empty()).map(|s| {
+        if [SIG_ANTHROPIC, SIG_OPENAI, SIG_GEMINI]
+            .iter()
+            .any(|p| s.starts_with(p))
+        {
+            s
+        } else {
+            format!("{prefix}{s}")
+        }
+    })
+}
+
+/// 出站：取回属于 `prefix` 的凭据原文。异源凭据返回 `None`（按无凭据降级）；
+/// 无前缀凭据视为未知来源透传。
+pub(crate) fn untag_signature<'a>(prefix: &str, sig: Option<&'a str>) -> Option<&'a str> {
+    let s = sig?;
+    if s.is_empty() {
+        return None;
+    }
+    for p in [SIG_ANTHROPIC, SIG_OPENAI, SIG_GEMINI] {
+        if let Some(rest) = s.strip_prefix(p) {
+            return (p == prefix).then_some(rest);
+        }
+    }
+    Some(s)
+}
+
+/// 客户端方向凭据透传：本家凭据（`prefix`）还原原文；异源凭据**带标记**
+/// 原样下发——客户端把它当不透明串存入历史，回传入站时幂等打标，
+/// 最终回到归属协议上游才由 `untag_signature` 解标。丢弃异源凭据会让
+/// 「Gemini 上游 → 非 Gemini 客户端 → 历史回传 → Gemini 上游」断链。
+pub(crate) fn emit_signature<'a>(prefix: &str, sig: &'a str) -> &'a str {
+    untag_signature(prefix, Some(sig)).unwrap_or(sig)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

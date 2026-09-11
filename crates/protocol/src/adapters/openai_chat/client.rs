@@ -67,6 +67,25 @@ impl ClientAdapter for OpenAiChatAdapter {
         }
         req.stream = raw.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
+        // 未解析顶层字段透传（Chat→Chat 保真）：response_format、n、
+        // presence/frequency_penalty、logprobs、seed、parallel_tool_calls 等
+        // 经 Core 无字段位，整体收进 meta，出站时合并回请求体。
+        if let Some(obj) = raw.as_object() {
+            const KNOWN: &[&str] = &[
+                "model", "messages", "tools", "tool_choice", "reasoning_effort",
+                "reasoning", "max_tokens", "max_completion_tokens", "temperature",
+                "top_p", "stop", "stream", "stream_options",
+            ];
+            let extra: serde_json::Map<String, Value> = obj
+                .iter()
+                .filter(|(k, _)| !KNOWN.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            if !extra.is_empty() {
+                req.meta.insert("chat.extra".to_string(), Value::Object(extra));
+            }
+        }
+
         Ok(req)
     }
 
@@ -74,7 +93,10 @@ impl ClientAdapter for OpenAiChatAdapter {
         Ok(json!({
             "id": resp.id,
             "object": "chat.completion",
-            "created": 0,
+            "created": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
             "model": resp.model,
             "choices": [{
                 "index": 0,

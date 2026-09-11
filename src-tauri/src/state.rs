@@ -42,6 +42,11 @@ pub struct ManagedState {
     gateway: Mutex<Option<GatewayHandle>>,
     /// 最近一次网关错误。
     last_error: Mutex<Option<String>>,
+    /// 启停串行化：`has_live_gateway` 检查与句柄存储之间有 await，两次并发
+    /// start 会都走到 spawn —— 败者 task 绑定失败时把 `gateway` 置 None，
+    /// 恰好抹掉胜者刚存的句柄 ⇒ 网关在跑却停不掉、status 显示未运行、
+    /// 再启动必报「地址被占用」。start/stop 全程持此锁即消除该 TOCTOU。
+    lifecycle: tokio::sync::Mutex<()>,
 }
 
 impl ManagedState {
@@ -68,6 +73,7 @@ impl ManagedState {
             config: RwLock::new(config),
             gateway: Mutex::new(None),
             last_error: Mutex::new(None),
+            lifecycle: tokio::sync::Mutex::new(()),
         }))
     }
 
@@ -119,7 +125,12 @@ impl ManagedState {
     }
 
     /// 启动网关（若已运行则直接返回当前状态）。
+    ///
+    /// 与 `stop_gateway` 共用 `lifecycle` 锁串行化——check→spawn→store 不可被
+    /// 并发启停插队（否则并发双 start 会让后启动的 task 绑定失败并清掉先成功
+    /// 者刚存的句柄，网关在跑却失去句柄）。
     pub async fn start_gateway(&self) -> Result<GatewayStatus> {
+        let _lifecycle = self.lifecycle.lock().await;
         // 已在运行则幂等返回（守卫已在 `has_live_gateway` 返回时释放）
         if self.has_live_gateway() {
             return Ok(self.status());
@@ -168,6 +179,7 @@ impl ManagedState {
 
     /// 停止网关（优雅关闭并等待 task 退出）。
     pub async fn stop_gateway(&self) -> Result<GatewayStatus> {
+        let _lifecycle = self.lifecycle.lock().await;
         let handle = self.gateway.lock().unwrap().take();
         if let Some(h) = handle {
             let _ = h.shutdown.send(());

@@ -172,6 +172,10 @@ pub enum StopReason {
     StopSequence,
     ToolUse,
     ContentFilter,
+    /// Anthropic `refusal`：模型拒绝生成。
+    Refusal,
+    /// Anthropic `pause_turn`：长回合暂停（可续跑）。
+    PauseTurn,
 }
 
 /// token 用量统计。

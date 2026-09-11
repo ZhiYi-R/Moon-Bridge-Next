@@ -24,7 +24,7 @@ pub mod registry;
 
 pub use adapter::{
     ClientAdapter, ClientStreamAdapter, ProviderAdapter, ProviderEndpoint, ProviderStreamAdapter,
-    StreamEncodeState, UpstreamRequest,
+    StreamDecodeState, StreamEncodeState, UpstreamRequest,
 };
 pub use context::ReqCtx;
 pub use hooks::{NoopHooks, PluginHooks};

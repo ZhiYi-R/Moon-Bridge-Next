@@ -75,11 +75,18 @@ impl Database {
         Ok(())
     }
 
-    /// 删除模型。
+    /// 删除模型（级联删除其 offers 与 model 维度插件绑定；指向该 slug 的
+    /// routes 保留——model_slug 是自由名，模型重建后路由恢复可用）。事务化。
     pub fn delete_model(&self, slug: &str) -> Result<()> {
-        let conn = self.conn.lock();
-        conn.execute("DELETE FROM models WHERE slug = ?1", params![slug])?;
-        conn.execute("DELETE FROM offers WHERE model_slug = ?1", params![slug])?;
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM models WHERE slug = ?1", params![slug])?;
+        tx.execute("DELETE FROM offers WHERE model_slug = ?1", params![slug])?;
+        tx.execute(
+            "DELETE FROM plugin_bindings WHERE scope = 'model' AND scope_key = ?1",
+            params![slug],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 

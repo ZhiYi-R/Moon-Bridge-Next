@@ -198,6 +198,9 @@ export interface GatewayConfig {
   traceRetention?: number;
   /** 会话水印：往助手纯文本输出末尾附 [mb:xxxxxx] 标记以识别会话。变更后需重启网关生效。 */
   sessionMarker?: boolean;
+  /** 会话活跃表容量（FIFO 淘汰深度）。设置页不编辑但必须原样回传——
+   *  漏传会被序列化成 0 并经 save 落回默认值。 */
+  sessionTableDepth?: number;
 }
 
 export interface AppConfig {
