@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use http::Method;
 use moonbridge_core::{
-    ContentBlock, CoreRequest, CoreResponse, Protocol, Result, Role, StopReason, Usage,
+    ContentBlock, CoreRequest, CoreResponse, DocSource, Protocol, Result, Role, StopReason, Usage,
 };
 use serde_json::{json, Value};
 
@@ -39,6 +39,9 @@ fn block_to_anthropic_ex(block: &ContentBlock, for_client: bool) -> Option<Value
         ContentBlock::Image { data, media_type } => {
             if media_type == "url" {
                 Some(json!({ "type": "image", "source": { "type": "url", "url": data } }))
+            } else if media_type == "file" {
+                // Files API 引用（file_id 承载于 data）：Anthropic↔Anthropic 保真回传
+                Some(json!({ "type": "image", "source": { "type": "file", "file_id": data } }))
             } else {
                 Some(json!({
                     "type": "image",
@@ -46,11 +49,42 @@ fn block_to_anthropic_ex(block: &ContentBlock, for_client: bool) -> Option<Value
                 }))
             }
         }
+        ContentBlock::Document {
+            source,
+            media_type,
+            data,
+            name,
+        } => {
+            let mut doc = match source {
+                DocSource::Url => json!({
+                    "type": "document",
+                    "source": { "type": "url", "url": data },
+                }),
+                DocSource::File => json!({
+                    "type": "document",
+                    "source": { "type": "file", "file_id": data },
+                }),
+                DocSource::Text => json!({
+                    "type": "document",
+                    "source": { "type": "text", "media_type": media_type, "data": data },
+                }),
+                DocSource::Base64 => json!({
+                    "type": "document",
+                    "source": { "type": "base64", "media_type": media_type, "data": data },
+                }),
+            };
+            if let Some(n) = name {
+                doc["title"] = json!(n);
+            }
+            Some(doc)
+        }
         ContentBlock::ToolUse { id, name, input, .. } => Some(json!({
             "type": "tool_use",
             "id": id,
             "name": name,
-            "input": input,
+            // Anthropic 要求 input 必须是对象；跨协议入参可能是非对象
+            // （如 Responses action 数组），包装保留数据而非整请求 400。
+            "input": if input.is_object() { input.clone() } else { json!({ "value": input }) },
         })),
         ContentBlock::ToolResult {
             tool_use_id,
@@ -141,14 +175,108 @@ pub(super) fn anthropic_to_block(v: &Value) -> Option<ContentBlock> {
         )),
         "image" => {
             let source = v.get("source")?;
-            Some(ContentBlock::Image {
-                data: source.get("data").and_then(|d| d.as_str()).unwrap_or_default().to_string(),
-                media_type: source
-                    .get("media_type")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("image/png")
-                    .to_string(),
-            })
+            // source.type 必须分派：url/file 源没有 data/media_type 字段，
+            // 按 base64 读会得到 data:"" 的空图片块——再出站到任何协议都是
+            // 坏数据（Anthropic 400 / chat 出 "data:image/png;base64," 垃圾）。
+            match source.get("type").and_then(|t| t.as_str()) {
+                Some("url") => Some(ContentBlock::Image {
+                    data: source
+                        .get("url")
+                        .and_then(|u| u.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    media_type: "url".to_string(),
+                }),
+                Some("file") => Some(ContentBlock::Image {
+                    data: source
+                        .get("file_id")
+                        .and_then(|f| f.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    media_type: "file".to_string(),
+                }),
+                _ => Some(ContentBlock::Image {
+                    data: source
+                        .get("data")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    media_type: source
+                        .get("media_type")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("image/png")
+                        .to_string(),
+                }),
+            }
+        }
+        // document：按 source.type 分派，此前整块丢弃（Core 无对应 IR）。
+        // content 源是块数组，展平为 text Document——嵌套结构无法单块表达，
+        // 内容保留优先于形态保真。
+        "document" => {
+            let source = v.get("source")?;
+            let name = v
+                .get("title")
+                .and_then(|t| t.as_str())
+                .map(String::from);
+            let doc = |source, media_type: &str, data: &str| ContentBlock::Document {
+                source,
+                media_type: media_type.to_string(),
+                data: data.to_string(),
+                name: name.clone(),
+            };
+            match source.get("type").and_then(|t| t.as_str()) {
+                Some("url") => Some(doc(
+                    DocSource::Url,
+                    // url/file 源不带 media_type；默认按 pdf（Anthropic 文档
+                    // 主流形态），转 Gemini fileData 需要非空 mimeType。
+                    source
+                        .get("media_type")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("application/pdf"),
+                    source.get("url").and_then(|u| u.as_str()).unwrap_or_default(),
+                )),
+                Some("file") => Some(doc(
+                    DocSource::File,
+                    source
+                        .get("media_type")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("application/pdf"),
+                    source.get("file_id").and_then(|f| f.as_str()).unwrap_or_default(),
+                )),
+                Some("text") => Some(doc(
+                    DocSource::Text,
+                    source
+                        .get("media_type")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("text/plain"),
+                    source.get("data").and_then(|d| d.as_str()).unwrap_or_default(),
+                )),
+                Some("content") => {
+                    let text = source
+                        .get("content")
+                        .and_then(|c| c.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(anthropic_to_block)
+                                .filter_map(|b| match b {
+                                    ContentBlock::Text { text } => Some(text),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                        .unwrap_or_default();
+                    Some(doc(DocSource::Text, "text/plain", &text))
+                }
+                _ => Some(doc(
+                    DocSource::Base64,
+                    source
+                        .get("media_type")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("application/pdf"),
+                    source.get("data").and_then(|d| d.as_str()).unwrap_or_default(),
+                )),
+            }
         }
         "tool_use" => Some(ContentBlock::ToolUse {
             id: v.get("id").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
@@ -225,14 +353,36 @@ pub(super) fn unmap_stop_reason(r: StopReason) -> &'static str {
 }
 
 /// 按 ext/meta 中的位置表把 `cache_control` 回写到已转换的块上。
+///
+/// 位置键：`"i"` 为顶层块序号；`"i.j"` 为 tool_result 等嵌套块的子块序号
+/// （入口 parse_content 记录）。嵌套回写时若父块 content 已被压缩为字符串
+/// 形态，先展开为块数组再挂载——字符串无法携带字段。
 fn apply_cache_control(blocks: &mut [Value], positions: Option<&Value>) {
     let Some(map) = positions.and_then(|v| v.as_object()) else {
         return;
     };
     for (k, cc) in map {
-        if let Ok(i) = k.parse::<usize>() {
-            if let Some(b) = blocks.get_mut(i) {
-                b["cache_control"] = cc.clone();
+        let mut seg = k.split('.');
+        let Ok(i) = seg.next().unwrap_or_default().parse::<usize>() else {
+            continue;
+        };
+        let Some(b) = blocks.get_mut(i) else {
+            continue;
+        };
+        match seg.next() {
+            None => b["cache_control"] = cc.clone(),
+            Some(sub) => {
+                let Ok(j) = sub.parse::<usize>() else {
+                    continue;
+                };
+                if let Some(text) = b["content"].as_str().map(str::to_string) {
+                    b["content"] = json!([{ "type": "text", "text": text }]);
+                }
+                if let Some(sub_b) =
+                    b["content"].as_array_mut().and_then(|arr| arr.get_mut(j))
+                {
+                    sub_b["cache_control"] = cc.clone();
+                }
             }
         }
     }
@@ -814,5 +964,141 @@ mod tests {
             .await
             .unwrap();
         assert!(up.body.get("temperature").is_none());
+    }
+
+    /// 回归：image source.type 必须分派——url/file 源没有 data/media_type
+    /// 字段，按 base64 读会得到 data:"" 的空图片块，再出站到任何协议都是
+    /// 坏数据（Anthropic 400 / chat 垃圾 data: URL）。
+    #[test]
+    fn image_source_types_dispatch() {
+        let url = anthropic_to_block(&json!({
+            "type": "image",
+            "source": { "type": "url", "url": "https://example.com/a.png" }
+        }))
+        .unwrap();
+        assert!(
+            matches!(&url, ContentBlock::Image { data, media_type }
+                if data == "https://example.com/a.png" && media_type == "url"),
+            "url 源应记为 url 形态: {url:?}"
+        );
+
+        let file = anthropic_to_block(&json!({
+            "type": "image",
+            "source": { "type": "file", "file_id": "file_abc" }
+        }))
+        .unwrap();
+        assert!(
+            matches!(&file, ContentBlock::Image { data, media_type }
+                if data == "file_abc" && media_type == "file"),
+            "file 源应记为 file 形态: {file:?}"
+        );
+
+        // 出站对称：url/file/base64 三种 source 各自还原
+        assert_eq!(
+            block_to_anthropic(&file).unwrap(),
+            json!({ "type": "image", "source": { "type": "file", "file_id": "file_abc" } })
+        );
+        assert_eq!(
+            block_to_anthropic(&url).unwrap(),
+            json!({ "type": "image", "source": { "type": "url", "url": "https://example.com/a.png" } })
+        );
+        let b64 = anthropic_to_block(&json!({
+            "type": "image",
+            "source": { "type": "base64", "media_type": "image/png", "data": "AAA" }
+        }))
+        .unwrap();
+        assert_eq!(
+            block_to_anthropic(&b64).unwrap(),
+            json!({ "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "AAA" } })
+        );
+    }
+
+    /// 回归：document 块按 source.type 分派入 Core Document——此前整块丢弃。
+    /// title ↔ name、四种 source 形态各自还原。
+    #[test]
+    fn document_block_roundtrips() {
+        for (raw, want) in [
+            (
+                json!({ "type": "document", "title": "spec",
+                        "source": { "type": "base64", "media_type": "application/pdf", "data": "PDF" } }),
+                json!({ "type": "document", "title": "spec",
+                        "source": { "type": "base64", "media_type": "application/pdf", "data": "PDF" } }),
+            ),
+            (
+                json!({ "type": "document",
+                        "source": { "type": "url", "url": "https://x/doc.pdf" } }),
+                json!({ "type": "document",
+                        "source": { "type": "url", "url": "https://x/doc.pdf" } }),
+            ),
+            (
+                json!({ "type": "document",
+                        "source": { "type": "file", "file_id": "file_d1" } }),
+                json!({ "type": "document",
+                        "source": { "type": "file", "file_id": "file_d1" } }),
+            ),
+            (
+                json!({ "type": "document", "title": "notes",
+                        "source": { "type": "text", "media_type": "text/plain", "data": "hi" } }),
+                json!({ "type": "document", "title": "notes",
+                        "source": { "type": "text", "media_type": "text/plain", "data": "hi" } }),
+            ),
+        ] {
+            let blk = anthropic_to_block(&raw).expect("document 应解析");
+            assert!(
+                matches!(&blk, ContentBlock::Document { .. }),
+                "应为 Document 块: {blk:?}"
+            );
+            assert_eq!(
+                block_to_anthropic(&blk).unwrap(),
+                want,
+                "round-trip 应还原: {raw}"
+            );
+        }
+
+        // content 源（嵌套块数组）展平为 text Document，内容不丢
+        let nested = anthropic_to_block(&json!({
+            "type": "document",
+            "source": { "type": "content", "content": [
+                { "type": "text", "text": "l1" },
+                { "type": "text", "text": "l2" }
+            ]}
+        }))
+        .unwrap();
+        assert!(
+            matches!(&nested, ContentBlock::Document { source, data, .. }
+                if *source == DocSource::Text && data == "l1\nl2"),
+            "content 源应展平为 text 文档: {nested:?}"
+        );
+    }
+
+    /// 回归：tool_result 嵌套块的 cache_control 以 "i.j" 位置键回写——
+    /// 字符串形态 content 自动展开为块数组挂载。
+    #[tokio::test]
+    async fn nested_tool_result_cache_control_roundtrips() {
+        use crate::adapter::ClientAdapter;
+        let raw = json!({
+            "model": "claude",
+            "max_tokens": 64,
+            "messages": [
+                { "role": "user", "content": [
+                    { "type": "tool_result", "tool_use_id": "t1", "content": [
+                        { "type": "text", "text": "cached", "cache_control": { "type": "ephemeral" } }
+                    ]}
+                ]}
+            ]
+        });
+        let adapter = AnthropicAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::Anthropic);
+        let req = adapter.to_core_request(&ctx, raw).await.unwrap();
+        let up = adapter
+            .from_core_request(&ctx, &req, &endpoint())
+            .await
+            .unwrap();
+        let tr = &up.body["messages"][0]["content"][0];
+        assert_eq!(tr["type"], "tool_result");
+        assert_eq!(
+            tr["content"][0]["cache_control"]["type"], "ephemeral",
+            "嵌套 cache_control 应回写到 tool_result 内部块: {tr}"
+        );
     }
 }

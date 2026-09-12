@@ -17,8 +17,8 @@ pub mod protocol;
 
 pub use error::{CoreError, ErrorBody, ErrorDetail, Result};
 pub use ir::{
-    ContentBlock, CoreRequest, CoreResponse, CoreStreamEvent, Map, Message, Reasoning, Role,
-    StopReason, StreamDelta, Tool, ToolChoice, Usage,
+    ContentBlock, CoreRequest, CoreResponse, CoreStreamEvent, DocSource, Map, Message, Reasoning,
+    Role, StopReason, StreamDelta, Tool, ToolChoice, Usage,
 };
 pub use modelref::ModelRef;
 pub use protocol::Protocol;

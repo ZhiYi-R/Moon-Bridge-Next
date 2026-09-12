@@ -17,19 +17,42 @@ pub type Map = JsonMap<String, Value>;
 /// 消息中的单个内容块。以 `type` 字段判别具体种类。
 ///
 /// 对应各协议：
-/// - Anthropic：`text` / `image` / `tool_use` / `tool_result` / `thinking`
-/// - OpenAI Responses：`output_text` / `function_call` / `function_call_output` / `reasoning`
-/// - OpenAI Chat：`text` / `image_url` / `tool_calls` / `tool` role
+/// - Anthropic：`text` / `image` / `document` / `tool_use` / `tool_result` / `thinking`
+/// - OpenAI Responses：`output_text` / `input_image` / `input_file` / `function_call` / `function_call_output` / `reasoning`
+/// - OpenAI Chat：`text` / `image_url` / `file` / `tool_calls` / `tool` role
+/// - Gemini：`text` / `inlineData` / `fileData` / `functionCall` / `functionResponse`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     /// 纯文本。
     Text { text: String },
-    /// 图像（base64 数据 + MIME 类型）。
+    /// 图像（base64 数据 + MIME 类型；`media_type` 为 "url"/"file" 时 data
+    /// 分别承载远程 URL / 平台 file_id）。
     Image {
         #[serde(rename = "image_data")]
         data: String,
         media_type: String,
+    },
+    /// 文档/文件（PDF、代码文件等）：
+    /// - Anthropic：`document` 块（source = base64/text/url/file）
+    /// - OpenAI Responses：`input_file` part
+    /// - OpenAI Chat：`file` content part
+    /// - Gemini：`fileData`（Uri 引用）/`inlineData`（base64）
+    ///
+    /// 与 `Image` 不同，来源形态用显式 `source` 字段而非 media_type 哨兵——
+    /// `media_type` 始终承载真实 MIME 类型（如 application/pdf）。
+    Document {
+        /// 内容承载形态。
+        #[serde(default)]
+        source: DocSource,
+        /// 真实 MIME 类型；`source == text` 时为 text/*。
+        media_type: String,
+        /// base64 数据 / 远程 URL / 平台 file_id / 纯文本，取决于 `source`。
+        data: String,
+        /// 文件名或标题（Anthropic `title`、OpenAI `filename`、
+        /// Gemini `displayName`）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     /// 模型发起的工具调用。
     ToolUse {
@@ -66,6 +89,22 @@ pub enum ContentBlock {
     },
 }
 
+/// 文档/文件的来源形态（`ContentBlock::Document.source`）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocSource {
+    /// base64 编码内容（`data` 为 base64 串，`media_type` 为真实类型）。
+    #[default]
+    Base64,
+    /// 远程 URL 引用（`data` 为 URL）。
+    Url,
+    /// 平台侧文件 ID（`data` 为 file_id，如 Anthropic Files API /
+    /// OpenAI file_id）——跨账号/跨协议不可解，仅同协议回传有意义。
+    File,
+    /// 纯文本内容（`data` 为文本本身，`media_type` 为 text/*）。
+    Text,
+}
+
 impl ContentBlock {
     /// 便捷构造文本块。
     pub fn text(text: impl Into<String>) -> Self {
@@ -77,6 +116,7 @@ impl ContentBlock {
         match self {
             ContentBlock::Text { .. } => "text",
             ContentBlock::Image { .. } => "image",
+            ContentBlock::Document { .. } => "document",
             ContentBlock::ToolUse { .. } => "tool_use",
             ContentBlock::ToolResult { .. } => "tool_result",
             ContentBlock::Reasoning { .. } => "reasoning",
