@@ -3,13 +3,13 @@
 //! 入口（client）与上游（provider）格式一致，故请求/响应的 messages、tools、
 //! usage、finish_reason 映射集中于此，供四象限复用。
 
-use moonbridge_core::{ContentBlock, Message, Role, StopReason, Tool, ToolChoice, Usage};
+use moonbridge_core::{
+    ContentBlock, DocSource, Message, Role, StopReason, Tool, ToolChoice, Usage,
+};
 use serde_json::{json, Value};
 
 /// Chat Completions 路径。
 pub const CHAT_PATH: &str = "/v1/chat/completions";
-/// 未指定 max_tokens 时的兜底。
-pub const DEFAULT_MAX_TOKENS: u32 = 4096;
 
 /// finish_reason → Core StopReason。
 pub fn map_finish_reason(s: &str) -> Option<StopReason> {
@@ -50,6 +50,16 @@ fn s(v: &Value, key: &str) -> String {
     v.get(key).and_then(|x| x.as_str()).unwrap_or_default().to_string()
 }
 
+/// `function.arguments` → Core ToolUse.input。规范形态是 JSON 字符串；部分
+/// 兼容实现直接发对象，此前经 `as_str` 落 `{}` 参数全丢——两种形态都收。
+fn parse_call_arguments(v: Option<&Value>) -> Value {
+    match v {
+        Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or_else(|_| json!({})),
+        Some(o @ Value::Object(_)) => o.clone(),
+        _ => json!({}),
+    }
+}
+
 /// 解析 Chat message 的 content（字符串或多模态数组）为 Core 内容块。
 fn parse_chat_content(v: Option<&Value>) -> Vec<ContentBlock> {
     match v {
@@ -69,13 +79,63 @@ fn parse_chat_content(v: Option<&Value>) -> Vec<ContentBlock> {
                 Some("image_url") => {
                     let url = p
                         .get("image_url")
-                        .and_then(|i| i.get("url"))
-                        .and_then(|u| u.as_str())
+                        .and_then(|i| {
+                            i.as_str().or_else(|| i.get("url").and_then(|u| u.as_str()))
+                        })
                         .unwrap_or_default();
-                    Some(ContentBlock::Image {
-                        data: url.to_string(),
-                        media_type: "url".to_string(),
-                    })
+                    // data: URL 必须拆成 base64+真实媒体类型：整串记为 "url" 形态
+                    // 后，转 Gemini 会被 url 口径静默丢弃、转 Anthropic 会以
+                    // url-source 下发 data: URI 被上游拒收。
+                    if let Some((meta, data)) =
+                        url.strip_prefix("data:").and_then(|r| r.split_once(','))
+                    {
+                        Some(ContentBlock::Image {
+                            data: data.to_string(),
+                            media_type: meta.split(';').next().unwrap_or("image/png").to_string(),
+                        })
+                    } else {
+                        Some(ContentBlock::Image {
+                            data: url.to_string(),
+                            media_type: "url".to_string(),
+                        })
+                    }
+                }
+                // file part：{"type":"file","file":{file_id|file_url|file_data,filename}}
+                // ——此前整块丢弃。file_data 是 data: URL，与 image_url 同口径拆分。
+                Some("file") => {
+                    let f = p.get("file")?;
+                    let name = f
+                        .get("filename")
+                        .and_then(|n| n.as_str())
+                        .map(String::from);
+                    if let Some(fid) = f.get("file_id").and_then(|v| v.as_str()) {
+                        Some(ContentBlock::Document {
+                            source: DocSource::File,
+                            media_type: "application/octet-stream".into(),
+                            data: fid.to_string(),
+                            name,
+                        })
+                    } else if let Some(fu) = f.get("file_url").and_then(|v| v.as_str()) {
+                        Some(ContentBlock::Document {
+                            source: DocSource::Url,
+                            media_type: "application/octet-stream".into(),
+                            data: fu.to_string(),
+                            name,
+                        })
+                    } else {
+                        let fd = f.get("file_data").and_then(|v| v.as_str())?;
+                        let (mt, data) = fd
+                            .strip_prefix("data:")
+                            .and_then(|r| r.split_once(','))
+                            .map(|(m, d)| (m.split(';').next().unwrap_or("application/octet-stream"), d))
+                            .unwrap_or(("application/octet-stream", fd));
+                        Some(ContentBlock::Document {
+                            source: DocSource::Base64,
+                            media_type: mt.to_string(),
+                            data: data.to_string(),
+                            name,
+                        })
+                    }
                 }
                 _ => None,
             })
@@ -100,11 +160,7 @@ pub fn chat_to_core_messages(msgs: &[Value]) -> Vec<Message> {
         if let Some(tcs) = m.get("tool_calls").and_then(|t| t.as_array()) {
             for tc in tcs {
                 let fn_obj = tc.get("function").cloned().unwrap_or(Value::Null);
-                let args = fn_obj
-                    .get("arguments")
-                    .and_then(|a| a.as_str())
-                    .and_then(|a| serde_json::from_str::<Value>(a).ok())
-                    .unwrap_or_else(|| json!({}));
+                let args = parse_call_arguments(fn_obj.get("arguments"));
                 content.push(ContentBlock::ToolUse {
                     id: tc.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
                     name: fn_obj.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
@@ -115,13 +171,22 @@ pub fn chat_to_core_messages(msgs: &[Value]) -> Vec<Message> {
             }
         }
 
-        // role=tool 的消息 → ToolResult
+        // role=tool 的消息 → ToolResult（旧版 "function" 角色用 name 关联调用）
         if role == Role::Tool {
-            let tid = m.get("tool_call_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-            let txt = text_of(&content);
+            let tid = m
+                .get("tool_call_id")
+                .or_else(|| m.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            // 保留已解析的多模态块（图片等）：此前经 text_of 压成纯文本，内嵌
+            // 图片被静默丢弃，跨协议转发到 Anthropic 等上游时无法还原。
+            if content.is_empty() {
+                content.push(ContentBlock::text(String::new()));
+            }
             content = vec![ContentBlock::ToolResult {
                 tool_use_id: tid,
-                content: vec![ContentBlock::text(txt)],
+                content,
                 is_error: false,
             }];
         }
@@ -189,7 +254,25 @@ pub fn core_to_chat_messages(system: &[ContentBlock], messages: &[Message]) -> V
                     "function": { "name": name, "arguments": input.to_string() },
                 })),
                 ContentBlock::ToolResult { tool_use_id, content, .. } => {
-                    tool_results.push((tool_use_id.clone(), text_of(content)))
+                    tool_results.push((tool_use_id.clone(), text_of(content)));
+                    // tool 消息只承载文本：内嵌图片/文档按原顺序提升为随后的
+                    // user 内容（与客户端「reattach recent images」同形），并附
+                    // 一行来源标注保持与 tool_call 的关联。直接丢弃会让上游收到
+                    // 空 tool 结果——模型只能靠每轮末尾的客户端重附兜底，
+                    // 把同一批图当新附件反复处理。
+                    let mut hoisted = false;
+                    for b in content {
+                        if matches!(b, ContentBlock::Image { .. } | ContentBlock::Document { .. })
+                        {
+                            if !hoisted {
+                                text_parts.push(ContentBlock::text(format!(
+                                    "[media content returned by tool call {tool_use_id}]"
+                                )));
+                                hoisted = true;
+                            }
+                            text_parts.push(b.clone());
+                        }
+                    }
                 }
                 ContentBlock::Reasoning { .. } => {}
                 other => text_parts.push(other.clone()),
@@ -197,6 +280,13 @@ pub fn core_to_chat_messages(system: &[ContentBlock], messages: &[Message]) -> V
         }
 
         if !tool_results.is_empty() {
+            // 同消息含 ToolUse + ToolResult 时（Core IR 允许的混排）：调用
+            // 先落成 assistant 消息，否则 continue 会静默丢弃 tool_calls。
+            if !tool_calls.is_empty() {
+                out.push(json!({
+                    "role": "assistant", "content": "", "tool_calls": tool_calls
+                }));
+            }
             for (tid, txt) in tool_results {
                 out.push(json!({ "role": "tool", "tool_call_id": tid, "content": txt }));
             }
@@ -218,12 +308,18 @@ pub fn core_to_chat_messages(system: &[ContentBlock], messages: &[Message]) -> V
             Role::Tool => "tool",
             Role::User => "user",
         };
+        // tool_calls 只能挂 assistant 消息——混排（如 user 消息内含 ToolUse）
+        // 时强制 assistant，否则上游按非法 schema 整请求 400。
+        let role = if !tool_calls.is_empty() { "assistant" } else { role };
         let content_value = if text_parts.len() == 1 {
             if let ContentBlock::Text { text } = &text_parts[0] {
                 json!(text)
             } else {
                 json!(text_parts.iter().filter_map(content_to_part).collect::<Vec<_>>())
             }
+        } else if text_parts.is_empty() {
+            // 空 part 数组部分上游不收；tool_calls 消息惯例 content 为 ""/null
+            json!("")
         } else {
             json!(text_parts.iter().filter_map(content_to_part).collect::<Vec<_>>())
         };
@@ -249,6 +345,25 @@ fn content_to_part(b: &ContentBlock) -> Option<Value> {
             };
             Some(json!({ "type": "image_url", "image_url": { "url": url } }))
         }
+        // 文档 → file part（OpenAI 多模态文件通道）；text 源降级为文本 part。
+        ContentBlock::Document {
+            source,
+            media_type,
+            data,
+            name,
+        } => match source {
+            DocSource::Text => Some(json!({ "type": "text", "text": data })),
+            _ => {
+                let mut file = match source {
+                    DocSource::File => json!({ "file_id": data }),
+                    DocSource::Url => json!({ "file_url": data }),
+                    _ => json!({ "file_data": format!("data:{media_type};base64,{data}") }),
+                };
+                // file_data 必填 filename；其余形态尽力带上。
+                file["filename"] = json!(name.clone().unwrap_or_else(|| "file".into()));
+                Some(json!({ "type": "file", "file": file }))
+            }
+        },
         _ => None,
     }
 }
@@ -341,11 +456,7 @@ pub fn chat_choice_to_core(choice: &Value) -> (Vec<ContentBlock>, Option<StopRea
     if let Some(tcs) = msg.get("tool_calls").and_then(|t| t.as_array()) {
         for tc in tcs {
             let fn_obj = tc.get("function").cloned().unwrap_or(Value::Null);
-            let args = fn_obj
-                .get("arguments")
-                .and_then(|a| a.as_str())
-                .and_then(|a| serde_json::from_str::<Value>(a).ok())
-                .unwrap_or_else(|| json!({}));
+            let args = parse_call_arguments(fn_obj.get("arguments"));
             content.push(ContentBlock::ToolUse {
                 id: tc.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
                 name: fn_obj.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
@@ -609,5 +720,232 @@ mod tests {
             }
             other => panic!("expected plain text, got {other:?}"),
         }
+    }
+
+    /// 回归：tool_result 内嵌图片不得随 `text_of` 静默丢弃成空 tool 消息——
+    /// chat 的 tool 消息只承载文本，图片提升为随后的 user 消息（与客户端
+    /// 「reattach recent images」同形），并带来源标注保持与 tool_call 的关联。
+    /// 历史缺陷实证：上游只剩空 tool 结果，模型只能靠每轮末尾的客户端重附
+    /// 兜底，把同一批图当新附件反复读取。
+    #[test]
+    fn tool_result_images_hoist_to_user_message() {
+        let msgs = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "c1".into(),
+                    content: vec![ContentBlock::Image {
+                        data: "AAA".into(),
+                        media_type: "image/png".into(),
+                    }],
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "c2".into(),
+                    content: vec![
+                        ContentBlock::text("done"),
+                        ContentBlock::Image {
+                            data: "BBB".into(),
+                            media_type: "image/jpeg".into(),
+                        },
+                    ],
+                    is_error: false,
+                },
+                ContentBlock::text("next?"),
+            ],
+            ext: Default::default(),
+        }];
+        let out = core_to_chat_messages(&[], &msgs);
+        assert_eq!(out.len(), 3, "两个 tool 消息 + 一个 user 消息: {out:?}");
+        assert_eq!(
+            out[0],
+            json!({"role": "tool", "tool_call_id": "c1", "content": ""})
+        );
+        assert_eq!(
+            out[1],
+            json!({"role": "tool", "tool_call_id": "c2", "content": "done"})
+        );
+        let parts = out[2]["content"].as_array().unwrap();
+        assert_eq!(out[2]["role"], "user");
+        // 与源消息块序一致：c1 标注+图 → c2 标注+图 → 用户文本
+        assert_eq!(
+            parts[0],
+            json!({"type": "text", "text": "[media content returned by tool call c1]"})
+        );
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AAA");
+        assert_eq!(
+            parts[2],
+            json!({"type": "text", "text": "[media content returned by tool call c2]"})
+        );
+        assert_eq!(parts[3]["image_url"]["url"], "data:image/jpeg;base64,BBB");
+        assert_eq!(parts[4], json!({"type": "text", "text": "next?"}));
+    }
+
+    /// 纯文本 tool_result 不得长出多余的 user 消息（保持既有结构）。
+    #[test]
+    fn text_only_tool_result_emits_no_user_message() {
+        let msgs = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "c1".into(),
+                content: vec![ContentBlock::text("ok")],
+                is_error: false,
+            }],
+            ext: Default::default(),
+        }];
+        let out = core_to_chat_messages(&[], &msgs);
+        assert_eq!(
+            out,
+            vec![json!({ "role": "tool", "tool_call_id": "c1", "content": "ok" })]
+        );
+    }
+
+    /// 回归：入站 role=tool 消息的多模态 content 不得压成纯文本——图片块
+    /// 要进入 Core 的 ToolResult.content，否则跨协议转发（如回 Anthropic
+    /// 上游）时图片静默丢失。
+    #[test]
+    fn inbound_tool_message_keeps_image_parts() {
+        let msgs = chat_to_core_messages(&[json!({
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": [
+                { "type": "text", "text": "see" },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAA" } }
+            ]
+        })]);
+        let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            ..
+        } = &msgs[0].content[0]
+        else {
+            panic!("应为 ToolResult: {:?}", msgs[0].content)
+        };
+        assert_eq!(tool_use_id, "c1");
+        assert_eq!(content.len(), 2, "文本与图片块都应保留: {content:?}");
+        assert!(matches!(&content[0], ContentBlock::Text { text } if text == "see"));
+        assert!(
+            matches!(&content[1], ContentBlock::Image { data, media_type }
+                if data == "AAA" && media_type == "image/png"),
+            "data: URL 应拆为 base64+media_type（否则转 Gemini 被丢/Anthropic 被拒）: {:?}",
+            content[1]
+        );
+    }
+
+    /// 回归：入站 file part → Document（file_id/file_data/file_url 三种来源），
+    /// 此前整块丢弃；出站 Document → file part，tool_result 内嵌文档随图片
+    /// 一并 hoist。
+    #[test]
+    fn file_parts_parse_and_documents_hoist() {
+        let msgs = chat_to_core_messages(&[json!({
+            "role": "user",
+            "content": [
+                { "type": "file", "file": { "file_id": "file-9", "filename": "a.pdf" } },
+                { "type": "file", "file": { "file_data": "data:application/pdf;base64,PDFB", "filename": "b.pdf" } },
+                { "type": "file", "file": { "file_url": "https://x/c.txt" } }
+            ]
+        })]);
+        let [d0, d1, d2] = msgs[0].content.as_slice() else {
+            panic!("应为三个 Document 块: {:?}", msgs[0].content)
+        };
+        assert!(matches!(d0, ContentBlock::Document { source, data, name, .. }
+            if *source == DocSource::File && data == "file-9" && name.as_deref() == Some("a.pdf")));
+        assert!(matches!(d1, ContentBlock::Document { source, media_type, data, .. }
+            if *source == DocSource::Base64 && media_type == "application/pdf" && data == "PDFB"));
+        assert!(matches!(d2, ContentBlock::Document { source, data, .. }
+            if *source == DocSource::Url && data == "https://x/c.txt"));
+
+        // 出站：tool_result 内嵌文档与图片一样 hoist 到随后 user 消息
+        let out = core_to_chat_messages(&[], &[Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "c1".into(),
+                content: vec![
+                    ContentBlock::text("doc below"),
+                    ContentBlock::Document {
+                        source: DocSource::Base64,
+                        media_type: "application/pdf".into(),
+                        data: "PDF".into(),
+                        name: Some("spec.pdf".into()),
+                    },
+                ],
+                is_error: false,
+            }],
+            ext: Default::default(),
+        }]);
+        assert_eq!(out.len(), 2);
+        let parts = out[1]["content"].as_array().unwrap();
+        assert_eq!(
+            parts[1],
+            json!({ "type": "file", "file": { "file_data": "data:application/pdf;base64,PDF", "filename": "spec.pdf" } })
+        );
+    }
+
+    /// 回归：function.arguments 对象形态（非标准实现）不得落 {}——
+    /// 字符串形态仍按 JSON 解析，对象形态直接收。
+    #[test]
+    fn object_form_arguments_parse() {
+        let msgs = chat_to_core_messages(&[json!({
+            "role": "assistant",
+            "tool_calls": [
+                { "id": "c1", "type": "function",
+                  "function": { "name": "f", "arguments": { "x": 1 } } },
+                { "id": "c2", "type": "function",
+                  "function": { "name": "g", "arguments": "{\"y\":2}" } }
+            ]
+        })]);
+        let ContentBlock::ToolUse { input: i0, .. } = &msgs[0].content[0] else { panic!() };
+        let ContentBlock::ToolUse { input: i1, .. } = &msgs[0].content[1] else { panic!() };
+        assert_eq!(i0["x"], 1, "对象形态 arguments 不得丢弃");
+        assert_eq!(i1["y"], 2, "字符串形态按 JSON 解析");
+    }
+
+    /// 回归：同一 Core 消息混排 ToolUse + ToolResult 时出站不得丢调用——
+    /// tool_calls 先落成 assistant 消息再发 tool 结果。
+    #[test]
+    fn mixed_tool_use_and_result_keep_both() {
+        let msgs = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "c1".into(),
+                    name: "f".into(),
+                    namespace: None,
+                    input: json!({ "x": 1 }),
+                    signature: None,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "c1".into(),
+                    content: vec![ContentBlock::text("ok")],
+                    is_error: false,
+                },
+            ],
+            ext: Default::default(),
+        }];
+        let out = core_to_chat_messages(&[], &msgs);
+        assert_eq!(out[0]["role"], "assistant");
+        assert_eq!(out[0]["tool_calls"][0]["id"], "c1", "tool_calls 不得被吞");
+        assert_eq!(out[1]["role"], "tool");
+        assert_eq!(out[1]["tool_call_id"], "c1");
+    }
+
+    /// 回归：入站 image_url 的 data: URL 拆分与裸字符串形态兼容——
+    /// 不拆会让图片在 Gemini/Anthropic 上游静默丢失或被拒。
+    #[test]
+    fn inbound_data_url_image_is_split() {
+        let msgs = chat_to_core_messages(&[json!({
+            "role": "user",
+            "content": [
+                { "type": "image_url", "image_url": "data:image/webp;base64,WWW" },
+                { "type": "image_url", "image_url": { "url": "https://example.com/a.png" } }
+            ]
+        })]);
+        let [ContentBlock::Image { data: d1, media_type: m1 }, ContentBlock::Image { data: d2, media_type: m2 }] =
+            msgs[0].content.as_slice()
+        else {
+            panic!("应为两个图片块: {:?}", msgs[0].content)
+        };
+        assert_eq!((d1.as_str(), m1.as_str()), ("WWW", "image/webp"));
+        assert_eq!((d2.as_str(), m2.as_str()), ("https://example.com/a.png", "url"));
     }
 }

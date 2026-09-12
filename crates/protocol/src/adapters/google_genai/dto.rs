@@ -14,12 +14,27 @@ use std::collections::HashMap;
 
 use crate::adapters::{clamped_thinking_budget, reasoning_effort};
 use moonbridge_core::{
-    ContentBlock, CoreRequest, Message, Role, StopReason, Tool, ToolChoice, Usage,
+    ContentBlock, CoreRequest, DocSource, Message, Role, StopReason, Tool, ToolChoice, Usage,
 };
 use serde_json::{json, Value};
 
 /// 未显式指定协议版本时使用的 API 版本段。
 pub const DEFAULT_VERSION: &str = "v1beta";
+
+/// Gemini 服务端代码执行（`executableCode`/`codeExecutionResult` part）在
+/// Core 侧的工具名承载：以 ToolUse/ToolResult 表达调用与结果，本常量作
+/// 名字哨兵，回传 Gemini 时还原为原生 part 形态。真实工具若恰好同名会
+/// 误判，属可接受的边角冲突。
+pub(crate) const EXEC_CODE: &str = "executable_code";
+
+/// `functionCall` 无 `id` 字段时 ToolUse.id 的占位哨兵；`functionResponse`
+/// 无 `id` 时 ToolResult.tool_use_id 用 `{FR_NAME_PREFIX}{name}` 占位——
+/// contents_to_core 收齐全部消息后按「调用按名入队、结果按名出队」配对
+/// 并分配唯一 id。此前结果直接以函数名作 tool_use_id，与调用侧合成的
+/// `{name}-call` 永不匹配，转 Anthropic 等强校验上游会因悬空 tool_result
+/// 整请求 400；同名函数多次调用时合成 id 还会重复。
+const FCALL_PENDING: &str = "__gemini_fcall__";
+const FR_NAME_PREFIX: &str = "__gemini_fres__:";
 
 /// finishReason → Core StopReason。
 pub fn map_finish_reason(s: &str) -> Option<StopReason> {
@@ -129,11 +144,37 @@ pub fn core_to_contents(messages: &[Message]) -> Vec<Value> {
                 }
                 ContentBlock::Image { data, media_type } => {
                     flush_pending_sig(&mut parts, &mut pending_sig);
-                    if media_type != "url" {
+                    if media_type != "url" && media_type != "file" {
                         parts.push(json!({ "inlineData": { "mimeType": media_type, "data": data } }));
                     }
                 }
-                ContentBlock::ToolUse { name, input, signature, .. } => {
+                ContentBlock::Document {
+                    source,
+                    media_type,
+                    data,
+                    name,
+                } => {
+                    flush_pending_sig(&mut parts, &mut pending_sig);
+                    match source {
+                        // fileData 是 Gemini 侧文件引用的标准通道；displayName
+                        // 承载文件名。
+                        DocSource::Url => {
+                            let mut fd = json!({ "fileUri": data, "mimeType": media_type });
+                            if let Some(n) = name {
+                                fd["displayName"] = json!(n);
+                            }
+                            parts.push(json!({ "fileData": fd }));
+                        }
+                        // base64 文档走 inlineData（mimeType 任意）；File 源
+                        // （平台 file_id）跨协议不可解，不下发。
+                        DocSource::Base64 => parts.push(
+                            json!({ "inlineData": { "mimeType": media_type, "data": data } }),
+                        ),
+                        DocSource::Text => parts.push(json!({ "text": data })),
+                        DocSource::File => {}
+                    }
+                }
+                ContentBlock::ToolUse { id, name, input, signature, .. } => {
                     // 自带签名优先，否则消费紧邻的前置载波凭据
                     let sig = crate::adapters::untag_signature(
                         crate::adapters::SIG_GEMINI,
@@ -141,7 +182,19 @@ pub fn core_to_contents(messages: &[Message]) -> Vec<Value> {
                     )
                     .map(String::from)
                     .or_else(|| pending_sig.take());
-                    let mut fc = json!({ "name": name, "args": input });
+                    // 服务端代码执行还原为 executableCode 原生 part（区别于
+                    // 普通 functionCall：该 part 不参与工具声明校验）。
+                    if name == EXEC_CODE {
+                        let mut part = json!({ "executableCode": input });
+                        if let Some(sig) = sig.filter(|s| !s.is_empty()) {
+                            part["thoughtSignature"] = json!(sig);
+                        }
+                        parts.push(part);
+                        continue;
+                    }
+                    // id 一并下发：Gemini v1beta 支持 functionCall.id，
+                    // 客户端原样回传历史时入站可直接按 id 精确配对。
+                    let mut fc = json!({ "name": name, "args": input, "id": id });
                     if let Some(sig) = sig.filter(|s| !s.is_empty()) {
                         fc["thoughtSignature"] = json!(sig);
                     }
@@ -150,16 +203,86 @@ pub fn core_to_contents(messages: &[Message]) -> Vec<Value> {
                 ContentBlock::ToolResult {
                     tool_use_id,
                     content,
-                    ..
+                    is_error,
                 } => {
                     flush_pending_sig(&mut parts, &mut pending_sig);
+                    // 未配对的占位 id（`__gemini_fres__:{name}`）剥前缀取函数名——
+                    // 结果本就只有函数名语义，占位串不能作为 Gemini 函数名下发。
                     let name = id_to_name
                         .get(tool_use_id.as_str())
                         .copied()
-                        .unwrap_or(tool_use_id.as_str());
-                    parts.push(json!({
-                        "functionResponse": { "name": name, "response": { "result": text_of(content) } }
-                    }));
+                        .unwrap_or_else(|| {
+                            tool_use_id
+                                .strip_prefix(FR_NAME_PREFIX)
+                                .unwrap_or(tool_use_id.as_str())
+                        });
+                    // 代码执行结果还原为 codeExecutionResult 原生 part；
+                    // outcome 只有 ok/fail 粒度可从 is_error 还原。
+                    if name == EXEC_CODE || tool_use_id.starts_with(EXEC_CODE) {
+                        parts.push(json!({
+                            "codeExecutionResult": {
+                                "outcome": if *is_error { "OUTCOME_FAILED" } else { "OUTCOME_OK" },
+                                "output": text_of(content),
+                            }
+                        }));
+                        continue;
+                    }
+                    // is_error 无原生通道，写入 response 保留位（同协议回传
+                    // 时读回；对模型而言是结果对象里的显式错误标记）。
+                    let mut resp = json!({ "result": text_of(content) });
+                    if *is_error {
+                        resp["is_error"] = json!(true);
+                    }
+                    // 已配对的真实调用 id 一并下发（v1beta 支持），客户端原样
+                    // 回传时入站可精确配对；未配对的占位/名串不作 id 下发。
+                    let mut fr = json!({ "name": name, "response": resp });
+                    if id_to_name.contains_key(tool_use_id.as_str()) {
+                        fr["id"] = json!(tool_use_id);
+                    }
+                    parts.push(json!({ "functionResponse": fr }));
+                    // functionResponse 只承载 JSON 文本：内嵌图片/文档提升为同一
+                    // user 回合的 inlineData/fileData part（Gemini 侧工具媒体
+                    // 结果的标准通道），附一行来源标注保持与 functionCall 的
+                    // 关联——否则经 text_of 静默丢弃后模型只看到空结果。
+                    let mut hoisted = false;
+                    for b in content {
+                        let part = match b {
+                            ContentBlock::Image { data, media_type } => {
+                                if media_type == "url" || media_type == "file" {
+                                    continue; // 与顶层分支同口径：引用形态不下发
+                                }
+                                json!({ "inlineData": { "mimeType": media_type, "data": data } })
+                            }
+                            ContentBlock::Document {
+                                source,
+                                media_type,
+                                data,
+                                name: doc_name,
+                            } => match source {
+                                DocSource::Url => {
+                                    let mut fd =
+                                        json!({ "fileUri": data, "mimeType": media_type });
+                                    if let Some(n) = doc_name {
+                                        fd["displayName"] = json!(n);
+                                    }
+                                    json!({ "fileData": fd })
+                                }
+                                DocSource::Base64 => {
+                                    json!({ "inlineData": { "mimeType": media_type, "data": data } })
+                                }
+                                DocSource::Text => json!({ "text": data }),
+                                DocSource::File => continue,
+                            },
+                            _ => continue,
+                        };
+                        if !hoisted {
+                            parts.push(json!({
+                                "text": format!("[media content returned by function call {name}]")
+                            }));
+                            hoisted = true;
+                        }
+                        parts.push(part);
+                    }
                 }
                 ContentBlock::Reasoning { text, signature, .. } => {
                     // 历史 thought 回传：Gemini 2.5 多轮 function calling 要求
@@ -316,14 +439,22 @@ pub fn core_to_parts(content: &[ContentBlock]) -> Vec<Value> {
                 flush_pending_sig(&mut parts, &mut pending_sig);
                 parts.push(json!({ "text": text }));
             }
-            ContentBlock::ToolUse { name, input, signature, .. } => {
+            ContentBlock::ToolUse { id, name, input, signature, .. } => {
                 let sig = crate::adapters::untag_signature(
                     crate::adapters::SIG_GEMINI,
                     signature.as_deref(),
                 )
                 .map(String::from)
                 .or_else(|| pending_sig.take());
-                let mut fc = json!({ "name": name, "args": input });
+                if name == EXEC_CODE {
+                    let mut part = json!({ "executableCode": input });
+                    if let Some(sig) = sig.filter(|s| !s.is_empty()) {
+                        part["thoughtSignature"] = json!(sig);
+                    }
+                    parts.push(part);
+                    continue;
+                }
+                let mut fc = json!({ "name": name, "args": input, "id": id });
                 if let Some(sig) = sig.filter(|s| !s.is_empty()) {
                     fc["thoughtSignature"] = json!(sig);
                 }
@@ -331,8 +462,30 @@ pub fn core_to_parts(content: &[ContentBlock]) -> Vec<Value> {
             }
             ContentBlock::Image { data, media_type } => {
                 flush_pending_sig(&mut parts, &mut pending_sig);
-                if media_type != "url" {
+                if media_type != "url" && media_type != "file" {
                     parts.push(json!({ "inlineData": { "mimeType": media_type, "data": data } }));
+                }
+            }
+            ContentBlock::Document {
+                source,
+                media_type,
+                data,
+                name,
+            } => {
+                flush_pending_sig(&mut parts, &mut pending_sig);
+                match source {
+                    DocSource::Url => {
+                        let mut fd = json!({ "fileUri": data, "mimeType": media_type });
+                        if let Some(n) = name {
+                            fd["displayName"] = json!(n);
+                        }
+                        parts.push(json!({ "fileData": fd }));
+                    }
+                    DocSource::Base64 => parts.push(
+                        json!({ "inlineData": { "mimeType": media_type, "data": data } }),
+                    ),
+                    DocSource::Text => parts.push(json!({ "text": data })),
+                    DocSource::File => {}
                 }
             }
             ContentBlock::Reasoning { text, signature, .. } => {
@@ -354,8 +507,22 @@ pub fn core_to_parts(content: &[ContentBlock]) -> Vec<Value> {
                 }
                 parts.push(part);
             }
-            ContentBlock::ToolResult { .. } => {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
                 flush_pending_sig(&mut parts, &mut pending_sig);
+                // 响应侧的代码执行结果（model 回合内）还原原生 part；
+                // 其余 ToolResult 在响应中不出现，维持丢弃。
+                if tool_use_id.starts_with(EXEC_CODE) {
+                    parts.push(json!({
+                        "codeExecutionResult": {
+                            "outcome": if *is_error { "OUTCOME_FAILED" } else { "OUTCOME_OK" },
+                            "output": text_of(content),
+                        }
+                    }));
+                }
             }
         }
     }
@@ -420,22 +587,23 @@ pub fn part_to_blocks(p: &Value) -> Vec<ContentBlock> {
             // 无文本但带凭据的 part：凭据不能丢，否则多轮回传缺失
             out.push(ContentBlock::Reasoning { text: String::new(), signature, redacted: false });
         }
-    } else if p.get("functionCall").is_none() {
-        // 非文本且非 functionCall 的 part 带凭据：凭据不能丢；
-        // functionCall part 的凭据归 ToolUse 块（见下），不在此处理
+    } else if p.get("functionCall").is_none() && p.get("executableCode").is_none() {
+        // 非文本且非调用类 part 带凭据：凭据不能丢；
+        // functionCall/executableCode part 的凭据归 ToolUse 块（见下），不在此处理
         if signature.is_some() {
             out.push(ContentBlock::Reasoning { text: String::new(), signature, redacted: false });
         }
     }
     if let Some(fc) = p.get("functionCall") {
         let name = fc.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        // Gemini 的 functionCall 不一定带 id，缺失时按函数名合成，保证下游可回传结果
+        // Gemini 的 functionCall 不一定带 id；缺失时用占位哨兵，由
+        // contents_to_core 统一分配唯一 id 并与 functionResponse 按名配对。
         let id = fc
             .get("id")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("{name}-call"));
+            .unwrap_or_else(|| FCALL_PENDING.to_string());
         let args = fc.get("args").cloned().unwrap_or_else(|| json!({}));
         // 加密 CoT 凭据：与 function call 强绑定的 thoughtSignature（part 级字段，
         // 官方形态在 part 上；部分实现放在 functionCall 内，均兼容）。
@@ -465,10 +633,21 @@ pub fn part_to_blocks(p: &Value) -> Vec<ContentBlock> {
     if let Some(fr) = p.get("functionResponse") {
         let name = fr.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
         let resp = fr.get("response").cloned().unwrap_or(Value::Null);
+        // id 缺省时记 `{FR_NAME_PREFIX}{name}` 占位——结果本身只有函数名，
+        // 配对由 contents_to_core 按序完成；同协议回传时 id_to_name 解析
+        // 出的是占位串，须在此剥掉前缀还原为函数名语义。
+        let tool_use_id = fr
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("{FR_NAME_PREFIX}{name}"));
         out.push(ContentBlock::ToolResult {
-            tool_use_id: name,
+            tool_use_id,
             content: vec![ContentBlock::text(resp_to_text(&resp))],
-            is_error: false,
+            // response.is_error 是本站出站侧写入的保留位（Gemini 无原生
+            // 错误语义），回传时读回保真；外部实现不会带此键。
+            is_error: resp.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false),
         });
     }
     if let Some(inline) = p.get("inlineData") {
@@ -480,12 +659,67 @@ pub fn part_to_blocks(p: &Value) -> Vec<ContentBlock> {
             .to_string();
         out.push(ContentBlock::Image { data, media_type: mt });
     }
+    if let Some(fd) = p.get("fileData") {
+        // Files API 引用 → Document（Uri 源）：此前整块丢弃。displayName
+        // 承载文件名；mimeType 保留真实类型供回传还原。
+        let uri = fd.get("fileUri").and_then(|v| v.as_str()).unwrap_or_default();
+        if !uri.is_empty() {
+            out.push(ContentBlock::Document {
+                source: DocSource::Url,
+                media_type: fd
+                    .get("mimeType")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("application/octet-stream")
+                    .to_string(),
+                data: uri.to_string(),
+                name: fd
+                    .get("displayName")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+            });
+        }
+    }
+    // 服务端代码执行对：executableCode（待执行代码）→ ToolUse、
+    // codeExecutionResult（执行输出）→ ToolResult，均以 EXEC_CODE 哨兵名
+    // 承载；tool_use_id 用占位值，由 contents_to_core 统一配对编号。
+    if let Some(ec) = p.get("executableCode") {
+        let signature = crate::adapters::tag_signature(
+            crate::adapters::SIG_GEMINI,
+            p.get("thoughtSignature")
+                .or_else(|| ec.get("thoughtSignature"))
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        );
+        if let Some(sig) = &signature {
+            out.push(ContentBlock::Reasoning {
+                text: String::new(),
+                signature: Some(sig.clone()),
+                redacted: false,
+            });
+        }
+        out.push(ContentBlock::ToolUse {
+            id: EXEC_CODE.to_string(),
+            name: EXEC_CODE.to_string(),
+            namespace: None,
+            input: ec.clone(),
+            signature,
+        });
+    }
+    if let Some(er) = p.get("codeExecutionResult") {
+        let outcome = er.get("outcome").and_then(|v| v.as_str()).unwrap_or("OUTCOME_OK");
+        let output = er.get("output").and_then(|v| v.as_str()).unwrap_or_default();
+        out.push(ContentBlock::ToolResult {
+            tool_use_id: EXEC_CODE.to_string(),
+            content: vec![ContentBlock::text(output)],
+            is_error: outcome != "OUTCOME_OK",
+        });
+    }
     out
 }
 
 /// Gemini `contents` → Core messages。
 pub fn contents_to_core(contents: &[Value]) -> Vec<Message> {
-    contents
+    let mut msgs: Vec<Message> = contents
         .iter()
         .map(|c| {
             let role = match c.get("role").and_then(|r| r.as_str()) {
@@ -501,13 +735,69 @@ pub fn contents_to_core(contents: &[Value]) -> Vec<Message> {
             for p in &parts {
                 content.extend(part_to_blocks(p));
             }
+            // executableCode/codeExecutionResult 成对出现：part_to_blocks 里
+            // 用占位 id，此处按序分配唯一 id 并配对——跨上游（Anthropic 等）
+            // 要求 tool_use id 全局唯一且结果必须回指对应调用。
+            let mut seq = 0usize;
+            let mut pending: Option<String> = None;
+            for b in &mut content {
+                match b {
+                    ContentBlock::ToolUse { id, name, .. } if name == EXEC_CODE => {
+                        let assigned = format!("{EXEC_CODE}-{seq}");
+                        seq += 1;
+                        *id = assigned.clone();
+                        pending = Some(assigned);
+                    }
+                    ContentBlock::ToolResult { tool_use_id, .. }
+                        if tool_use_id == EXEC_CODE =>
+                    {
+                        if let Some(id) = pending.take() {
+                            *tool_use_id = id;
+                        }
+                    }
+                    _ => {}
+                }
+            }
             Message {
                 role,
                 content,
                 ext: Default::default(),
             }
         })
-        .collect()
+        .collect();
+
+    // functionCall/functionResponse 配对：调用无 id 时用占位哨兵，此处分配
+    // 唯一 id 并按函数名入队；结果无 id 时（`{FR_NAME_PREFIX}{name}`）按名
+    // 出队回指对应调用——Gemini 语义即 user 回合的 functionResponse 按序
+    // 对应前序 model 回合的同名 functionCall。带真实 id 的调用同样入队，
+    // 使缺 id 的结果仍能按名配对；悬空结果保留函数名（旧行为， outbound
+    // 剥前缀还原）。跨上游（Anthropic 等）要求结果 id 回指真实调用 id，
+    // 不配对会以「找不到对应 tool_use」整请求 400。
+    let mut seq = 0usize;
+    let mut pending: HashMap<String, std::collections::VecDeque<String>> = HashMap::new();
+    for m in &mut msgs {
+        for b in &mut m.content {
+            match b {
+                ContentBlock::ToolUse { id, name, .. } => {
+                    if *id == FCALL_PENDING {
+                        *id = format!("fcall-{seq}");
+                        seq += 1;
+                    }
+                    pending.entry(name.clone()).or_default().push_back(id.clone());
+                }
+                ContentBlock::ToolResult { tool_use_id, .. } => {
+                    if let Some(name) = tool_use_id.strip_prefix(FR_NAME_PREFIX) {
+                        let matched = pending
+                            .get_mut(name)
+                            .and_then(|q| q.pop_front());
+                        *tool_use_id = matched.unwrap_or_else(|| name.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    msgs
 }
 
 /// Gemini `systemInstruction` → Core system 内容块。
@@ -877,6 +1167,303 @@ mod tests {
         }
         let contents = core_to_contents(&foreign);
         assert!(contents[1]["parts"][0]["functionCall"].get("thoughtSignature").is_none());
+    }
+
+    /// 回归：ToolResult 内嵌图片不得经 `text_of` 丢弃成空 functionResponse——
+    /// functionResponse 只承载 JSON 文本，图片提升为同一 user 回合的
+    /// inlineData part（Gemini 侧工具图片结果的标准通道），附来源标注；
+    /// url 形态与顶层 Image 分支同口径跳过。
+    #[test]
+    fn tool_result_images_hoist_as_inline_data() {
+        let msgs = vec![
+            Message::text(Role::User, "q"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "c1".into(),
+                    name: "read_file".into(),
+                    namespace: None,
+                    input: json!({ "path": "a.png" }),
+                    signature: None,
+                }],
+                ext: Default::default(),
+            },
+            Message {
+                role: Role::Tool,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "c1".into(),
+                    content: vec![
+                        ContentBlock::text("image below"),
+                        ContentBlock::Image {
+                            data: "AAA".into(),
+                            media_type: "image/png".into(),
+                        },
+                        ContentBlock::Image {
+                            data: "https://example.com/x.png".into(),
+                            media_type: "url".into(),
+                        },
+                        ContentBlock::Image {
+                            data: "BBB".into(),
+                            media_type: "image/jpeg".into(),
+                        },
+                    ],
+                    is_error: false,
+                }],
+                ext: Default::default(),
+            },
+        ];
+        let contents = core_to_contents(&msgs);
+        assert_eq!(contents.len(), 3);
+        let parts = contents[2]["parts"].as_array().unwrap();
+        // functionResponse 文本保留 + 一条标注 + 两张 base64 图（url 跳过）
+        assert_eq!(
+            parts[0],
+            json!({ "functionResponse": { "name": "read_file", "response": { "result": "image below" }, "id": "c1" } })
+        );
+        assert_eq!(
+            parts[1],
+            json!({ "text": "[media content returned by function call read_file]" })
+        );
+        assert_eq!(
+            parts[2],
+            json!({ "inlineData": { "mimeType": "image/png", "data": "AAA" } })
+        );
+        assert_eq!(
+            parts[3],
+            json!({ "inlineData": { "mimeType": "image/jpeg", "data": "BBB" } })
+        );
+        assert_eq!(parts.len(), 4, "url 形态图片不下发: {parts:?}");
+    }
+
+    /// 回归：fileData part（Files API 引用）不得静默丢弃——映射为 Uri 源
+    /// Document（mimeType/displayName 保真），回传 Gemini 还原 fileData。
+    #[test]
+    fn file_data_part_maps_to_document() {
+        let uri = "https://generativelanguage.googleapis.com/v1beta/files/abc";
+        let blocks = part_to_blocks(&json!({
+            "fileData": { "fileUri": uri, "mimeType": "application/pdf", "displayName": "s.pdf" }
+        }));
+        let ContentBlock::Document { source, media_type, data, name } = &blocks[0] else {
+            panic!("应为 Document 块: {blocks:?}")
+        };
+        assert_eq!(*source, DocSource::Url);
+        assert_eq!((media_type.as_str(), data.as_str()), ("application/pdf", uri));
+        assert_eq!(name.as_deref(), Some("s.pdf"));
+
+        // 出站还原为 fileData part
+        let contents = core_to_contents(&[Message {
+            role: Role::User,
+            content: vec![blocks[0].clone()],
+            ext: Default::default(),
+        }]);
+        assert_eq!(
+            contents[0]["parts"][0],
+            json!({ "fileData": { "fileUri": uri, "mimeType": "application/pdf", "displayName": "s.pdf" } })
+        );
+    }
+
+    /// 回归：executableCode/codeExecutionResult 入站不再丢弃——映射为
+    /// ToolUse/ToolResult（EXEC_CODE 哨兵名，按序配对唯一 id）；回传 Gemini
+    /// 还原为原生 part 形态。
+    #[test]
+    fn code_execution_parts_roundtrip() {
+        let msgs = contents_to_core(&[json!({
+            "role": "model",
+            "parts": [
+                { "executableCode": { "language": "PYTHON", "code": "print(1)" } },
+                { "codeExecutionResult": { "outcome": "OUTCOME_OK", "output": "1\n" } },
+                { "executableCode": { "language": "PYTHON", "code": "print(2)" } },
+                { "codeExecutionResult": { "outcome": "OUTCOME_FAILED", "output": "err" } }
+            ]
+        })]);
+        let content = &msgs[0].content;
+        let (ContentBlock::ToolUse { id: i0, name: n0, input, .. },
+             ContentBlock::ToolResult { tool_use_id: t0, is_error: e0, .. },
+             ContentBlock::ToolUse { id: i1, .. },
+             ContentBlock::ToolResult { tool_use_id: t1, is_error: e1, .. }) =
+            ( &content[0], &content[1], &content[2], &content[3] )
+        else {
+            panic!("应为 ToolUse/ToolResult 对: {content:?}")
+        };
+        assert_eq!(n0, EXEC_CODE);
+        assert_eq!(input["code"], "print(1)");
+        assert_eq!(t0, i0, "结果须回指配对调用");
+        assert_eq!(t1, i1, "第二对结果须各自配对");
+        assert_ne!(i0, i1, "id 须唯一");
+        assert!(!e0 && *e1, "outcome 映射到 is_error");
+
+        // 出站还原原生 part 形态
+        let contents = core_to_contents(&msgs);
+        let parts = contents[0]["parts"].as_array().unwrap();
+        assert_eq!(parts[0], json!({ "executableCode": { "language": "PYTHON", "code": "print(1)" } }));
+        assert_eq!(
+            parts[1],
+            json!({ "codeExecutionResult": { "outcome": "OUTCOME_OK", "output": "1\n" } })
+        );
+        assert_eq!(parts[2], json!({ "executableCode": { "language": "PYTHON", "code": "print(2)" } }));
+        assert_eq!(
+            parts[3],
+            json!({ "codeExecutionResult": { "outcome": "OUTCOME_FAILED", "output": "err" } })
+        );
+    }
+
+    /// 回归：functionCall/functionResponse 无 id 时按名按序配对——同名函数
+    /// 多次调用各得唯一 id，结果回指对应调用（此前结果以函数名为 id 与
+    /// 调用侧 `{name}-call` 永不匹配，转 Anthropic 整请求 400）。
+    /// 带真实 id 的部分原样保留。
+    #[test]
+    fn function_call_response_pair_by_name_in_order() {
+        let msgs = contents_to_core(&[
+            json!({
+                "role": "model",
+                "parts": [
+                    { "functionCall": { "name": "read_file", "args": {"p": "a"} } },
+                    { "functionCall": { "name": "read_file", "args": {"p": "b"} } },
+                    { "functionCall": { "id": "real-id", "name": "ls", "args": {} } }
+                ]
+            }),
+            json!({
+                "role": "user",
+                "parts": [
+                    { "functionResponse": { "name": "read_file", "response": {"result": "A"} } },
+                    { "functionResponse": { "name": "read_file", "response": {"result": "B"} } },
+                    { "functionResponse": { "id": "real-id", "name": "ls", "response": {"result": "ok"} } }
+                ]
+            }),
+        ]);
+
+        let calls: Vec<&ContentBlock> = msgs[0]
+            .content
+            .iter()
+            .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
+            .collect();
+        let id0 = match calls[0] { ContentBlock::ToolUse { id, .. } => id.clone(), _ => unreachable!() };
+        let id1 = match calls[1] { ContentBlock::ToolUse { id, .. } => id.clone(), _ => unreachable!() };
+        assert_ne!(id0, id1, "同名调用须分配唯一 id");
+
+        let results: Vec<&ContentBlock> = msgs[1]
+            .content
+            .iter()
+            .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            .collect();
+        let ContentBlock::ToolResult { tool_use_id: t0, content: c0, .. } = results[0] else { panic!() };
+        let ContentBlock::ToolResult { tool_use_id: t1, content: c1, .. } = results[1] else { panic!() };
+        let ContentBlock::ToolResult { tool_use_id: t2, .. } = results[2] else { panic!() };
+        assert_eq!(t0, &id0, "第一个结果回指第一个同名调用");
+        assert_eq!(t1, &id1, "第二个结果回指第二个同名调用");
+        assert_eq!(t2, "real-id", "带真实 id 的结果原样保留");
+        assert!(matches!(&c0[0], ContentBlock::Text { text } if text == "A"));
+        assert!(matches!(&c1[0], ContentBlock::Text { text } if text == "B"));
+
+        // 出站回传：id_to_name 解析回函数名，id 一并还原
+        let contents = core_to_contents(&msgs);
+        let frs: Vec<&Value> = contents[1]["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p.get("functionResponse").is_some())
+            .collect();
+        assert_eq!(frs[0]["functionResponse"]["name"], "read_file");
+        assert_eq!(frs[0]["functionResponse"]["id"], id0.as_str());
+        assert_eq!(frs[2]["functionResponse"]["id"], "real-id");
+    }
+
+    /// 回归：is_error 经 response.is_error 保留位双向保真。
+    #[test]
+    fn tool_result_is_error_roundtrips() {
+        let msgs = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "exec".into(),
+                    namespace: None,
+                    input: json!({}),
+                    signature: None,
+                }],
+                ext: Default::default(),
+            },
+            Message {
+                role: Role::Tool,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: vec![ContentBlock::text("boom")],
+                    is_error: true,
+                }],
+                ext: Default::default(),
+            },
+        ];
+        let contents = core_to_contents(&msgs);
+        let fr = &contents[1]["parts"][0]["functionResponse"];
+        assert_eq!(fr["response"]["is_error"], true);
+        assert_eq!(fr["response"]["result"], "boom");
+
+        let back = contents_to_core(&contents);
+        let ContentBlock::ToolResult { is_error, .. } = &back[1].content[0] else {
+            panic!()
+        };
+        assert!(*is_error, "is_error 回传应保留");
+    }
+
+    /// tool_result 内嵌文档随图片一并 hoist 为同回合 part。
+    #[test]
+    fn tool_result_documents_hoist_as_parts() {
+        let msgs = vec![Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "f".into(),
+                content: vec![
+                    ContentBlock::text("see doc"),
+                    ContentBlock::Document {
+                        source: DocSource::Url,
+                        media_type: "application/pdf".into(),
+                        data: "https://x/d.pdf".into(),
+                        name: None,
+                    },
+                    ContentBlock::Document {
+                        source: DocSource::Base64,
+                        media_type: "application/pdf".into(),
+                        data: "PP".into(),
+                        name: None,
+                    },
+                ],
+                is_error: false,
+            }],
+            ext: Default::default(),
+        }];
+        let contents = core_to_contents(&msgs);
+        let parts = contents[0]["parts"].as_array().unwrap();
+        assert_eq!(parts[0]["functionResponse"]["response"]["result"], "see doc");
+        assert_eq!(
+            parts[1],
+            json!({ "text": "[media content returned by function call f]" })
+        );
+        assert_eq!(
+            parts[2],
+            json!({ "fileData": { "fileUri": "https://x/d.pdf", "mimeType": "application/pdf" } })
+        );
+        assert_eq!(
+            parts[3],
+            json!({ "inlineData": { "mimeType": "application/pdf", "data": "PP" } })
+        );
+    }
+
+    /// 纯文本 tool_result 不产出额外 part（保持既有结构）。
+    #[test]
+    fn text_only_tool_result_emits_no_extra_parts() {
+        let msgs = vec![Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "f".into(),
+                content: vec![ContentBlock::text("ok")],
+                is_error: false,
+            }],
+            ext: Default::default(),
+        }];
+        let contents = core_to_contents(&msgs);
+        let parts = contents[0]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["functionResponse"]["response"]["result"], "ok");
     }
 
     #[test]

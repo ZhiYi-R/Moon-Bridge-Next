@@ -111,12 +111,14 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
         for p in &parts {
             if let Some(fc) = p.get("functionCall") {
                 let name = fc.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                // 无 id 时带块索引后缀合成——同名函数一次响应多次调用时
+                // 纯 `{name}-call` 会重复，跨上游要求 tool_use id 唯一。
                 let id = fc
                     .get("id")
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
                     .map(String::from)
-                    .unwrap_or_else(|| format!("{name}-call"));
+                    .unwrap_or_else(|| format!("{name}-call-{}", st.next_block_index));
                 let args = fc.get("args").cloned().unwrap_or_else(|| json!({}));
                 // 加密 CoT 凭据：与 function call 强绑定的 thoughtSignature
                 // （part 级字段）。打上 gem: 来源标记，出站解标时异源凭据不互填。

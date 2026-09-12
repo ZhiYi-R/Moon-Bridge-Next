@@ -33,7 +33,8 @@ pub(crate) const SYSTEM_CACHE_META_KEY: &str = "anthropic.system_cache_control";
 pub(crate) const EXTRA_META_KEY: &str = "anthropic.extra";
 
 /// 解析 Anthropic message 的 content（字符串或 block 数组）为 Core 内容块，
-/// 同时把各块的 `cache_control` 记入位置表。
+/// 同时把各块的 `cache_control` 记入位置表。tool_result 等嵌套块的子块
+/// cache_control 以 `"i.j"`（顶层序号.子序号）为键一并记录。
 fn parse_content(v: Option<&Value>) -> (Vec<ContentBlock>, Value) {
     match v {
         Some(Value::String(s)) => (vec![ContentBlock::text(s.clone())], Value::Null),
@@ -42,8 +43,17 @@ fn parse_content(v: Option<&Value>) -> (Vec<ContentBlock>, Value) {
             let mut blocks = Vec::new();
             for raw in arr {
                 if let Some(blk) = anthropic_to_block(raw) {
+                    let idx = blocks.len();
                     if let Some(cc) = raw.get("cache_control") {
-                        cache[blocks.len().to_string()] = cc.clone();
+                        cache[idx.to_string()] = cc.clone();
+                    }
+                    // 嵌套块（tool_result.content 数组）的子块 cache_control
+                    if let Some(subs) = raw.get("content").and_then(|c| c.as_array()) {
+                        for (j, sub) in subs.iter().enumerate() {
+                            if let Some(cc) = sub.get("cache_control") {
+                                cache[format!("{idx}.{j}")] = cc.clone();
+                            }
+                        }
                     }
                     blocks.push(blk);
                 }

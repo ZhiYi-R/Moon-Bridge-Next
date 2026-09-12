@@ -1,6 +1,6 @@
 //! Model 与 Offer DAO。
 
-use rusqlite::params;
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 
 use crate::error::Result;
@@ -9,6 +9,22 @@ use crate::Database;
 
 fn opt_json(s: Option<String>) -> Option<Value> {
     s.and_then(|x| serde_json::from_str(&x).ok())
+}
+
+/// 同 slug 任一既有报价的定价（供新建空定价行继承）。取 provider_key 最小
+/// 的一行仅为确定性；同模型跨 key 定价通常一致，用户可再按 provider 手改。
+fn same_slug_pricing(conn: &Connection, model_slug: &str) -> Option<Value> {
+    conn.query_row(
+        "SELECT pricing_json FROM offers
+         WHERE model_slug = ?1 AND pricing_json IS NOT NULL
+         ORDER BY provider_key LIMIT 1",
+        params![model_slug],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .and_then(|s| serde_json::from_str(&s).ok())
 }
 
 fn row_to_model(r: &rusqlite::Row) -> rusqlite::Result<ModelDef> {
@@ -114,12 +130,35 @@ impl Database {
     }
 
     /// 插入或更新报价。
+    ///
+    /// 新建行未带定价时，继承同 slug 任一既有报价的定价——典型场景：目录导入
+    /// （定价落在 models.dev 的 provider key 下）先于 Provider 页绑定，绑定建的
+    /// `pricing: null` 新行不继承就永久没定价（backfill 只在导入时跑）。仅在
+    /// 插入新行时生效：既有行显式传 null（清空定价）的 UPDATE 不受影响。
     pub fn upsert_offer(&self, o: &Offer) -> Result<()> {
         let conn = self.conn.lock();
+        let pricing = match &o.pricing {
+            Some(_) => o.pricing.clone(),
+            None => {
+                let exists = conn
+                    .query_row(
+                        "SELECT 1 FROM offers WHERE provider_key = ?1 AND model_slug = ?2",
+                        params![o.provider_key, o.model_slug],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some();
+                if exists {
+                    None
+                } else {
+                    same_slug_pricing(&conn, &o.model_slug)
+                }
+            }
+        };
         conn.execute(
             "INSERT INTO offers (provider_key,model_slug,pricing_json,endpoint_protocol) VALUES (?1,?2,?3,?4)
              ON CONFLICT(provider_key,model_slug) DO UPDATE SET pricing_json=excluded.pricing_json, endpoint_protocol=excluded.endpoint_protocol",
-            params![o.provider_key, o.model_slug, o.pricing.as_ref().map(|v| v.to_string()), o.endpoint_protocol],
+            params![o.provider_key, o.model_slug, pricing.as_ref().map(|v| v.to_string()), o.endpoint_protocol],
         )?;
         Ok(())
     }
@@ -157,5 +196,62 @@ params![o.provider_key, o.model_slug, o.pricing.as_ref().map(|v| v.to_string()),
             params![provider_key, model_slug],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn offer(key: &str, slug: &str, pricing: Option<Value>) -> Offer {
+        Offer {
+            provider_key: key.into(),
+            model_slug: slug.into(),
+            pricing,
+            endpoint_protocol: None,
+        }
+    }
+
+    /// 回归：导入先于绑定时，绑定建的 pricing=null 新行应继承同 slug 既有
+    /// 报价定价；既有行显式传 null 的 UPDATE 视为有意清空，不回填。
+    #[test]
+    fn new_offer_inherits_same_slug_pricing() {
+        let db = Database::open_in_memory().unwrap();
+        let catalog_pricing = json!({ "input": 0.15, "output": 0.6 });
+
+        // 目录 key 下已有定价行
+        db.upsert_offer(&offer("opencode-go", "m1", Some(catalog_pricing.clone())))
+            .unwrap();
+
+        // 用户 provider 绑定产生 pricing=null 新行 → 继承目录定价
+        db.upsert_offer(&offer("MyProvider", "m1", None)).unwrap();
+        let o = db
+            .list_offers("MyProvider")
+            .unwrap()
+            .into_iter()
+            .find(|o| o.model_slug == "m1")
+            .unwrap();
+        assert_eq!(o.pricing, Some(catalog_pricing.clone()), "新行应继承同 slug 定价");
+
+        // 既有行显式传 null = 有意清空，不得回填
+        db.upsert_offer(&offer("MyProvider", "m1", None)).unwrap();
+        let o = db
+            .list_offers("MyProvider")
+            .unwrap()
+            .into_iter()
+            .find(|o| o.model_slug == "m1")
+            .unwrap();
+        assert_eq!(o.pricing, None, "显式清空不得被回填");
+
+        // 无同 slug 定价源时仍插 null 行
+        db.upsert_offer(&offer("MyProvider", "m2", None)).unwrap();
+        let o = db
+            .list_offers("MyProvider")
+            .unwrap()
+            .into_iter()
+            .find(|o| o.model_slug == "m2")
+            .unwrap();
+        assert_eq!(o.pricing, None);
     }
 }

@@ -9,7 +9,8 @@
 use async_trait::async_trait;
 use http::Method;
 use moonbridge_core::{
-    ContentBlock, CoreRequest, CoreResponse, Protocol, Result, Role, StopReason, ToolChoice,
+    ContentBlock, CoreRequest, CoreResponse, DocSource, Protocol, Result, Role, StopReason,
+    ToolChoice,
 };
 use serde_json::{json, Value};
 
@@ -56,8 +57,45 @@ fn build_instructions(req: &CoreRequest) -> Option<String> {
     }
 }
 
+/// Document 块 → `input_file` part（base64 数据编为 data: URL；Text 源
+/// 由调用方折叠为文本 part，不走此路）。
+fn doc_to_input_file(
+    source: &DocSource,
+    media_type: &str,
+    data: &str,
+    name: Option<&str>,
+) -> Value {
+    let mut f = json!({ "type": "input_file" });
+    match source {
+        DocSource::File => f["file_id"] = json!(data),
+        DocSource::Url => f["file_url"] = json!(data),
+        // file_data 形态即 data: URL 字符串
+        _ => f["file_data"] = json!(format!("data:{media_type};base64,{data}")),
+    }
+    if let Some(n) = name {
+        f["filename"] = json!(n);
+    }
+    f
+}
+
 /// Core messages → Responses `input` items（system 走 instructions，此处跳过）。
 fn build_input(req: &CoreRequest) -> Vec<Value> {
+    // call_id → 原始 item type（ToolUse.namespace 承载）：ToolResult 出站时
+    // 依此还原 *_call_output 的具体类型（computer_call_output 等），缺省
+    // function_call_output。
+    let mut id_to_ns: std::collections::HashMap<&str, &str> = Default::default();
+    for m in &req.messages {
+        for b in &m.content {
+            if let ContentBlock::ToolUse {
+                id,
+                namespace: Some(ns),
+                ..
+            } = b
+            {
+                id_to_ns.insert(id.as_str(), ns.as_str());
+            }
+        }
+    }
     let mut input: Vec<Value> = Vec::new();
     for msg in &req.messages {
         if msg.role == Role::System {
@@ -93,19 +131,68 @@ fn build_input(req: &CoreRequest) -> Vec<Value> {
                     };
                     parts.push(json!({ "type": "input_image", "image_url": url }));
                 }
+                ContentBlock::Document {
+                    source,
+                    media_type,
+                    data,
+                    name,
+                } => match source {
+                    DocSource::Text => {
+                        let ty = if msg.role == Role::Assistant {
+                            "output_text"
+                        } else {
+                            "input_text"
+                        };
+                        parts.push(json!({ "type": ty, "text": data }));
+                    }
+                    _ => parts.push(doc_to_input_file(
+                        source,
+                        media_type,
+                        data,
+                        name.as_deref(),
+                    )),
+                },
                 ContentBlock::ToolUse {
                     id,
                     name,
                     input: tool_input,
+                    namespace,
                     ..
                 } => {
                     flush_parts!();
-                    input.push(json!({
-                        "type": "function_call",
-                        "call_id": id,
-                        "name": name,
-                        "arguments": tool_input.to_string(),
-                    }));
+                    // namespace 承载入站时的原始 item type（custom_tool_call/
+                    // computer_call 等），出站还原；id/参数字段名随类型不同。
+                    let ty = namespace
+                        .as_deref()
+                        .filter(|n| n.ends_with("_call"))
+                        .unwrap_or("function_call");
+                    let mut item = json!({ "type": ty });
+                    match ty {
+                        "custom_tool_call" => {
+                            item["call_id"] = json!(id);
+                            item["name"] = json!(name);
+                            item["input"] = json!(tool_input.to_string());
+                        }
+                        "mcp_call" => {
+                            item["id"] = json!(id);
+                            item["name"] = json!(name);
+                            item["arguments"] = json!(tool_input.to_string());
+                        }
+                        "computer_call" | "local_shell_call" => {
+                            item["call_id"] = json!(id);
+                            item["action"] = tool_input.clone();
+                        }
+                        "web_search_call" | "file_search_call"
+                        | "image_generation_call" | "code_interpreter_call" => {
+                            item["id"] = json!(id);
+                        }
+                        _ => {
+                            item["call_id"] = json!(id);
+                            item["name"] = json!(name);
+                            item["arguments"] = json!(tool_input.to_string());
+                        }
+                    }
+                    input.push(item);
                 }
                 ContentBlock::ToolResult {
                     tool_use_id,
@@ -113,10 +200,62 @@ fn build_input(req: &CoreRequest) -> Vec<Value> {
                     ..
                 } => {
                     flush_parts!();
+                    // *_call_output.output 原生支持 part 数组
+                    // （input_text/input_image/input_file）：含图片/文档时改用
+                    // 数组形态把内嵌媒体留在结果内部，不再经 text_of 静默丢弃。
+                    let has_media = content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::Document { .. }));
+                    let output = if !has_media {
+                        json!(text_of(content))
+                    } else {
+                        Value::Array(
+                            content
+                                .iter()
+                                .filter_map(|b| match b {
+                                    ContentBlock::Text { text } => {
+                                        Some(json!({ "type": "input_text", "text": text }))
+                                    }
+                                    ContentBlock::Image { data, media_type } => {
+                                        let url = if media_type == "url" {
+                                            data.clone()
+                                        } else {
+                                            format!("data:{media_type};base64,{data}")
+                                        };
+                                        Some(json!({ "type": "input_image", "image_url": url }))
+                                    }
+                                    ContentBlock::Document {
+                                        source,
+                                        media_type,
+                                        data,
+                                        name,
+                                    } => match source {
+                                        DocSource::Text => Some(
+                                            json!({ "type": "input_text", "text": data }),
+                                        ),
+                                        _ => Some(doc_to_input_file(
+                                            source,
+                                            media_type,
+                                            data,
+                                            name.as_deref(),
+                                        )),
+                                    },
+                                    _ => None,
+                                })
+                                .collect(),
+                        )
+                    };
+                    // 原始 item type 还原：computer_call 等的结果须回
+                    // computer_call_output（namespace 经入站 ToolUse 承载）。
+                    let out_ty = id_to_ns
+                        .get(tool_use_id.as_str())
+                        .filter(|ns| ns.ends_with("_call"))
+                        .map(|ns| format!("{ns}_output"))
+                        .unwrap_or_else(|| "function_call_output".to_string());
                     input.push(json!({
-                        "type": "function_call_output",
+                        "type": out_ty,
                         "call_id": tool_use_id,
-                        "output": text_of(content),
+                        "output": output,
                     }));
                 }
                 ContentBlock::Reasoning { signature, .. } => {
@@ -585,5 +724,161 @@ mod tests {
             .await
             .unwrap();
         assert!(up2.body.get("reasoning").is_none());
+    }
+
+    /// 回归：ToolResult 内嵌图片不得经 `text_of` 丢弃——function_call_output
+    /// 的 output 原生支持 part 数组（input_text/input_image），图片留在结果
+    /// 内部原位送达；纯文本结果仍保持字符串形态不变。
+    #[tokio::test]
+    async fn tool_result_image_stays_inside_function_call_output() {
+        let mut req = CoreRequest::new("gpt-x");
+        req.messages.push(Message {
+            role: Role::Tool,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "c1".into(),
+                    content: vec![
+                        ContentBlock::text("shot"),
+                        ContentBlock::Image {
+                            data: "AAA".into(),
+                            media_type: "image/png".into(),
+                        },
+                        ContentBlock::Image {
+                            data: "https://example.com/x.png".into(),
+                            media_type: "url".into(),
+                        },
+                    ],
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "c2".into(),
+                    content: vec![ContentBlock::text("plain")],
+                    is_error: false,
+                },
+            ],
+            ext: Default::default(),
+        });
+        let adapter = OpenAiResponsesAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::Anthropic);
+        let up = adapter
+            .from_core_request(&ctx, &req, &endpoint())
+            .await
+            .unwrap();
+        let items = up.body["input"].as_array().unwrap();
+        let fco = items
+            .iter()
+            .find(|i| i["type"] == "function_call_output" && i["call_id"] == "c1")
+            .unwrap();
+        let parts = fco["output"]
+            .as_array()
+            .expect("含图片时 output 应为 part 数组");
+        assert_eq!(parts[0], json!({ "type": "input_text", "text": "shot" }));
+        assert_eq!(
+            parts[1],
+            json!({ "type": "input_image", "image_url": "data:image/png;base64,AAA" })
+        );
+        assert_eq!(
+            parts[2],
+            json!({ "type": "input_image", "image_url": "https://example.com/x.png" })
+        );
+        // 纯文本结果保持字符串 output（既有兼容形态）
+        let fco2 = items
+            .iter()
+            .find(|i| i["type"] == "function_call_output" && i["call_id"] == "c2")
+            .unwrap();
+        assert_eq!(fco2["output"], "plain");
+    }
+
+    /// 回归：Document → input_file part（消息内容与 function_call_output
+    /// 数组两处）；ToolUse.namespace 还原原始 item type（custom_tool_call
+    /// 用 input 字符串、computer_call 用 action 对象），对应 ToolResult
+    /// 出站还原为 *_call_output。
+    #[tokio::test]
+    async fn documents_and_typed_call_items_roundtrip() {
+        let mut req = CoreRequest::new("gpt-x");
+        req.messages.push(Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Document {
+                    source: DocSource::File,
+                    media_type: "application/pdf".into(),
+                    data: "file-1".into(),
+                    name: Some("a.pdf".into()),
+                },
+                ContentBlock::Document {
+                    source: DocSource::Base64,
+                    media_type: "application/pdf".into(),
+                    data: "PP".into(),
+                    name: None,
+                },
+            ],
+            ext: Default::default(),
+        });
+        req.messages.push(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "ct1".into(),
+                name: "exec".into(),
+                namespace: Some("custom_tool_call".into()),
+                input: json!({ "c": "ls" }),
+                signature: None,
+            }],
+            ext: Default::default(),
+        });
+        req.messages.push(Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "ct1".into(),
+                content: vec![
+                    ContentBlock::text("ok"),
+                    ContentBlock::Document {
+                        source: DocSource::Url,
+                        media_type: "application/pdf".into(),
+                        data: "https://x/r.pdf".into(),
+                        name: None,
+                    },
+                ],
+                is_error: false,
+            }],
+            ext: Default::default(),
+        });
+
+        let adapter = OpenAiResponsesAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::Anthropic);
+        let up = adapter
+            .from_core_request(&ctx, &req, &endpoint())
+            .await
+            .unwrap();
+        let items = up.body["input"].as_array().unwrap();
+
+        // 消息内文档 → input_file part
+        let msg = items.iter().find(|i| i["type"] == "message").unwrap();
+        assert_eq!(
+            msg["content"][0],
+            json!({ "type": "input_file", "file_id": "file-1", "filename": "a.pdf" })
+        );
+        assert_eq!(
+            msg["content"][1]["file_data"], "data:application/pdf;base64,PP"
+        );
+
+        // custom_tool_call 还原（input 字符串形态）
+        let call = items
+            .iter()
+            .find(|i| i["type"] == "custom_tool_call")
+            .unwrap();
+        assert_eq!(call["call_id"], "ct1");
+        assert_eq!(call["input"], "{\"c\":\"ls\"}");
+
+        // 对应 ToolResult → custom_tool_call_output，文档留 output 数组内
+        let out = items
+            .iter()
+            .find(|i| i["type"] == "custom_tool_call_output" && i["call_id"] == "ct1")
+            .unwrap();
+        let parts = out["output"].as_array().expect("含文档应为 part 数组");
+        assert_eq!(parts[0], json!({ "type": "input_text", "text": "ok" }));
+        assert_eq!(
+            parts[1],
+            json!({ "type": "input_file", "file_url": "https://x/r.pdf" })
+        );
     }
 }
