@@ -530,8 +530,10 @@ mod tests {
             other => panic!("expected text delta, got {other:?}"),
         }
 
-        let mut st = StreamDecodeState::default();
-        st.message_started = true;
+        let mut st = StreamDecodeState {
+            message_started: true,
+            ..Default::default()
+        };
         let evs = adapter
             .decode(&ctx, &mut st, &chunk(json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}})))
             .unwrap();

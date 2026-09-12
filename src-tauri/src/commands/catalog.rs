@@ -6,8 +6,9 @@
 //! reasoning_options / cost` 等。本模块在**后端**拉取并解析，只把精简后的扁平候选列表
 //! 交给前端（避免大 JSON 过 webview，也把字段映射收在一处）。
 //!
-//! 导入内容：模型定义（slug/名称/上下文/模态/推理档）+ 定价（`cost` → `pricing`），
-//! 一并写入 `models` 表。刻意**不触碰** provider 端点配置（端点在 Providers 页单独管理）。
+//! 导入内容：模型定义（slug/名称/上下文/输出上限/模态/推理档）+ 定价（`cost` →
+//! `pricing`），一并写入 `models` 表。刻意**不触碰** provider 端点配置（端点在
+//! Providers 页单独管理）。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,6 +38,8 @@ pub struct CatalogModel {
     pub name: Option<String>,
     /// 上下文窗口（token）。
     pub context_window: Option<i64>,
+    /// 输出 token 上限（models.dev `limit.output`）。
+    pub max_output_tokens: Option<i64>,
     /// 输入模态（text/image/pdf/video/audio）。
     pub modalities: Vec<String>,
     /// 推理档位（effort 值扁平化）。
@@ -70,6 +73,7 @@ impl CatalogModel {
             slug: self.id.clone(),
             display_name: self.name.clone(),
             context_window: self.context_window,
+            max_output_tokens: self.max_output_tokens,
             modalities,
             reasoning_levels,
             extra: Value::Null,
@@ -101,6 +105,11 @@ fn parse_model(provider_key: &str, provider_name: &str, id: &str, raw: &Value) -
     let context_window = raw
         .get("limit")
         .and_then(|l| l.get("context"))
+        .and_then(Value::as_i64);
+
+    let max_output_tokens = raw
+        .get("limit")
+        .and_then(|l| l.get("output"))
         .and_then(Value::as_i64);
 
     // modalities.input → 字符串数组
@@ -151,6 +160,7 @@ fn parse_model(provider_key: &str, provider_name: &str, id: &str, raw: &Value) -
         id: id.to_string(),
         name,
         context_window,
+        max_output_tokens,
         modalities,
         reasoning_levels,
         pricing,
@@ -293,6 +303,7 @@ mod tests {
         assert_eq!(muse.provider_name, "OpenCode Zen");
         assert_eq!(muse.name.as_deref(), Some("Muse Spark 1.3 Free"));
         assert_eq!(muse.context_window, Some(1_048_576));
+        assert_eq!(muse.max_output_tokens, Some(131_072));
         assert_eq!(muse.modalities, vec!["text", "image", "video", "pdf", "audio"]);
         assert_eq!(
             muse.reasoning_levels,

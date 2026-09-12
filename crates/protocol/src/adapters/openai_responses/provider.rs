@@ -187,10 +187,10 @@ impl ProviderAdapter for OpenAiResponsesAdapter {
         obj.insert("model".to_string(), json!(req.model));
         obj.insert("input".to_string(), json!(build_input(req)));
         obj.insert("stream".to_string(), json!(req.stream));
-        obj.insert(
-            "max_output_tokens".to_string(),
-            json!(req.max_tokens.unwrap_or(dto::DEFAULT_MAX_OUTPUT_TOKENS)),
-        );
+        // max_output_tokens 非必填：客户端没设上限就不凭空注入（由上游模型跑满）。
+        if let Some(mt) = req.max_tokens {
+            obj.insert("max_output_tokens".to_string(), json!(mt));
+        }
         // 无状态网关：推理明细/回传凭据必须随响应带回（否则多轮 function-call
         // 循环中 reasoning item 缺失会 400）。对非推理模型无 reasoning item，
         // 该 include 无副作用。客户端自带 include 时合并而非覆盖。
@@ -484,6 +484,21 @@ mod tests {
         assert_eq!(up.body["tools"][0]["name"], "get_time");
         assert_eq!(up.body["max_output_tokens"], 512);
         assert!(up.headers.iter().any(|(k, v)| k == "authorization" && v == "Bearer sk-test"));
+    }
+
+    /// 回归：客户端未设上限时不得凭空注入 max_output_tokens——该字段在
+    /// Responses API 非必填，网关注入的小值会静默截断输出（线上实证 4096 截断）。
+    #[tokio::test]
+    async fn omits_max_output_tokens_when_unset() {
+        let adapter = OpenAiResponsesAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::Anthropic);
+        let req = CoreRequest::new("gpt-x");
+        let up = adapter.from_core_request(&ctx, &req, &endpoint()).await.unwrap();
+        assert!(
+            up.body.get("max_output_tokens").is_none(),
+            "客户端未设上限时不应出现 max_output_tokens: {}",
+            up.body
+        );
     }
 
     /// 文本 part 类型按角色区分：assistant 历史必须用 output_text

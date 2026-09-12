@@ -16,9 +16,10 @@ fn row_to_model(r: &rusqlite::Row) -> rusqlite::Result<ModelDef> {
         slug: r.get(0)?,
         display_name: r.get(1)?,
         context_window: r.get(2)?,
-        modalities: opt_json(r.get(3)?),
-        reasoning_levels: opt_json(r.get(4)?),
-        extra: opt_json(r.get(5)?).unwrap_or(Value::Null),
+        max_output_tokens: r.get(3)?,
+        modalities: opt_json(r.get(4)?),
+        reasoning_levels: opt_json(r.get(5)?),
+        extra: opt_json(r.get(6)?).unwrap_or(Value::Null),
     })
 }
 
@@ -27,7 +28,7 @@ impl Database {
     pub fn list_models(&self) -> Result<Vec<ModelDef>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT slug,display_name,context_window,modalities_json,reasoning_levels_json,extra_json FROM models ORDER BY slug",
+            "SELECT slug,display_name,context_window,max_output_tokens,modalities_json,reasoning_levels_json,extra_json FROM models ORDER BY slug",
         )?;
         let rows = stmt.query_map([], row_to_model)?;
         let mut out = Vec::new();
@@ -41,7 +42,7 @@ impl Database {
     pub fn get_model(&self, slug: &str) -> Result<Option<ModelDef>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT slug,display_name,context_window,modalities_json,reasoning_levels_json,extra_json FROM models WHERE slug = ?1",
+            "SELECT slug,display_name,context_window,max_output_tokens,modalities_json,reasoning_levels_json,extra_json FROM models WHERE slug = ?1",
         )?;
         let mut rows = stmt.query_map(params![slug], row_to_model)?;
         match rows.next() {
@@ -61,14 +62,15 @@ impl Database {
             m.extra.to_string()
         };
         conn.execute(
-            "INSERT INTO models (slug,display_name,context_window,modalities_json,reasoning_levels_json,extra_json)
-             VALUES (?1,?2,?3,?4,?5,?6)
+            "INSERT INTO models (slug,display_name,context_window,max_output_tokens,modalities_json,reasoning_levels_json,extra_json)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(slug) DO UPDATE SET
                 display_name=excluded.display_name, context_window=excluded.context_window,
+                max_output_tokens=excluded.max_output_tokens,
                 modalities_json=excluded.modalities_json, reasoning_levels_json=excluded.reasoning_levels_json,
                 extra_json=excluded.extra_json",
             params![
-                m.slug, m.display_name, m.context_window,
+                m.slug, m.display_name, m.context_window, m.max_output_tokens,
                 j(&m.modalities), j(&m.reasoning_levels), extra
             ],
         )?;

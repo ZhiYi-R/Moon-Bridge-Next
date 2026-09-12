@@ -325,7 +325,7 @@ impl ProviderAdapter for AnthropicAdapter {
 
     async fn from_core_request(
         &self,
-        _ctx: &ReqCtx,
+        ctx: &ReqCtx,
         req: &CoreRequest,
         endpoint: &ProviderEndpoint,
     ) -> Result<UpstreamRequest> {
@@ -335,7 +335,12 @@ impl ProviderAdapter for AnthropicAdapter {
             dto::MESSAGES_PATH
         );
 
-        let max_tokens = req.max_tokens.unwrap_or(dto::DEFAULT_MAX_TOKENS);
+        // max_tokens 必填：取值优先级为 客户端显式值 > 模型元数据输出上限
+        // （dispatch 由 models 表回填到 ctx）> 常量兜底——不凭空注入小值截断输出。
+        let max_tokens = req
+            .max_tokens
+            .or(ctx.upstream_max_output_tokens)
+            .unwrap_or(dto::DEFAULT_MAX_TOKENS);
         // Anthropic→Anthropic 的未解析字段（top_k/metadata/service_tier/
         // mcp_servers/context_management…）经 meta 透传，先并入 body——
         // 网关已解析字段随后覆盖，保证我们的规范化结果优先。
@@ -615,6 +620,40 @@ mod tests {
             .headers
             .iter()
             .any(|(k, v)| k == "anthropic-version" && v == dto::DEFAULT_VERSION));
+    }
+
+    /// 回归：客户端未设上限时 max_tokens 按「模型元数据（ctx 回填）→ 常量兜底」
+    /// 取值——不得凭空注入小值截断输出（线上曾因此静默截在 4096）。
+    #[tokio::test]
+    async fn max_tokens_prefers_model_output_limit_then_default() {
+        let adapter = AnthropicAdapter;
+        let mut ctx = ReqCtx::new("r1", Protocol::OpenAiResponse);
+        let req = CoreRequest::new("claude-x");
+
+        // 客户端未设 + 模型元数据上限 → 用元数据
+        ctx.upstream_max_output_tokens = Some(131_072);
+        let up = adapter
+            .from_core_request(&ctx, &req, &endpoint())
+            .await
+            .unwrap();
+        assert_eq!(up.body["max_tokens"], 131_072);
+
+        // 客户端显式值优先于元数据
+        let mut req2 = CoreRequest::new("claude-x");
+        req2.max_tokens = Some(2048);
+        let up = adapter
+            .from_core_request(&ctx, &req2, &endpoint())
+            .await
+            .unwrap();
+        assert_eq!(up.body["max_tokens"], 2048);
+
+        // 两者皆无 → 常量兜底（必填字段仍须发送）
+        ctx.upstream_max_output_tokens = None;
+        let up = adapter
+            .from_core_request(&ctx, &req, &endpoint())
+            .await
+            .unwrap();
+        assert_eq!(up.body["max_tokens"], dto::DEFAULT_MAX_TOKENS);
     }
 
     #[tokio::test]

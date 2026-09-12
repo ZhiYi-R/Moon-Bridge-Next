@@ -13,7 +13,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use moonbridge_core::Protocol;
 use moonbridge_gateway::{bootstrap, dispatch, server, AppState, GatewayConfig};
-use moonbridge_store::{Database, Endpoint, PluginRecord, Provider, Route, UsageQuery};
+use moonbridge_store::{Database, Endpoint, ModelDef, PluginRecord, Provider, Route, UsageQuery};
 use serde_json::{json, Value};
 
 /// 起一个 mock Anthropic 上游（`POST /v1/messages`），按请求 `stream` 返回 JSON 或 SSE。
@@ -598,6 +598,85 @@ async fn spawn_mock_returning(body: Value) -> String {
         axum::serve(listener, app).await.unwrap();
     });
     format!("http://{addr}")
+}
+
+/// 记录上游请求体的 mock Anthropic（断言网关出站报文用）。返回 (base_url, 捕获槽)。
+async fn spawn_mock_anthropic_capture() -> (String, Arc<std::sync::Mutex<Vec<Value>>>) {
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let cap = captured.clone();
+    let app = Router::new().route(
+        "/v1/messages",
+        post(move |Json(body): Json<Value>| {
+            let cap = cap.clone();
+            async move {
+                cap.lock().unwrap().push(body);
+                Json(json!({
+                    "id": "msg_1", "model": "claude-x", "role": "assistant",
+                    "content": [{ "type": "text", "text": "ok" }],
+                    "stop_reason": "end_turn",
+                    "usage": { "input_tokens": 1, "output_tokens": 1 }
+                }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), captured)
+}
+
+/// 回归：客户端未设输出上限时，Anthropic 上游的必填 `max_tokens` 按模型元数据
+/// （`models.max_output_tokens`）兜底——不得凭空注入小值截断输出
+/// （线上实证 OpenCode Zen 端被静默注入 4096、输出恰好截在 4096）。
+#[tokio::test]
+async fn e2e_anthropic_max_tokens_uses_model_output_limit() {
+    let (base_url, captured) = spawn_mock_anthropic_capture().await;
+    let (state, db) = setup_with("anthropic", base_url, "claude-x", "test-model").await;
+    db.upsert_model(&ModelDef {
+        slug: "claude-x".into(),
+        display_name: None,
+        context_window: Some(200_000),
+        max_output_tokens: Some(131_072),
+        modalities: None,
+        reasoning_levels: None,
+        extra: Value::Null,
+    })
+    .unwrap();
+
+    // 客户端不设 max_tokens
+    let body = json!({
+        "model": "test-model",
+        "messages": [{ "role": "user", "content": "Hi" }],
+    });
+    let resp = dispatch::handle_request(state.clone(), Protocol::Anthropic, body, vec![], None)
+        .await
+        .expect("dispatch 应成功");
+    assert_eq!(resp.status(), 200);
+    {
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(
+            reqs[0]["max_tokens"], 131_072,
+            "客户端未设上限时应按模型输出上限兜底: {}",
+            reqs[0]
+        );
+    }
+
+    // 无模型元数据时退回常量兜底（必填字段仍须发送）
+    db.delete_model("claude-x").unwrap();
+    let body = json!({
+        "model": "test-model",
+        "messages": [{ "role": "user", "content": "Hi" }],
+    });
+    let resp = dispatch::handle_request(state, Protocol::Anthropic, body, vec![], None)
+        .await
+        .expect("dispatch 应成功");
+    assert_eq!(resp.status(), 200);
+    let reqs = captured.lock().unwrap();
+    assert_eq!(reqs.len(), 2);
+    assert_eq!(reqs[1]["max_tokens"], 4096, "无元数据时落常量兜底: {}", reqs[1]);
 }
 
 /// 恒返回同一段 SSE 的 mock Anthropic 上游（流式测试用）。

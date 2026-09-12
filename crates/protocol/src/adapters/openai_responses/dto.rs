@@ -8,9 +8,6 @@ pub const OBJECT_RESPONSE: &str = "response";
 /// Responses API 路径（作为上游时拼接到 base_url 之后）。
 pub const RESPONSES_PATH: &str = "/v1/responses";
 
-/// 未指定 max_tokens 时的兜底值（Responses 用 `max_output_tokens`）。
-pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4096;
-
 /// Responses 流式 SSE 事件名（本实现覆盖的最小子集）。
 pub mod event {
     pub const CREATED: &str = "response.created";
