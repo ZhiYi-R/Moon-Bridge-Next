@@ -70,6 +70,24 @@ pub fn endpoints_from_provider(p: &Provider) -> Result<Vec<ProviderEndpoint>> {
     Ok(out)
 }
 
+/// 查 models 表取模型输出 token 上限（u32 口径；无记录/非正数/溢出均为 None，
+/// 读取失败仅告警——元数据缺失不应阻断主请求）。
+///
+/// 供「max_tokens 必填」的上游协议（Anthropic）在客户端未设上限时兜底取值，
+/// 不凭空注入小值截断输出；其余协议客户端没给就不发送该字段。
+pub fn model_output_limit(db: &Database, model: &str) -> Option<u32> {
+    match db.get_model(model) {
+        Ok(m) => m
+            .and_then(|m| m.max_output_tokens)
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|v| *v > 0),
+        Err(e) => {
+            tracing::warn!(error = %e, model = %model, "读取模型输出上限失败");
+            None
+        }
+    }
+}
+
 /// 模型路由器（无状态；每次解析直接查库，便于配置热更新即时生效）。
 pub struct Router;
 

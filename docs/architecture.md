@@ -215,13 +215,13 @@ function MB.on_request(ctx, req) ... end -- 就地修改 req 即生效，亦可 
 
 SQLite（rusqlite, bundled + WAL），手写版本化 migration，每表一个 DAO 模块，统一由 `Database` 暴露。并发模型：单连接 + `parking_lot::Mutex` 串行化（本地网关低并发足够）。
 
-当前 schema 版本 **V6**（`schema.rs` 的 `MIGRATIONS` 按版本升序手写，`schema_version` 表记录已应用版本）。
+当前 schema 版本 **V8**（`schema.rs` 的 `MIGRATIONS` 按版本升序手写，`schema_version` 表记录已应用版本）。
 
 | 表 | 关键列 |
 |----|--------|
 | `providers` | key PK, version, user_agent, web_search_json, extra_json, enabled, timestamps。**注意：`protocol` / `base_url` / `api_key_enc` 三列已分别由 V3、V4 删除**，迁至 `provider_endpoints` |
 | `provider_endpoints` | provider_key + idx PK, protocol, base_url, api_key_enc —— 一个 Provider 持多端点，**每端点独立协议与独立 API Key**；按 `idx` 升序故障转移 |
-| `models` | slug PK, display_name, context_window, modalities_json, reasoning_levels_json, pricing_json, extra_json |
+| `models` | slug PK, display_name, context_window, **max_output_tokens（V8，可空；models.dev `limit.output`）**, modalities_json, reasoning_levels_json, extra_json。**注意：`pricing_json` 已由 V7 删除**，定价口径统一在 offers |
 | `offers` | provider_key + model_slug PK, pricing_json, **endpoint_protocol（V6，可空）** —— 非空时该模型只走 provider 中匹配该协议的端点，为空则全端点按 idx 故障转移 |
 | `routes` | alias PK, model_slug, provider_key, extra_json |
 | `plugins` | name PK, source(lua), script_ref, enabled, config_json, scopes_json, capabilities_json |

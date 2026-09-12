@@ -93,7 +93,41 @@ mod tests {
     #[test]
     fn migrates_and_reports_version() {
         let db = Database::open_in_memory().unwrap();
-        assert_eq!(db.version().unwrap(), 7);
+        assert_eq!(db.version().unwrap(), 8);
+    }
+
+    /// 回归：V8 新增 max_output_tokens 列须随模型定义往返（供上游必填
+    /// max_tokens 的协议按模型真实输出上限兜底）。
+    #[test]
+    fn model_max_output_tokens_roundtrip() {
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_model(&ModelDef {
+            slug: "m".into(),
+            display_name: None,
+            context_window: Some(200_000),
+            max_output_tokens: Some(64_000),
+            modalities: None,
+            reasoning_levels: None,
+            extra: serde_json::Value::Null,
+        })
+        .unwrap();
+        assert_eq!(
+            db.get_model("m").unwrap().unwrap().max_output_tokens,
+            Some(64_000)
+        );
+        // 更新为 None / 未建模型的 slug 均须原样往返
+        db.upsert_model(&ModelDef {
+            slug: "m".into(),
+            display_name: None,
+            context_window: None,
+            max_output_tokens: None,
+            modalities: None,
+            reasoning_levels: None,
+            extra: serde_json::Value::Null,
+        })
+        .unwrap();
+        assert_eq!(db.get_model("m").unwrap().unwrap().max_output_tokens, None);
+        assert!(db.get_model("absent").unwrap().is_none());
     }
 
     #[test]

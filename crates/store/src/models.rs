@@ -64,6 +64,10 @@ pub struct ModelDef {
     pub display_name: Option<String>,
     #[serde(default)]
     pub context_window: Option<i64>,
+    /// 输出 token 上限（models.dev `limit.output`）。Anthropic 等要求必填
+    /// `max_tokens` 的上游协议在客户端未设上限时以此兜底，不凭空注入小值。
+    #[serde(default)]
+    pub max_output_tokens: Option<i64>,
     #[serde(default)]
     pub modalities: Option<Value>,
     #[serde(default)]

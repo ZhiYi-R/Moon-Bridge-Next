@@ -111,8 +111,9 @@ impl HostBridge for GatewayBridge {
                 last_err = format!("无上游 Adapter 支持协议 {}", ep.protocol);
                 continue;
             };
-            let ctx = ReqCtx::new("plugin-invoke", Protocol::OpenAiResponse)
+            let mut ctx = ReqCtx::new("plugin-invoke", Protocol::OpenAiResponse)
                 .with_route(ep.protocol, provider.to_string());
+            ctx.upstream_max_output_tokens = router::model_output_limit(&self.db, model);
             let up = match adapter.from_core_request(&ctx, &req, ep).await {
                 Ok(u) => u,
                 Err(e) => return Err(e.to_string()),

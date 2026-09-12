@@ -46,6 +46,8 @@ export interface ModelDef {
   slug: string;
   displayName?: string | null;
   contextWindow?: number | null;
+  /** 输出 token 上限（models.dev limit.output）；Anthropic 类上游在客户端未设上限时以此兜底。 */
+  maxOutputTokens?: number | null;
   modalities?: Json;
   reasoningLevels?: Json;
   extra: Json;
@@ -66,6 +68,8 @@ export interface CatalogModel {
   id: string;
   name?: string | null;
   contextWindow?: number | null;
+  /** 输出 token 上限（models.dev limit.output）。 */
+  maxOutputTokens?: number | null;
   modalities: string[];
   reasoningLevels: string[];
   /** 定价（USD / 1M tokens），仅含有值项：input/output/cache_read/cache_write/reasoning。 */

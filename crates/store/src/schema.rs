@@ -142,6 +142,11 @@ const V6: &str = "ALTER TABLE offers ADD COLUMN endpoint_protocol TEXT;";
 /// 对应 provider 的 offer）。
 const V7: &str = "ALTER TABLE models DROP COLUMN pricing_json;";
 
+/// V8：models 增加 `max_output_tokens`（模型输出 token 上限，来自 models.dev
+/// `limit.output`）。供 Anthropic 等要求 `max_tokens` 必填的上游协议在客户端未设
+/// 上限时按模型真实上限兜底——避免凭空注入 4096 之类的小值把输出截断。
+const V8: &str = "ALTER TABLE models ADD COLUMN max_output_tokens INTEGER;";
+
 /// 全部 migration，按版本升序。
 const MIGRATIONS: &[Migration] = &[
     Migration { version: 1, sql: V1 },
@@ -151,6 +156,7 @@ const MIGRATIONS: &[Migration] = &[
     Migration { version: 5, sql: V5 },
     Migration { version: 6, sql: V6 },
     Migration { version: 7, sql: V7 },
+    Migration { version: 8, sql: V8 },
 ];
 
 /// 对连接执行 migration（幂等）。

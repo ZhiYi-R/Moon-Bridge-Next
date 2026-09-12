@@ -55,6 +55,7 @@ interface ModelForm {
   slug: string;
   displayName: string;
   contextWindow: string;
+  maxOutputTokens: string;
   modalities: string[];
   reasoningLevels: string[];
   extraText: string;
@@ -79,6 +80,7 @@ const form = reactive<ModelForm>({
   slug: "",
   displayName: "",
   contextWindow: "",
+  maxOutputTokens: "",
   modalities: [],
   reasoningLevels: [],
   extraText: "{}",
@@ -98,6 +100,7 @@ function newModel() {
     slug: "",
     displayName: "",
     contextWindow: "",
+    maxOutputTokens: "",
     modalities: [],
     reasoningLevels: [],
     extraText: "{}",
@@ -112,6 +115,7 @@ function editModel(m: ModelDef) {
     slug: m.slug,
     displayName: m.displayName ?? "",
     contextWindow: m.contextWindow != null ? String(m.contextWindow) : "",
+    maxOutputTokens: m.maxOutputTokens != null ? String(m.maxOutputTokens) : "",
     modalities: Array.isArray(m.modalities)
       ? (m.modalities as string[]).filter((v) => v !== "text")
       : [],
@@ -144,10 +148,19 @@ async function saveModel() {
       return;
     }
   }
+  let maxOutputTokens: number | null = null;
+  if (form.maxOutputTokens.trim()) {
+    maxOutputTokens = Number(form.maxOutputTokens);
+    if (Number.isNaN(maxOutputTokens)) {
+      error.value = "输出上限须为数字";
+      return;
+    }
+  }
   const rec: ModelDef = {
     slug,
     displayName: form.displayName.trim() || null,
     contextWindow,
+    maxOutputTokens,
     modalities: form.modalities.length ? ["text", ...form.modalities] : null,
     reasoningLevels: form.reasoningLevels.length ? form.reasoningLevels : null,
     extra,
@@ -472,9 +485,14 @@ onMounted(async () => {
           <Label for="m-name">显示名</Label>
           <Input id="m-name" v-model="form.displayName" placeholder="Claude Sonnet 4" />
         </div>
-        <div class="space-y-1.5 col-span-2">
+        <div class="space-y-1.5">
           <Label for="m-ctx">上下文窗口</Label>
           <Input id="m-ctx" v-model="form.contextWindow" placeholder="200000" inputmode="numeric" />
+        </div>
+        <div class="space-y-1.5">
+          <Label for="m-maxout">输出上限</Label>
+          <Input id="m-maxout" v-model="form.maxOutputTokens" placeholder="64000" inputmode="numeric" />
+          <p class="text-xs text-muted-foreground">Anthropic 类上游在客户端未设上限时以此兜底</p>
         </div>
         <div class="space-y-1.5">
           <Label>模态</Label>
@@ -561,6 +579,7 @@ onMounted(async () => {
                 <th class="py-2 font-medium">模型</th>
                 <th class="py-2 font-medium">Provider</th>
                 <th class="py-2 font-medium">上下文</th>
+                <th class="py-2 font-medium">输出上限</th>
                 <th class="py-2 font-medium">输入/输出</th>
                 <th class="py-2 font-medium">状态</th>
               </tr>
@@ -586,6 +605,7 @@ onMounted(async () => {
                 </td>
                 <td class="py-1.5 text-xs text-muted-foreground">{{ m.providerName }}</td>
                 <td class="py-1.5 tabular-nums text-muted-foreground">{{ formatCtx(m.contextWindow) }}</td>
+                <td class="py-1.5 tabular-nums text-muted-foreground">{{ formatCtx(m.maxOutputTokens) }}</td>
                 <td class="py-1.5 tabular-nums text-muted-foreground">{{ catalogPrice(m) }}</td>
                 <td class="py-1.5">
                   <span v-if="existingSlugs.has(m.id)" class="text-xs text-muted-foreground">已存在</span>
@@ -639,6 +659,7 @@ onMounted(async () => {
                 <th class="py-2 font-medium">标识</th>
                 <th class="py-2 font-medium">显示名</th>
                 <th class="py-2 font-medium">上下文窗口</th>
+                <th class="py-2 font-medium">输出上限</th>
                 <th class="py-2 font-medium">操作</th>
               </tr>
             </thead>
@@ -648,6 +669,9 @@ onMounted(async () => {
                 <td class="py-2">{{ m.displayName ?? "—" }}</td>
                 <td class="py-2 tabular-nums text-muted-foreground">
                   {{ formatCtx(m.contextWindow) }}
+                </td>
+                <td class="py-2 tabular-nums text-muted-foreground">
+                  {{ formatCtx(m.maxOutputTokens) }}
                 </td>
                 <td class="py-2">
                   <div class="flex justify-center gap-0.5">

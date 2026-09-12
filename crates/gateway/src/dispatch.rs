@@ -111,6 +111,8 @@ pub async fn handle_request(
     ctx = ctx.with_route(resolved.protocol, resolved.provider_key.clone());
     ctx.route_alias = resolved.route_alias.clone();
     ctx.upstream_model = Some(resolved.upstream_model.clone());
+    ctx.upstream_max_output_tokens =
+        crate::router::model_output_limit(&state.db, &resolved.upstream_model);
 
     // ── [CORE] 请求钩子 + 工具注入 ──
     state
