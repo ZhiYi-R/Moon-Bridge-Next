@@ -184,7 +184,7 @@ onUnmounted(() => {
       v-if="open"
       ref="popoverRef"
       class="fixed z-[60] max-h-60 overflow-y-auto rounded-md border bg-popover p-1 shadow-md scrollbar-thin"
-      :style="floatStyle"
+      :style="{ ...floatStyle, minWidth: 'max(100%, 11rem)' }"
     >
       <div v-if="searchable" class="relative mb-1">
         <Search class="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />

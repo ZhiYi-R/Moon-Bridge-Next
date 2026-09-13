@@ -1,16 +1,20 @@
 <script setup lang="ts">
 import { RefreshCw, Trash2 } from "lucide-vue-next";
-import { computed, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 
 import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
 import Card from "@/components/ui/Card.vue";
+import CodeEditor from "@/components/ui/CodeEditor.vue";
 import Input from "@/components/ui/Input.vue";
 import { appApi, errMsg, traceApi, type TraceDetail, type TraceEntry } from "@/lib/api";
 import { formatBytes, formatLatency, formatTimeMs, formatTokens } from "@/lib/utils";
 import { useConfirm } from "@/composables/useConfirm";
+import { usePointerDrag } from "@/composables/usePointerDrag";
+import { useToast } from "@/composables/useToast";
 
 const { confirm } = useConfirm();
+const toast = useToast();
 const entries = ref<TraceEntry[]>([]);
 const error = ref<string | null>(null);
 const loading = ref(false);
@@ -28,7 +32,12 @@ const tpsText = computed(() => {
   return `${(d.usage.outputTokens / genSec).toFixed(1)} tok/s`;
 });
 
-/** 报文区数据：旧 trace 无响应快照且 error 存有响应体时，兜底展示到「上游响应」。 */
+/** 超过该体积的报文不走 CodeMirror 高亮（大 JSON 语法解析成本高），回退纯文本 <pre>。 */
+const HIGHLIGHT_LIMIT = 256 * 1024;
+const encoder = new TextEncoder();
+
+/** 报文区数据：旧 trace 无响应快照且 error 存有响应体时，兜底展示到「上游响应」。
+ *  pretty 结果与行数在此一次性算好，避免模板里对 MB 级报文重复 stringify/split。 */
 const sections = computed(() => {
   const d = detail.value;
   if (!d) return [];
@@ -39,7 +48,18 @@ const sections = computed(() => {
     { title: "上游请求", body: d.upstreamRequest },
     { title: "上游响应", body: upstreamResponse },
     { title: "客户端响应", body: d.clientResponse },
-  ];
+  ].map((s) => {
+    const text = pretty(s.body);
+    return {
+      ...s,
+      text,
+      bytes: encoder.encode(text).length,
+      big: text.length > HIGHLIGHT_LIMIT,
+      lines: text.split("\n").length,
+      /** null 报文：记录被关闭、旧版流式 trace 未聚合，或该段本无内容。 */
+      empty: s.body === null || s.body === undefined,
+    };
+  });
 });
 
 const filtered = computed(() => {
@@ -65,10 +85,16 @@ async function load() {
   }
 }
 
-async function open(entry: TraceEntry) {
+async function open(entry: TraceEntry, scroll = false) {
   selected.value = entry;
   detail.value = null;
   detailLoading.value = true;
+  if (scroll) {
+    await nextTick();
+    listEl.value
+      ?.querySelector('[data-selected="true"]')
+      ?.scrollIntoView({ block: "nearest" });
+  }
   try {
     detail.value = await traceApi.read(entry.relPath);
   } catch (e) {
@@ -82,6 +108,7 @@ async function remove(entry: TraceEntry) {
   if (!(await confirm({ title: "删除 trace", message: `确认删除 trace “${entry.relPath}”？` }))) return;
   try {
     await traceApi.remove(entry.relPath);
+    toast.success("trace 已删除");
     if (selected.value?.relPath === entry.relPath) {
       selected.value = null;
       detail.value = null;
@@ -94,6 +121,8 @@ async function remove(entry: TraceEntry) {
 
 function pretty(v: unknown): string {
   if (v === null || v === undefined) return "—";
+  // 字符串原样输出（SSE 报文等），不再套 JSON 引号转义
+  if (typeof v === "string") return v;
   try {
     return JSON.stringify(v, null, 2);
   } catch {
@@ -101,7 +130,48 @@ function pretty(v: unknown): string {
   }
 }
 
+/** 报文编辑器高度：按行数自适应，夹取 [6rem, 18rem]，小 body 不留大片空白。 */
+function editorHeight(lines: number): string {
+  const px = Math.min(288, Math.max(96, lines * 17 + 24));
+  return `${px}px`;
+}
+
+// ── 左栏拖拽调宽（240–560px，持久化） ──
+const LIST_WIDTH_KEY = "traces-list-width";
+const listWidth = ref(
+  Math.min(560, Math.max(240, Number(localStorage.getItem(LIST_WIDTH_KEY)) || 360)),
+);
+const listEl = ref<HTMLElement | null>(null);
+
+let startW = listWidth.value;
+const startResize = usePointerDrag(
+  (dx) => {
+    listWidth.value = Math.min(560, Math.max(240, startW + dx));
+  },
+  {
+    onStart: () => {
+      startW = listWidth.value;
+    },
+    onEnd: () => localStorage.setItem(LIST_WIDTH_KEY, String(listWidth.value)),
+  },
+);
+
+// ── 键盘导航：↑/↓ 在过滤后的列表中移动选中（输入框/编辑器内不劫持） ──
+function onKey(e: KeyboardEvent) {
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+  const t = e.target as HTMLElement | null;
+  if (t?.closest("input, textarea, select, [contenteditable], .cm-editor")) return;
+  const list = filtered.value;
+  if (list.length === 0) return;
+  e.preventDefault();
+  const i = list.findIndex((x) => x.relPath === selected.value?.relPath);
+  const next =
+    i < 0 ? 0 : e.key === "ArrowDown" ? Math.min(list.length - 1, i + 1) : Math.max(0, i - 1);
+  void open(list[next], true);
+}
+
 onMounted(async () => {
+  document.addEventListener("keydown", onKey);
   await load();
   try {
     traceDir.value = (await appApi.info()).traceDir;
@@ -109,6 +179,8 @@ onMounted(async () => {
     // 忽略：仅展示用途
   }
 });
+
+onUnmounted(() => document.removeEventListener("keydown", onKey));
 </script>
 
 <template>
@@ -120,12 +192,12 @@ onMounted(async () => {
       {{ error }}
     </div>
 
-    <!-- 主从一体卡：左列表 / 右详情，中缝分齐，高度填满视口（桌面固定双栏，轨道 minmax(0,1fr) 防长内容撑破） -->
-    <Card class="grid min-h-0 flex-1 grid-cols-[360px_minmax(0,1fr)] divide-x divide-border overflow-hidden">
+    <!-- 主从一体卡：左列表（可拖宽） / 右详情，高度填满视口 -->
+    <Card class="flex min-h-0 flex-1 overflow-hidden">
       <!-- 列表 -->
-      <section class="flex min-h-0 flex-col">
+      <section ref="listEl" class="flex min-h-0 shrink-0 flex-col" :style="{ width: listWidth + 'px' }">
         <div class="flex shrink-0 items-center gap-2 border-b p-3">
-          <Input v-model="filter" placeholder="按会话 / 模型 / 文件名过滤…" class="flex-1" />
+          <Input v-model="filter" placeholder="按会话 / 模型 / 文件名过滤…(↑↓ 切换)" class="flex-1" />
           <Button
             variant="ghost"
             size="icon"
@@ -139,7 +211,13 @@ onMounted(async () => {
         </div>
         <div class="scrollbar-thin min-h-0 flex-1 overflow-y-auto p-3">
           <div
-            v-if="filtered.length === 0"
+            v-if="loading && filtered.length === 0"
+            class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
+          >
+            加载中…
+          </div>
+          <div
+            v-else-if="filtered.length === 0"
             class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
           >
             暂无 trace。启动网关并发起请求后将在此显示。
@@ -148,6 +226,7 @@ onMounted(async () => {
             <li
               v-for="e in filtered"
               :key="e.relPath"
+              :data-selected="selected?.relPath === e.relPath"
               class="group cursor-pointer rounded-lg border p-2.5 transition-colors hover:bg-accent"
               :class="selected?.relPath === e.relPath && 'border-primary bg-accent'"
               @click="open(e)"
@@ -163,7 +242,7 @@ onMounted(async () => {
                   {{ e.session }}
                 </span>
                 <button
-                  class="shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
+                  class="shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus:opacity-100 group-hover:opacity-100"
                   title="删除"
                   @click.stop="remove(e)"
                 >
@@ -185,8 +264,15 @@ onMounted(async () => {
         </div>
       </section>
 
+      <!-- 拖拽分栏把手 -->
+      <div
+        class="w-1 shrink-0 cursor-col-resize border-l transition-colors hover:bg-primary/40 active:bg-primary/60"
+        title="拖拽调整列表宽度"
+        @pointerdown="startResize"
+      />
+
       <!-- 详情 -->
-      <section class="flex min-h-0 min-w-0 flex-col">
+      <section class="flex min-h-0 min-w-0 flex-1 flex-col">
         <div v-if="!selected" class="flex h-full items-center justify-center">
           <p class="text-sm text-muted-foreground">从左侧选择一条 trace 查看详情。</p>
         </div>
@@ -235,13 +321,33 @@ onMounted(async () => {
                 <dd class="font-mono">{{ formatTimeMs(detail.createdAt) }}</dd>
               </dl>
 
-              <!-- 各阶段报文 -->
+              <!-- 各阶段报文：小报文只读高亮，大报文回退纯文本（快得多） -->
               <section v-for="sec in sections" :key="sec.title">
-                <h4 class="mb-1 text-xs font-semibold text-muted-foreground">{{ sec.title }}</h4>
-                <pre
-                  class="scrollbar-thin max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted p-3 font-mono text-[11px] leading-relaxed"
-                  >{{ pretty(sec.body) }}</pre
+                <h4 class="mb-1 flex items-baseline justify-between text-xs font-semibold text-muted-foreground">
+                  {{ sec.title }}
+                  <span v-if="!sec.empty" class="font-normal">
+                    {{ formatBytes(sec.bytes) }}
+                    <template v-if="sec.big">· 过大，已关闭高亮</template>
+                  </span>
+                </h4>
+                <div
+                  v-if="sec.empty"
+                  class="rounded-md border border-dashed px-3 py-2.5 text-xs text-muted-foreground"
                 >
+                  {{ detail.stream ? "未记录（旧版 trace / 记录已关闭 / 流未产出内容）" : "未记录" }}
+                </div>
+                <pre
+                  v-else-if="sec.big"
+                  class="scrollbar-thin max-h-96 overflow-auto whitespace-pre rounded-md bg-muted p-3 font-mono text-[11px] leading-relaxed"
+                  >{{ sec.text }}</pre
+                >
+                <CodeEditor
+                  v-else
+                  :model-value="sec.text"
+                  lang="json"
+                  readonly
+                  :height="editorHeight(sec.lines)"
+                />
               </section>
             </div>
           </div>

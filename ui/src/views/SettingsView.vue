@@ -7,20 +7,21 @@ import Card from "@/components/ui/Card.vue";
 import Input from "@/components/ui/Input.vue";
 import Label from "@/components/ui/Label.vue";
 import Select from "@/components/ui/Select.vue";
+import { useToast } from "@/composables/useToast";
 import { appApi, errMsg, type AppConfig, type AppInfo } from "@/lib/api";
 import { useGatewayStore } from "@/stores/gateway";
 
 const gateway = useGatewayStore();
+const toast = useToast();
 const info = ref<AppInfo | null>(null);
 const error = ref<string | null>(null);
-const saved = ref(false);
 
 const form = reactive<AppConfig>({
   gateway: {
     addr: "127.0.0.1:38440",
     authToken: null,
     egressProxy: null,
-    maxBodyBytes: 8388608,
+    maxBodyBytes: 104857600,
     requestTimeoutSecs: 300,
     traceDir: null,
     traceRecordBodies: true,
@@ -52,8 +53,8 @@ function bytesToUnit(b: number): { v: string; unit: string } {
   return { v: String(b), unit: "1" };
 }
 
-/** 分区折叠状态，默认收起。 */
-const gwOpen = ref(false);
+/** 分区折叠状态：主配置默认展开，应用信息默认收起。 */
+const gwOpen = ref(true);
 const infoOpen = ref(false);
 
 onMounted(async () => {
@@ -85,15 +86,19 @@ function payload(): AppConfig {
   };
 }
 
+const saving = ref(false);
+
 async function save(restart = false) {
+  saving.value = true;
   try {
     await appApi.setConfig(payload());
-    saved.value = true;
-    setTimeout(() => (saved.value = false), 2000);
     if (restart) await gateway.restart();
     error.value = null;
+    toast.success(restart ? "设置已保存，网关已重启" : "设置已保存");
   } catch (e) {
     error.value = errMsg(e);
+  } finally {
+    saving.value = false;
   }
 }
 </script>
@@ -119,7 +124,7 @@ async function save(restart = false) {
         />
       </button>
       <div v-show="gwOpen">
-        <div class="card-content grid gap-4 border-t grid-cols-2">
+        <div class="card-content grid gap-4 border-t grid-cols-[repeat(auto-fit,minmax(16rem,1fr))]">
           <div class="space-y-1.5">
             <Label for="s-addr">监听地址</Label>
             <Input id="s-addr" v-model="form.gateway.addr" placeholder="127.0.0.1:38440" />
@@ -154,7 +159,7 @@ async function save(restart = false) {
             <Label for="s-timeout">上游超时</Label>
             <Input id="s-timeout" v-model="form.gateway.requestTimeoutSecs" type="number" placeholder="60" />
           </div>
-          <div class="col-span-2 space-y-1.5">
+          <div class="col-span-full space-y-1.5">
             <Label for="s-retention">trace 保留条数</Label>
             <Input
               id="s-retention"
@@ -164,7 +169,7 @@ async function save(restart = false) {
               placeholder="500"
             />
           </div>
-          <div class="col-span-2 flex flex-col gap-2.5 border-t pt-4">
+          <div class="col-span-full flex flex-col gap-2.5 border-t pt-4">
             <div class="flex items-center gap-2">
               <input
                 id="s-marker"
@@ -190,9 +195,8 @@ async function save(restart = false) {
           </div>
         </div>
         <div class="flex shrink-0 justify-end gap-2 border-t px-5 py-3">
-          <span v-if="saved" class="mr-auto text-sm text-emerald-400">已保存</span>
-          <Button variant="outline" size="sm" @click="save(false)">保存</Button>
-          <Button size="sm" @click="save(true)">保存并重启网关</Button>
+          <Button variant="outline" size="sm" :disabled="saving" @click="save(false)">保存</Button>
+          <Button size="sm" :disabled="saving" @click="save(true)">保存并重启网关</Button>
         </div>
       </div>
     </Card>

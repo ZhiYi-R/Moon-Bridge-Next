@@ -11,6 +11,7 @@ import Modal from "@/components/ui/Modal.vue";
 import Pagination from "@/components/ui/Pagination.vue";
 import Select from "@/components/ui/Select.vue";
 import { useConfirm } from "@/composables/useConfirm";
+import { useToast } from "@/composables/useToast";
 import {
   errMsg,
   modelApi,
@@ -28,6 +29,7 @@ import { useProviderStore } from "@/stores/provider";
 const store = useProviderStore();
 const gateway = useGatewayStore();
 const { confirm } = useConfirm();
+const toast = useToast();
 /** 弹窗内错误（表单校验 / 保存失败） */
 const error = ref<string | null>(null);
 /** 列表操作错误（弹窗外展示） */
@@ -207,7 +209,33 @@ function resetPluginStates() {
   for (const p of pluginList.value) pluginStates[p.name] = "inherit";
 }
 
-function newProvider() {
+// ── 未保存关闭守卫：弹窗打开并加载完绑定后拍快照，关闭时比对 ──
+const formSnapshot = ref("");
+
+function takeSnapshot() {
+  formSnapshot.value = JSON.stringify({ f: form, o: providerOffers.value, p: pluginStates });
+}
+
+const dirty = computed(
+  () =>
+    JSON.stringify({ f: form, o: providerOffers.value, p: pluginStates }) !== formSnapshot.value,
+);
+
+/** Modal guard：有未保存修改时先确认再关闭。 */
+async function closeGuard(): Promise<boolean> {
+  if (!dirty.value) return true;
+  return confirm({
+    title: "关闭编辑",
+    message: "有未保存的修改，确认丢弃并关闭？",
+    confirmText: "丢弃修改",
+  });
+}
+
+async function tryClose() {
+  if (await closeGuard()) closeModal();
+}
+
+async function newProvider() {
   Object.assign(form, emptyProvider());
   error.value = null;
   editing.value = true;
@@ -215,7 +243,8 @@ function newProvider() {
   providerOffers.value = [];
   originalOffers.value = [];
   void loadModelsOnce();
-  void loadPluginStates("");
+  await loadPluginStates("");
+  takeSnapshot();
 }
 
 /** 关闭弹窗并清除表单错误 */
@@ -233,6 +262,7 @@ async function editProvider(p: Provider) {
   void loadModelsOnce();
   await loadOfferBindings(p.key);
   await loadPluginStates(p.key);
+  takeSnapshot();
 }
 
 async function save() {
@@ -271,6 +301,7 @@ async function save() {
     if (bindingsChanged) await gateway.restart();
     // 端点勾选的模型绑定 diff 写入报价
     await saveOfferChanges();
+    toast.success(`上游服务 “${form.key}” 已保存`);
     closeModal();
   } catch (e) {
     error.value = errMsg(e);
@@ -281,6 +312,7 @@ async function remove(key: string) {
   if (!(await confirm({ title: "删除上游服务", message: `确认删除上游服务 “${key}”？` }))) return;
   try {
     await store.remove(key);
+    toast.success(`上游服务 “${key}” 已删除`);
   } catch (e) {
     listError.value = errMsg(e);
   }
@@ -308,14 +340,19 @@ onMounted(() => {
     </div>
 
     <!-- 编辑弹窗 -->
-    <Modal :open="editing" :title="form.createdAt ? '编辑上游服务' : '新建上游服务'" @close="closeModal">
+    <Modal
+      :open="editing"
+      :title="form.createdAt ? '编辑上游服务' : '新建上游服务'"
+      :guard="closeGuard"
+      @close="closeModal"
+    >
       <div
         v-if="error"
         class="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
       >
         {{ error }}
       </div>
-      <div class="grid gap-4 grid-cols-2">
+      <div class="grid gap-4 grid-cols-[repeat(auto-fit,minmax(14rem,1fr))]">
         <div class="space-y-1.5">
           <Label for="p-key">唯一标识</Label>
           <Input id="p-key" v-model="form.key" placeholder="如 deepseek" :disabled="!!form.createdAt" />
@@ -324,7 +361,7 @@ onMounted(() => {
           <Label for="p-version">协议版本头</Label>
           <Input id="p-version" v-model="form.version" placeholder="2023-06-01" />
         </div>
-        <div class="flex items-center gap-2 col-span-2">
+        <div class="flex items-center gap-2 col-span-full">
           <input id="p-enabled" v-model="form.enabled" type="checkbox" class="size-4 accent-primary" />
           <Label for="p-enabled">启用</Label>
         </div>
@@ -337,7 +374,7 @@ onMounted(() => {
           <span class="text-xs text-muted-foreground">按序故障转移；Key 留空沿用上一非空 Key</span>
         </div>
         <!-- 列头 -->
-        <div class="grid grid-cols-[10rem_1fr_1fr_2rem] items-center gap-2 text-xs text-muted-foreground">
+        <div class="grid grid-cols-[8.5rem_minmax(0,1fr)_minmax(0,1fr)_2rem] items-center gap-2 text-xs text-muted-foreground">
           <span>协议</span>
           <span>Base URL</span>
           <span>API Key</span>
@@ -346,7 +383,7 @@ onMounted(() => {
         <div
           v-for="(ep, i) in form.endpoints"
           :key="i"
-          class="grid grid-cols-[10rem_1fr_1fr_2rem] items-center gap-2"
+          class="grid grid-cols-[8.5rem_minmax(0,1fr)_minmax(0,1fr)_2rem] items-center gap-2"
         >
           <Select v-model="ep.protocol" :options="protocolOptions" />
           <Input v-model="ep.baseUrl" placeholder="https://api.anthropic.com" />
@@ -391,7 +428,7 @@ onMounted(() => {
                   <span class="font-mono text-xs">{{ m.slug }}</span>
                   <span v-if="m.displayName" class="text-xs text-muted-foreground">{{ m.displayName }}</span>
                 </label>
-                <p
+                <div
                   v-if="filteredEpModels.total > EP_PAGE_SIZE"
                   class="border-t pt-2"
                 >
@@ -400,7 +437,7 @@ onMounted(() => {
                     :page-count="filteredEpModels.pageCount"
                     :total="filteredEpModels.total"
                   />
-                </p>
+                </div>
               </div>
             </div>
           </div>
@@ -434,7 +471,7 @@ onMounted(() => {
       </div>
 
       <template #footer>
-        <Button variant="ghost" size="sm" @click="closeModal">取消</Button>
+        <Button variant="ghost" size="sm" @click="tryClose">取消</Button>
         <Button size="sm" @click="save">保存</Button>
       </template>
     </Modal>
@@ -448,40 +485,46 @@ onMounted(() => {
       </div>
       <div class="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">
         <div
-          v-if="store.providers.length === 0"
+          v-if="store.loading && store.providers.length === 0"
+          class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
+        >
+          加载中…
+        </div>
+        <div
+          v-else-if="store.providers.length === 0"
           class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
         >
           暂无上游服务，点击「新建」添加。
         </div>
-        <table v-else class="w-full text-center text-sm">
+        <table v-else class="w-full text-sm">
           <thead class="thead-sticky">
-            <tr class="border-b text-center text-muted-foreground">
+            <tr class="border-b text-left text-muted-foreground">
               <th class="py-2 font-medium">Key</th>
               <th class="py-2 font-medium">协议</th>
               <th class="py-2 font-medium">端点</th>
-              <th class="py-2 font-medium">状态</th>
-              <th class="py-2 font-medium">操作</th>
+              <th class="py-2 text-center font-medium">状态</th>
+              <th class="w-20 py-2 text-center font-medium">操作</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="p in store.providers" :key="p.key" class="border-b last:border-0">
               <td class="py-2 font-mono text-xs">{{ p.key }}</td>
               <td class="py-2 font-mono text-xs text-muted-foreground">{{ endpointProtocols(p) }}</td>
-              <td class="max-w-[280px] truncate py-2 text-muted-foreground">
+              <td class="max-w-[280px] truncate py-2 text-muted-foreground" :title="p.endpoints[0]?.baseUrl">
                 {{ p.endpoints[0]?.baseUrl }}
                 <span v-if="p.endpoints.length > 1" class="ml-1 font-mono text-xs">×{{ p.endpoints.length }}</span>
               </td>
-              <td class="py-2">
+              <td class="py-2 text-center">
                 <Badge :variant="p.enabled ? 'success' : 'secondary'">
                   {{ p.enabled ? "启用" : "停用" }}
                 </Badge>
               </td>
               <td class="py-2">
                 <div class="flex justify-center gap-0.5">
-                  <Button variant="ghost" size="icon" class="size-7" @click="editProvider(p)">
+                  <Button variant="ghost" size="icon" class="size-7" title="编辑" @click="editProvider(p)">
                     <Pencil class="size-3.5" />
                   </Button>
-                  <Button variant="ghost" size="icon" class="size-7" @click="remove(p.key)">
+                  <Button variant="ghost" size="icon" class="size-7" title="删除" @click="remove(p.key)">
                     <Trash2 class="size-3.5 text-destructive" />
                   </Button>
                 </div>

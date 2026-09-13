@@ -5,14 +5,16 @@ import { RouterView, useRoute } from "vue-router";
 import AppHeader from "@/components/layout/AppHeader.vue";
 import AppSidebar from "@/components/layout/AppSidebar.vue";
 import ConfirmHost from "@/components/ConfirmHost.vue";
+import ToastHost from "@/components/ui/ToastHost.vue";
 import { useGatewayStore } from "@/stores/gateway";
 
 const gateway = useGatewayStore();
 const route = useRoute();
 
-// 应用挂载后拉取一次网关状态（自启动可能仍在进行）
+// 应用挂载后开始轮询网关状态（自启动可能仍在进行，外部变更也要能感知）
 onMounted(() => {
   gateway.refresh();
+  gateway.startPolling();
 });
 </script>
 
@@ -31,5 +33,7 @@ onMounted(() => {
     </div>
     <!-- 全局确认弹窗（替代 window.confirm，与应用主题一致） -->
     <ConfirmHost />
+    <!-- 全局 toast 通知 -->
+    <ToastHost />
   </div>
 </template>

@@ -5,6 +5,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
 import Card from "@/components/ui/Card.vue";
+import Pagination from "@/components/ui/Pagination.vue";
 import { errMsg, modelApi, usageApi, type UsageRecord, type UsageSummary } from "@/lib/api";
 import { formatLatency, formatTime, formatTokens } from "@/lib/utils";
 
@@ -113,6 +114,8 @@ function timeBuckets(): TimeBucket[] {
 
 interface ModelBucket {
   model: string;
+  /** 聚合行的成员 slug（仅「其他」行有值，用于 tooltip）。 */
+  members?: string[];
   requests: number;
   input: number;
   output: number;
@@ -121,7 +124,11 @@ interface ModelBucket {
   pct: number;
 }
 
-/** 按模型聚合 token/请求/成本，按总量降序。 */
+/** 分布行数上限：超出聚合为「其他」行，避免卡片被拉长挤压下方明细表。 */
+const MAX_MODEL_ROWS = 3;
+const OTHER_MODEL = "__other__";
+
+/** 按模型聚合 token/请求/成本，按总量降序；Top 6 之外并入「其他」。 */
 function modelBuckets(): ModelBucket[] {
   const map = new Map<string, { requests: number; input: number; output: number; cost: number }>();
   for (const r of records.value) {
@@ -136,8 +143,25 @@ function modelBuckets(): ModelBucket[] {
   const arr = [...map.entries()]
     .map(([model, v]) => ({ model, ...v, total: v.input + v.output }))
     .sort((a, b) => b.total - a.total);
-  const max = Math.max(1, ...arr.map((a) => a.total).filter((n) => Number.isFinite(n)));
-  return arr.map((a) => ({ ...a, pct: a.total > 0 ? (a.total / max) * 100 : 0 }));
+
+  const rows: Omit<ModelBucket, "pct">[] = arr.slice(0, MAX_MODEL_ROWS);
+  const rest = arr.slice(MAX_MODEL_ROWS);
+  if (rest.length > 0) {
+    const agg = rest.reduce(
+      (a, b) => ({
+        requests: a.requests + b.requests,
+        input: a.input + b.input,
+        output: a.output + b.output,
+        cost: a.cost + b.cost,
+        total: a.total + b.total,
+      }),
+      { requests: 0, input: 0, output: 0, cost: 0, total: 0 },
+    );
+    rows.push({ model: OTHER_MODEL, members: rest.map((r) => r.model), ...agg });
+  }
+
+  const max = Math.max(1, ...rows.map((a) => a.total).filter((n) => Number.isFinite(n)));
+  return rows.map((a) => ({ ...a, pct: a.total > 0 ? (a.total / max) * 100 : 0 }));
 }
 
 const tBuckets = ref<TimeBucket[]>([]);
@@ -160,13 +184,13 @@ async function refresh() {
 
 // ───────────────── 明细分页（页面本身不滚动，列表翻页） ───────────────
 const PAGE_SIZE = 10;
-const page = ref(0);
+const page = ref(1);
 const pageCount = computed(() => Math.max(1, Math.ceil(records.value.length / PAGE_SIZE)));
 const pagedRecords = computed(() =>
-  records.value.slice(page.value * PAGE_SIZE, page.value * PAGE_SIZE + PAGE_SIZE),
+  records.value.slice((page.value - 1) * PAGE_SIZE, page.value * PAGE_SIZE),
 );
 watch(pageCount, (n) => {
-  if (page.value >= n) page.value = n - 1;
+  if (page.value > n) page.value = n;
 });
 </script>
 
@@ -199,8 +223,8 @@ watch(pageCount, (n) => {
       </span>
     </div>
 
-    <!-- 图表行：时序 + 模型分布并排，控制纵向占用 -->
-    <div class="grid shrink-0 gap-4 grid-cols-2">
+    <!-- 图表行：时序 + 模型分布并排；auto-fit 窄窗口自动堆叠 -->
+    <div class="grid shrink-0 gap-4 grid-cols-[repeat(auto-fit,minmax(20rem,1fr))]">
     <Card class="min-w-0 shrink-0">
       <div class="card-header">
         <h3 class="card-title">Token 消耗</h3>
@@ -257,7 +281,13 @@ watch(pageCount, (n) => {
         <ul v-else class="space-y-3">
           <li v-for="m in mBuckets" :key="m.model">
             <div class="mb-1 flex items-center justify-between text-sm">
-              <span class="text-xs" :title="m.model">{{ displayName(m.model) }}</span>
+              <span
+                class="text-xs"
+                :class="m.model === OTHER_MODEL && 'text-muted-foreground'"
+                :title="m.members?.join('、') ?? m.model"
+              >
+                {{ m.model === OTHER_MODEL ? `其他 ${m.members?.length ?? 0} 个模型` : displayName(m.model) }}
+              </span>
               <span class="text-xs text-muted-foreground">
                 {{ m.requests }} 次 · 输入 {{ formatTokens(m.input) }} / 输出 {{ formatTokens(m.output) }}
                 <template v-if="m.cost > 0"> · ${{ m.cost.toFixed(2) }}</template>
@@ -266,7 +296,8 @@ watch(pageCount, (n) => {
             <!-- 0/0（无 token）不渲染轨道：满宽空轨道看起来像满值进度条 -->
             <div v-if="m.total > 0" class="h-2.5 w-full overflow-hidden rounded-full bg-muted">
               <div
-                class="h-full rounded-full bg-primary/80"
+                class="h-full rounded-full"
+                :class="m.model === OTHER_MODEL ? 'bg-muted-foreground/50' : 'bg-primary/80'"
                 :style="{ width: (Number.isFinite(m.pct) ? m.pct : 0) + '%' }"
               ></div>
             </div>
@@ -276,8 +307,8 @@ watch(pageCount, (n) => {
     </Card>
     </div>
 
-    <!-- 明细表（客户端分页，内部滚动兜底，页面不出现整体滚动） -->
-    <Card class="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <!-- 明细表（客户端分页，内部滚动兜底；min-h 下限，极端矮窗口由页面滚动接管） -->
+    <Card class="flex min-h-[12rem] flex-1 flex-col overflow-hidden">
       <div class="card-header shrink-0 flex-row items-center justify-between space-y-0">
         <h3 class="card-title">最近记录</h3>
         <Button
@@ -293,24 +324,30 @@ watch(pageCount, (n) => {
       </div>
       <div class="card-content flex min-h-0 flex-1 flex-col">
         <div
-          v-if="records.length === 0"
+          v-if="loading && records.length === 0"
+          class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
+        >
+          加载中…
+        </div>
+        <div
+          v-else-if="records.length === 0"
           class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
         >
           暂无用量记录。
         </div>
         <template v-else>
           <div class="scrollbar-thin min-h-[60px] flex-1 overflow-auto">
-            <table class="w-full text-center text-sm">
+            <table class="w-full text-sm">
               <thead class="thead-sticky">
-                <tr class="border-b text-center text-muted-foreground">
+                <tr class="border-b text-left text-muted-foreground">
                   <th class="py-2 font-medium">时间</th>
                   <th class="py-2 font-medium">模型</th>
                   <th class="py-2 font-medium">上游</th>
-                  <th class="py-2 font-medium">输入</th>
-                  <th class="py-2 font-medium">输出</th>
-                  <th class="py-2 font-medium">成本</th>
-                  <th class="py-2 font-medium">延迟</th>
-                  <th class="py-2 font-medium">状态</th>
+                  <th class="py-2 text-right font-medium">输入</th>
+                  <th class="py-2 text-right font-medium">输出</th>
+                  <th class="py-2 text-right font-medium">成本</th>
+                  <th class="py-2 text-right font-medium">延迟</th>
+                  <th class="py-2 text-center font-medium">状态</th>
                 </tr>
               </thead>
               <tbody>
@@ -322,11 +359,11 @@ watch(pageCount, (n) => {
                   <td class="py-2 text-xs text-muted-foreground" :title="r.upstreamModel ?? ''">
                     {{ displayName(r.upstreamModel) }}
                   </td>
-                  <td class="py-2">{{ formatTokens(r.inputTokens) }}</td>
-                  <td class="py-2">{{ formatTokens(r.outputTokens) }}</td>
-                  <td class="py-2">${{ r.cost.toFixed(2) }}</td>
-                  <td class="py-2 text-xs text-muted-foreground">{{ formatLatency(r.latencyMs) }}</td>
-                  <td class="py-2">
+                  <td class="py-2 text-right tabular-nums">{{ formatTokens(r.inputTokens) }}</td>
+                  <td class="py-2 text-right tabular-nums">{{ formatTokens(r.outputTokens) }}</td>
+                  <td class="py-2 text-right tabular-nums">${{ r.cost.toFixed(2) }}</td>
+                  <td class="py-2 text-right text-xs tabular-nums text-muted-foreground">{{ formatLatency(r.latencyMs) }}</td>
+                  <td class="py-2 text-center">
                     <Badge :variant="r.status === 'ok' ? 'success' : 'destructive'">
                       {{ r.status ?? "?" }}
                     </Badge>
@@ -335,27 +372,8 @@ watch(pageCount, (n) => {
               </tbody>
             </table>
           </div>
-          <div class="flex shrink-0 items-center justify-between border-t pt-3">
-            <span class="text-xs text-muted-foreground">共 {{ records.length }} 条</span>
-            <div class="flex items-center gap-2">
-              <span class="text-xs text-muted-foreground">第 {{ page + 1 }} / {{ pageCount }} 页</span>
-              <Button
-                variant="outline"
-                size="sm"
-                :disabled="page === 0"
-                @click="page--"
-              >
-                上一页
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                :disabled="page >= pageCount - 1"
-                @click="page++"
-              >
-                下一页
-              </Button>
-            </div>
+          <div class="shrink-0 border-t pt-3">
+            <Pagination v-model:page="page" :page-count="pageCount" :total="records.length" />
           </div>
         </template>
       </div>

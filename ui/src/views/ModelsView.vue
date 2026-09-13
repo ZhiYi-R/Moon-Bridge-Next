@@ -11,7 +11,9 @@ import Pagination from "@/components/ui/Pagination.vue";
 import Select from "@/components/ui/Select.vue";
 import StringListInput from "@/components/ui/StringListInput.vue";
 import { useConfirm } from "@/composables/useConfirm";
+import { useToast } from "@/composables/useToast";
 import { useAutoPageSize } from "@/composables/useAutoPageSize";
+import { usePointerDrag } from "@/composables/usePointerDrag";
 import {
   catalogApi,
   errMsg,
@@ -26,6 +28,7 @@ import { formatCtx } from "@/lib/utils";
 
 const error = ref<string | null>(null);
 const { confirm } = useConfirm();
+const toast = useToast();
 /** 分页切片：按页号取子集，并保证页号不越界。 */
 function paginate<T>(list: T[], page: Ref<number>, pageSize: number): T[] {
   return list.slice((page.value - 1) * pageSize, page.value * pageSize);
@@ -39,9 +42,10 @@ const modelOptions = computed(() => models.value.map((m) => ({ value: m.slug, la
 
 // ───────────────────────── 模型定义 CRUD ─────────────────────────
 const models = ref<ModelDef[]>([]);
+const modelsLoading = ref(false);
 const defScroll = ref<HTMLElement | null>(null);
-const { pageSize: defPageSize } = useAutoPageSize(defScroll);
 const defPage = ref(1);
+const { pageSize: defPageSize } = useAutoPageSize(defScroll, defPage);
 const defPageCount = computed(() => Math.max(1, Math.ceil(models.value.length / defPageSize.value)));
 const pagedModels = computed(() => paginate(models.value, defPage, defPageSize.value));
 watch(defPageCount, (c) => {
@@ -86,11 +90,31 @@ const form = reactive<ModelForm>({
   extraText: "{}",
 });
 
+// ── 未保存关闭守卫：打开弹窗时拍快照，关闭时比对 ──
+const formSnapshot = ref("");
+const formDirty = computed(() => JSON.stringify(form) !== formSnapshot.value);
+
+async function closeGuard(): Promise<boolean> {
+  if (!formDirty.value) return true;
+  return confirm({
+    title: "关闭编辑",
+    message: "有未保存的修改，确认丢弃并关闭？",
+    confirmText: "丢弃修改",
+  });
+}
+
+async function tryCloseEdit() {
+  if (await closeGuard()) editing.value = false;
+}
+
 async function loadModels() {
+  modelsLoading.value = true;
   try {
     models.value = await modelApi.list();
   } catch (e) {
     error.value = errMsg(e);
+  } finally {
+    modelsLoading.value = false;
   }
 }
 
@@ -107,6 +131,7 @@ function newModel() {
   });
   error.value = null;
   editing.value = true;
+  formSnapshot.value = JSON.stringify(form);
 }
 
 function editModel(m: ModelDef) {
@@ -124,6 +149,7 @@ function editModel(m: ModelDef) {
   });
   error.value = null;
   editing.value = true;
+  formSnapshot.value = JSON.stringify(form);
 }
 
 async function saveModel() {
@@ -169,6 +195,7 @@ async function saveModel() {
   try {
     await modelApi.save(rec);
     editing.value = false;
+    toast.success(`模型 “${slug}” 已保存`);
     await loadModels();
   } catch (e) {
     error.value = errMsg(e);
@@ -181,6 +208,7 @@ async function removeModel(slug: string) {
   if (!(await confirm({ title: "删除模型", message: `确认删除模型 “${slug}”？相关 offer 不会自动删除。` }))) return;
   try {
     await modelApi.remove(slug);
+    toast.success(`模型 “${slug}” 已删除`);
     await loadModels();
   } catch (e) {
     error.value = errMsg(e);
@@ -216,8 +244,8 @@ const filteredCatalog = computed(() => {
 
 // 导入目录同样分页：models.dev 全量上万条，一次渲染会卡顿；页大小按弹窗内可视高度自动计算
 const importScroll = ref<HTMLElement | null>(null);
-const { pageSize: importPageSize } = useAutoPageSize(importScroll);
 const importPage = ref(1);
+const { pageSize: importPageSize } = useAutoPageSize(importScroll, importPage);
 const importPageCount = computed(() => Math.max(1, Math.ceil(filteredCatalog.value.length / importPageSize.value)));
 const pagedCatalog = computed(() => paginate(filteredCatalog.value, importPage, importPageSize.value));
 watch(importQuery, () => {
@@ -287,8 +315,9 @@ async function confirmImport() {
   importError.value = null;
   importBusy.value = true;
   try {
-    await catalogApi.import(chosen);
+    const n = await catalogApi.import(chosen);
     importModal.value = false;
+    toast.success(`已导入 ${n} 个模型`);
     await loadModels();
   } catch (e) {
     importError.value = errMsg(e);
@@ -309,9 +338,10 @@ function catalogPrice(m: CatalogModel): string {
 const providers = ref<Provider[]>([]);
 const selectedProvider = ref("");
 const offers = ref<Offer[]>([]);
+const offersLoading = ref(false);
 const offerScroll = ref<HTMLElement | null>(null);
-const { pageSize: offerPageSize } = useAutoPageSize(offerScroll);
 const offerPage = ref(1);
+const { pageSize: offerPageSize } = useAutoPageSize(offerScroll, offerPage);
 const offerPageCount = computed(() => Math.max(1, Math.ceil(offers.value.length / offerPageSize.value)));
 const pagedOffers = computed(() => paginate(offers.value, offerPage, offerPageSize.value));
 watch(offerPageCount, (c) => {
@@ -403,6 +433,7 @@ async function confirmOffer() {
       endpointProtocol: offerForm.endpointProtocol || null,
     });
     offerModal.value = false;
+    toast.success(`报价 “${offerForm.modelSlug}” 已保存`);
     await loadOffers();
   } catch (e) {
     offerError.value = errMsg(e);
@@ -428,10 +459,13 @@ async function loadOffers() {
     offers.value = [];
     return;
   }
+  offersLoading.value = true;
   try {
     offers.value = await modelApi.offerList(selectedProvider.value);
   } catch (e) {
     error.value = errMsg(e);
+  } finally {
+    offersLoading.value = false;
   }
 }
 
@@ -444,6 +478,7 @@ async function removeOffer(modelSlug: string) {
   if (!(await confirm({ title: "删除报价", message: `确认删除 ${selectedProvider.value} 对 “${modelSlug}” 的报价？` }))) return;
   try {
     await modelApi.offerRemove(selectedProvider.value, modelSlug);
+    toast.success(`报价 “${modelSlug}” 已删除`);
     await loadOffers();
   } catch (e) {
     error.value = errMsg(e);
@@ -455,6 +490,26 @@ function price(p: unknown, key: string): string {
   const v = (p as Record<string, unknown> | null)?.[key];
   return typeof v === "number" ? String(v) : "—";
 }
+
+// ── 上下分区拖拽比例（持久化；高度变化经 useAutoPageSize 自动换算页号） ──
+const SPLIT_KEY = "models-split-pct";
+const splitEl = ref<HTMLElement | null>(null);
+const topPct = ref(
+  Math.min(0.75, Math.max(0.25, Number(localStorage.getItem(SPLIT_KEY)) || 0.55)),
+);
+let startPct = topPct.value;
+const startSplit = usePointerDrag(
+  (_dx, dy) => {
+    const h = splitEl.value?.clientHeight ?? 0;
+    if (h > 0) topPct.value = Math.min(0.75, Math.max(0.25, startPct + dy / h));
+  },
+  {
+    onStart: () => {
+      startPct = topPct.value;
+    },
+    onEnd: () => localStorage.setItem(SPLIT_KEY, topPct.value.toFixed(4)),
+  },
+);
 
 onMounted(async () => {
   await Promise.all([loadModels(), loadProviders()]);
@@ -474,9 +529,10 @@ onMounted(async () => {
     <Modal
       :open="editing"
       :title="isNew ? '新建模型' : '编辑模型'"
+      :guard="closeGuard"
       @close="editing = false"
     >
-      <div class="grid gap-4 grid-cols-2">
+      <div class="grid gap-4 grid-cols-[repeat(auto-fit,minmax(14rem,1fr))]">
         <div class="space-y-1.5">
           <Label for="m-slug">唯一标识</Label>
           <Input id="m-slug" v-model="form.slug" placeholder="如 claude-sonnet-4" :disabled="!isNew" />
@@ -516,13 +572,13 @@ onMounted(async () => {
           <Label>推理档位</Label>
           <StringListInput v-model="form.reasoningLevels" placeholder="如 high 后回车添加" />
         </div>
-        <div class="space-y-1.5 col-span-2">
+        <div class="space-y-1.5 col-span-full">
           <Label for="m-extra">扩展字段</Label>
           <textarea id="m-extra" v-model="form.extraText" rows="3" spellcheck="false" :class="textareaClass"></textarea>
         </div>
       </div>
       <template #footer>
-        <Button variant="ghost" size="sm" @click="editing = false">取消</Button>
+        <Button variant="ghost" size="sm" @click="tryCloseEdit">取消</Button>
         <Button size="sm" :disabled="busy" @click="saveModel">{{ busy ? "保存中…" : "保存" }}</Button>
       </template>
     </Modal>
@@ -572,16 +628,16 @@ onMounted(async () => {
           <span>已选 {{ importSelected.size }}</span>
         </div>
         <div ref="importScroll" class="scrollbar-thin max-h-[52vh] overflow-y-auto rounded-md border">
-          <table class="w-full text-center text-sm">
+          <table class="w-full text-sm">
             <thead class="thead-sticky">
-              <tr class="border-b text-center text-muted-foreground">
+              <tr class="border-b text-left text-muted-foreground">
                 <th class="w-8 py-2"></th>
                 <th class="py-2 font-medium">模型</th>
                 <th class="py-2 font-medium">Provider</th>
-                <th class="py-2 font-medium">上下文</th>
-                <th class="py-2 font-medium">输出上限</th>
-                <th class="py-2 font-medium">输入/输出</th>
-                <th class="py-2 font-medium">状态</th>
+                <th class="py-2 text-right font-medium">上下文</th>
+                <th class="py-2 text-right font-medium">输出上限</th>
+                <th class="py-2 text-right font-medium">输入/输出</th>
+                <th class="py-2 text-center font-medium">状态</th>
               </tr>
             </thead>
             <tbody>
@@ -591,7 +647,7 @@ onMounted(async () => {
                 class="cursor-pointer border-b last:border-0 hover:bg-accent/40"
                 @click="toggleSelect(m)"
               >
-                <td class="py-1.5">
+                <td class="py-1.5 text-center">
                   <input
                     type="checkbox"
                     class="size-4 accent-primary"
@@ -604,10 +660,10 @@ onMounted(async () => {
                   <div v-if="m.name" class="text-xs text-muted-foreground">{{ m.name }}</div>
                 </td>
                 <td class="py-1.5 text-xs text-muted-foreground">{{ m.providerName }}</td>
-                <td class="py-1.5 tabular-nums text-muted-foreground">{{ formatCtx(m.contextWindow) }}</td>
-                <td class="py-1.5 tabular-nums text-muted-foreground">{{ formatCtx(m.maxOutputTokens) }}</td>
-                <td class="py-1.5 tabular-nums text-muted-foreground">{{ catalogPrice(m) }}</td>
-                <td class="py-1.5">
+                <td class="py-1.5 text-right tabular-nums text-muted-foreground">{{ formatCtx(m.contextWindow) }}</td>
+                <td class="py-1.5 text-right tabular-nums text-muted-foreground">{{ formatCtx(m.maxOutputTokens) }}</td>
+                <td class="py-1.5 text-right tabular-nums text-muted-foreground">{{ catalogPrice(m) }}</td>
+                <td class="py-1.5 text-center">
                   <span v-if="existingSlugs.has(m.id)" class="text-xs text-muted-foreground">已存在</span>
                   <span v-else class="text-xs text-emerald-600">新增</span>
                 </td>
@@ -631,10 +687,11 @@ onMounted(async () => {
       </template>
     </Modal>
 
-    <!-- 模型定义 + 模型报价：单卡双节，满版填满视口 -->
+    <!-- 模型定义 + 模型报价：单卡双节，满版填满视口；分隔条可拖拽调比例 -->
     <Card class="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <!-- 节：模型定义（均分高度，内部滚动） -->
-      <section class="flex min-h-0 flex-1 flex-col">
+      <div ref="splitEl" class="flex min-h-0 flex-1 flex-col">
+      <!-- 节：模型定义（拖拽分栏，内部滚动） -->
+      <section class="flex min-h-0 flex-col" :style="{ flex: `0 0 ${topPct * 100}%` }">
         <div class="flex items-center justify-between border-b px-5 py-3">
           <h3 class="card-title">模型定义</h3>
           <div class="flex items-center gap-2">
@@ -648,37 +705,43 @@ onMounted(async () => {
         </div>
         <div ref="defScroll" class="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">
           <div
-            v-if="models.length === 0"
+            v-if="modelsLoading && models.length === 0"
+            class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
+          >
+            加载中…
+          </div>
+          <div
+            v-else-if="models.length === 0"
             class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
           >
             暂无模型定义，点击「新建模型」添加。
           </div>
-          <table v-else class="w-full text-center text-sm">
+          <table v-else class="w-full text-sm">
             <thead class="thead-sticky">
-              <tr class="border-b text-center text-muted-foreground">
+              <tr class="border-b text-left text-muted-foreground">
                 <th class="py-2 font-medium">标识</th>
                 <th class="py-2 font-medium">显示名</th>
-                <th class="py-2 font-medium">上下文窗口</th>
-                <th class="py-2 font-medium">输出上限</th>
-                <th class="py-2 font-medium">操作</th>
+                <th class="py-2 text-right font-medium">上下文窗口</th>
+                <th class="py-2 text-right font-medium">输出上限</th>
+                <th class="w-20 py-2 text-center font-medium">操作</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="m in pagedModels" :key="m.slug" class="border-b last:border-0">
                 <td class="py-2 font-mono text-xs">{{ m.slug }}</td>
                 <td class="py-2">{{ m.displayName ?? "—" }}</td>
-                <td class="py-2 tabular-nums text-muted-foreground">
+                <td class="py-2 text-right tabular-nums text-muted-foreground">
                   {{ formatCtx(m.contextWindow) }}
                 </td>
-                <td class="py-2 tabular-nums text-muted-foreground">
+                <td class="py-2 text-right tabular-nums text-muted-foreground">
                   {{ formatCtx(m.maxOutputTokens) }}
                 </td>
                 <td class="py-2">
                   <div class="flex justify-center gap-0.5">
-                    <Button variant="ghost" size="icon" class="size-7" @click="editModel(m)">
+                    <Button variant="ghost" size="icon" class="size-7" title="编辑" @click="editModel(m)">
                       <Pencil class="size-3.5" />
                     </Button>
-                    <Button variant="ghost" size="icon" class="size-7" @click="removeModel(m.slug)">
+                    <Button variant="ghost" size="icon" class="size-7" title="删除" @click="removeModel(m.slug)">
                       <Trash2 class="size-3.5 text-destructive" />
                     </Button>
                   </div>
@@ -692,8 +755,15 @@ onMounted(async () => {
         </div>
       </section>
 
-      <!-- 节：模型报价（均分高度，内部滚动） -->
-      <section class="flex min-h-0 flex-1 flex-col border-t">
+      <!-- 拖拽分栏把手 -->
+      <div
+        class="h-1 shrink-0 cursor-row-resize bg-border transition-colors hover:bg-primary/50 active:bg-primary/60"
+        title="拖拽调整分区高度"
+        @pointerdown="startSplit"
+      />
+
+      <!-- 节：模型报价（剩余高度，内部滚动） -->
+      <section class="flex min-h-0 flex-1 flex-col">
         <div class="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b px-5 py-3">
           <h3 class="card-title">模型报价</h3>
           <div class="flex items-center gap-2 text-xs text-muted-foreground">
@@ -722,33 +792,39 @@ onMounted(async () => {
 
             <!-- 现有 offer -->
             <div
-              v-if="offers.length === 0"
+              v-if="offersLoading && offers.length === 0"
+              class="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground"
+            >
+              加载中…
+            </div>
+            <div
+              v-else-if="offers.length === 0"
               class="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground"
             >
               该 provider 暂无报价。
             </div>
-            <table v-else class="w-full text-center text-sm">
+            <table v-else class="w-full text-sm">
               <thead class="thead-sticky">
-                <tr class="border-b text-center text-muted-foreground">
+                <tr class="border-b text-left text-muted-foreground">
                   <th class="py-2 font-medium">模型</th>
                   <th class="py-2 font-medium">绑定端点</th>
-                  <th class="py-2 font-medium">输入</th>
-                  <th class="py-2 font-medium">输出</th>
-                  <th class="py-2 font-medium">缓存读</th>
-                  <th class="py-2 font-medium">缓存写</th>
-                  <th class="py-2 font-medium">推理</th>
-                  <th class="py-2 font-medium">操作</th>
+                  <th class="py-2 text-right font-medium">输入</th>
+                  <th class="py-2 text-right font-medium">输出</th>
+                  <th class="py-2 text-right font-medium">缓存读</th>
+                  <th class="py-2 text-right font-medium">缓存写</th>
+                  <th class="py-2 text-right font-medium">推理</th>
+                  <th class="w-20 py-2 text-center font-medium">操作</th>
                 </tr>
               </thead>
               <tbody>
                 <tr v-for="o in pagedOffers" :key="o.modelSlug" class="border-b last:border-0">
                   <td class="py-2 font-mono text-xs">{{ o.modelSlug }}</td>
                   <td class="py-2 font-mono text-xs text-muted-foreground">{{ o.endpointProtocol || "全部" }}</td>
-                  <td class="py-2 tabular-nums">{{ price(o.pricing, "input") }}</td>
-                  <td class="py-2 tabular-nums">{{ price(o.pricing, "output") }}</td>
-                  <td class="py-2 tabular-nums">{{ price(o.pricing, "cache_read") }}</td>
-                  <td class="py-2 tabular-nums">{{ price(o.pricing, "cache_write") }}</td>
-                  <td class="py-2 tabular-nums">{{ price(o.pricing, "reasoning") }}</td>
+                  <td class="py-2 text-right tabular-nums">{{ price(o.pricing, "input") }}</td>
+                  <td class="py-2 text-right tabular-nums">{{ price(o.pricing, "output") }}</td>
+                  <td class="py-2 text-right tabular-nums">{{ price(o.pricing, "cache_read") }}</td>
+                  <td class="py-2 text-right tabular-nums">{{ price(o.pricing, "cache_write") }}</td>
+                  <td class="py-2 text-right tabular-nums">{{ price(o.pricing, "reasoning") }}</td>
                   <td class="py-2">
                     <div class="flex justify-center gap-0.5">
                       <Button variant="ghost" size="icon" class="size-7" title="编辑定价" @click="editOffer(o)">
@@ -768,6 +844,7 @@ onMounted(async () => {
           <Pagination v-model:page="offerPage" :page-count="offerPageCount" :total="offers.length" />
         </div>
       </section>
+      </div>
     </Card>
 
     <!-- 报价定价弹窗：五类 token 独立定价 -->
@@ -788,7 +865,7 @@ onMounted(async () => {
         </p>
       </div>
       <p class="mb-4 text-xs text-muted-foreground">单位：USD / 1M tokens；留空表示该项不单独定价。</p>
-      <div class="grid gap-4 grid-cols-2">
+      <div class="grid gap-4 grid-cols-[repeat(auto-fit,minmax(10rem,1fr))]">
         <div class="space-y-1.5">
           <Label for="p-input">输入</Label>
           <Input id="p-input" v-model="offerForm.inputPrice" placeholder="3" inputmode="decimal" />

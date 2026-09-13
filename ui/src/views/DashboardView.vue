@@ -23,6 +23,8 @@ const records = ref<UsageRecord[]>([]);
 const perfLoading = ref(false);
 
 interface PerfBucket {
+  /** 桶起始 unix 秒，用作 v-for key（label 跨天会重复）。 */
+  t: number;
   label: string;
   /** 该小时平均 TTFT（ms）；无流式样本为 null */
   ttft: number | null;
@@ -156,8 +158,8 @@ onMounted(loadAll);
       {{ gateway.error }}
     </div>
 
-    <!-- 用量统计 -->
-    <div class="grid gap-4 grid-cols-3">
+    <!-- 用量统计：auto-fit 按可用宽度自动分列，窄窗口自然换行而非硬挤 -->
+    <div class="grid gap-4 grid-cols-[repeat(auto-fit,minmax(12rem,1fr))]">
       <Card>
         <div class="card-header pb-2">
           <span class="card-description">平均缓存命中率</span>
@@ -193,7 +195,7 @@ onMounted(loadAll);
     </div>
 
     <!-- 性能时序：平均 TTFT / 平均 TPS（流式请求，逐小时） -->
-    <div class="grid gap-4 grid-cols-2">
+    <div class="grid gap-4 grid-cols-[repeat(auto-fit,minmax(20rem,1fr))]">
       <Card>
         <div class="card-header flex-row items-center justify-between space-y-0">
           <div class="flex items-center gap-2">
@@ -223,7 +225,7 @@ onMounted(loadAll);
           <div v-else class="flex h-20 items-end gap-1">
             <div
               v-for="b in perf.buckets"
-              :key="b.label"
+              :key="b.t"
               class="group flex h-full flex-1 items-end"
               :title="`${b.label} · ${b.samples} 次流式 · 平均 ${b.ttft != null ? Math.round(b.ttft) + ' ms' : '—'}`"
             >
@@ -256,7 +258,7 @@ onMounted(loadAll);
           <div v-else class="flex h-20 items-end gap-1">
             <div
               v-for="b in perf.buckets"
-              :key="b.label"
+              :key="b.t"
               class="group flex h-full flex-1 items-end"
               :title="`${b.label} · ${b.samples} 次流式 · 平均 ${b.tps != null ? b.tps.toFixed(1) + ' tok/s' : '—'}`"
             >

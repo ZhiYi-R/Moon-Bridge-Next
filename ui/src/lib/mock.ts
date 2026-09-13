@@ -261,7 +261,7 @@ const appConfig: AppConfig = {
     addr: "127.0.0.1:8787",
     authToken: null,
     egressProxy: null,
-    maxBodyBytes: 10_485_760,
+    maxBodyBytes: 104_857_600,
     requestTimeoutSecs: 120,
     traceDir: null,
   } satisfies GatewayConfig,
@@ -325,12 +325,20 @@ const traceDetails = new Map<string, TraceDetail>();
         model: r.upstreamModel,
         messages: [{ role: "user", content: "用一句话解释什么是 LLM 网关。(mock)" }],
       },
+      // 流式 trace 的响应字段 = 事件流聚合出的 CoreResponse（与后端 StreamAssembler 同形态）
       upstreamResponse: {
-        choices: [{ message: { role: "assistant", content: "LLM 网关是位于应用与大模型之间的协议转换与治理层。(mock)" } }],
-      },
-      clientResponse: {
+        id: "msg_mock",
+        model: r.upstreamModel,
         content: [{ type: "text", text: "LLM 网关是位于应用与大模型之间的协议转换与治理层。(mock)" }],
         stop_reason: "end_turn",
+        usage: { input_tokens: r.inputTokens, output_tokens: r.outputTokens },
+      },
+      clientResponse: {
+        id: "msg_mock",
+        model: r.upstreamModel,
+        content: [{ type: "text", text: "LLM 网关是位于应用与大模型之间的协议转换与治理层。(mock)" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: r.inputTokens, output_tokens: r.outputTokens },
       },
       error: null,
     });

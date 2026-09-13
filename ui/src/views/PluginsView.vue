@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ArrowLeft, ChevronDown, Pencil, Plus, Power, RotateCw, Trash2, Upload } from "lucide-vue-next";
-import { onMounted, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 
 import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
@@ -11,11 +11,13 @@ import CodeEditor from "@/components/ui/CodeEditor.vue";
 import Modal from "@/components/ui/Modal.vue";
 import Switch from "@/components/ui/Switch.vue";
 import { useConfirm } from "@/composables/useConfirm";
+import { useToast } from "@/composables/useToast";
 import { errMsg, isTauriRuntime, pluginApi, type PluginImportOutcome, type PluginRecord } from "@/lib/api";
 import { useGatewayStore } from "@/stores/gateway";
 
 const gateway = useGatewayStore();
 const { confirm } = useConfirm();
+const toast = useToast();
 
 const CAPABILITIES = ["core", "raw_request", "raw_response", "raw_stream"] as const;
 const SCOPES = ["global", "provider", "model", "route"] as const;
@@ -38,7 +40,6 @@ end
 
 const plugins = ref<PluginRecord[]>([]);
 const error = ref<string | null>(null);
-const notice = ref<string | null>(null);
 const needsRestart = ref(false);
 const editing = ref(false);
 const isNew = ref(false);
@@ -65,6 +66,29 @@ const form = reactive<Form>({
   capabilities: ["core"],
 });
 const script = ref(DEFAULT_SCRIPT);
+
+// ── 编辑器未保存守卫：进入编辑时拍快照，返回/取消时比对 ──
+const editorSnapshot = ref("");
+const editorDirty = computed(
+  () => JSON.stringify({ f: form, s: script.value }) !== editorSnapshot.value,
+);
+
+function takeEditorSnapshot() {
+  editorSnapshot.value = JSON.stringify({ f: form, s: script.value });
+}
+
+async function tryCloseEditor() {
+  if (
+    !editorDirty.value ||
+    (await confirm({
+      title: "关闭编辑",
+      message: "有未保存的修改，确认丢弃并返回列表？",
+      confirmText: "丢弃修改",
+    }))
+  ) {
+    editing.value = false;
+  }
+}
 
 async function load() {
   try {
@@ -93,6 +117,7 @@ function newPlugin() {
   script.value = DEFAULT_SCRIPT;
   error.value = null;
   editing.value = true;
+  takeEditorSnapshot();
 }
 
 async function editPlugin(p: PluginRecord) {
@@ -112,6 +137,8 @@ async function editPlugin(p: PluginRecord) {
   } catch (e) {
     error.value = errMsg(e);
     script.value = "";
+  } finally {
+    takeEditorSnapshot();
   }
 }
 
@@ -145,7 +172,7 @@ async function save() {
     await pluginApi.writeScript(name, script.value);
     editing.value = false;
     needsRestart.value = true;
-    notice.value = `插件 “${name}” 已保存，重启网关后生效。`;
+    toast.success(`插件 “${name}” 已保存，重启网关后生效`);
     await load();
   } catch (e) {
     handleSaveError(e);
@@ -197,7 +224,7 @@ async function restart() {
     error.value = gateway.error;
   } else {
     needsRestart.value = false;
-    notice.value = "网关已重启，插件变更已生效。";
+    toast.success("网关已重启，插件变更已生效");
   }
 }
 
@@ -223,7 +250,7 @@ function reportImport(outcomes: PluginImportOutcome[]) {
     imported.length ? `成功导入 ${imported.map((o) => o.name).join("、")}` : "",
     skipped.length ? `跳过 ${skipped.length} 个同名插件` : "",
   ].filter(Boolean);
-  if (parts.length) notice.value = `${parts.join("；")}。重启网关后生效。`;
+  if (parts.length) toast.success(`${parts.join("；")}。重启网关后生效`);
 }
 
 async function importPlugins() {
@@ -306,15 +333,6 @@ onMounted(() => {
       {{ error }}
     </div>
     <div
-      v-if="notice && !error"
-      class="flex shrink-0 items-center justify-between rounded-md border border-primary/40 bg-primary/10 px-4 py-2 text-sm"
-    >
-      <span>{{ notice }}</span>
-      <button class="text-xs text-muted-foreground hover:text-foreground" @click="notice = null">
-        关闭
-      </button>
-    </div>
-    <div
       v-if="needsRestart"
       class="shrink-0 rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-sm text-amber-600 dark:text-amber-400"
     >
@@ -325,7 +343,7 @@ onMounted(() => {
     <Card v-if="editing" class="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div class="flex shrink-0 items-center justify-between border-b px-5 py-3">
         <div class="flex items-center gap-2">
-          <Button variant="ghost" size="icon" class="size-7" title="返回列表" @click="editing = false">
+          <Button variant="ghost" size="icon" class="size-7" title="返回列表" @click="tryCloseEditor">
             <ArrowLeft class="size-4" />
           </Button>
           <h3 class="card-title">{{ isNew ? "新建插件" : "编辑插件" }}</h3>
@@ -335,7 +353,7 @@ onMounted(() => {
             <Switch :checked="form.enabled" @update:checked="(v: boolean) => (form.enabled = v)" />
             启用
           </label>
-          <Button variant="ghost" size="sm" @click="editing = false">取消</Button>
+          <Button variant="ghost" size="sm" @click="tryCloseEditor">取消</Button>
           <Button size="sm" :disabled="busy" @click="save">
             {{ busy ? "保存中…" : "保存" }}
           </Button>
