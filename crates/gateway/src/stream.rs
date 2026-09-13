@@ -19,6 +19,7 @@ use moonbridge_protocol::{
     ChunkVerdict, RawBody, RawChunk, ReqCtx, StreamDecodeState, StreamEncodeState,
 };
 use moonbridge_store::Database;
+use serde_json::Value;
 
 use crate::state::AppState;
 use crate::trace::TraceRecord;
@@ -50,6 +51,142 @@ fn error_event(msg: &str) -> Event {
     Event::default()
         .event("error")
         .data(serde_json::json!({ "error": { "message": msg } }).to_string())
+}
+
+/// 流事件聚合器：把 Core 事件流还原成「最终响应消息」快照。
+///
+/// trace 的 `upstream_response` / `client_response` 在流式下用它落盘：
+/// 体积上界 = 最终消息体（不含逐 chunk 时序与协议帧开销）。
+#[derive(Default)]
+struct StreamAssembler {
+    id: String,
+    model: String,
+    /// 按 Core 块索引聚合的内容块；None = 该索引只见增量未见实体。
+    blocks: Vec<Option<moonbridge_core::ContentBlock>>,
+    /// ToolUse 的 partial_json 逐块累积，finish 时一次性 parse。
+    tool_args: std::collections::HashMap<usize, String>,
+    stop_reason: Option<moonbridge_core::StopReason>,
+    usage: Usage,
+}
+
+impl StreamAssembler {
+    /// 取 `index` 处槽位，按需扩容。
+    fn slot(&mut self, index: usize) -> &mut Option<moonbridge_core::ContentBlock> {
+        if self.blocks.len() <= index {
+            self.blocks.resize(index + 1, None);
+        }
+        &mut self.blocks[index]
+    }
+
+    /// 取 `index` 处内容块，缺失时建占位块（chat 系上游正文是裸 delta，无 BlockStart）。
+    fn block_or(
+        &mut self,
+        index: usize,
+        make: impl FnOnce() -> moonbridge_core::ContentBlock,
+    ) -> &mut moonbridge_core::ContentBlock {
+        let slot = self.slot(index);
+        if slot.is_none() {
+            *slot = Some(make());
+        }
+        slot.as_mut().expect("slot just filled")
+    }
+
+    fn reasoning_block() -> moonbridge_core::ContentBlock {
+        moonbridge_core::ContentBlock::Reasoning {
+            text: String::new(),
+            signature: None,
+            redacted: false,
+        }
+    }
+
+    fn feed(&mut self, ev: &CoreStreamEvent) {
+        use moonbridge_core::ContentBlock as B;
+        match ev {
+            CoreStreamEvent::MessageStart { id, model } => {
+                self.id.clone_from(id);
+                self.model.clone_from(model);
+            }
+            CoreStreamEvent::BlockStart { index, block } => {
+                *self.slot(*index) = Some(block.clone());
+            }
+            CoreStreamEvent::BlockDelta { index, delta } => {
+                let i = *index;
+                match delta {
+                    StreamDelta::Text { text } => {
+                        if let B::Text { text: t } = self.block_or(i, || B::text("")) {
+                            t.push_str(text);
+                        }
+                    }
+                    StreamDelta::Reasoning { text } => {
+                        if let B::Reasoning { text: t, .. } =
+                            self.block_or(i, Self::reasoning_block)
+                        {
+                            t.push_str(text);
+                        }
+                    }
+                    StreamDelta::ReasoningSignature { signature } => {
+                        if let B::Reasoning { signature: s, .. } =
+                            self.block_or(i, Self::reasoning_block)
+                        {
+                            *s = Some(signature.clone());
+                        }
+                    }
+                    StreamDelta::ToolInput { partial_json } => {
+                        self.tool_args.entry(i).or_default().push_str(partial_json);
+                        self.block_or(i, || B::ToolUse {
+                            id: String::new(),
+                            name: String::new(),
+                            namespace: None,
+                            input: Value::Null,
+                            signature: None,
+                        });
+                    }
+                }
+            }
+            CoreStreamEvent::BlockStop { index, block } => {
+                // 收尾事件携带的完整块（reasoning 的 signature 还原等）优先于累积值
+                if let Some(b) = block {
+                    *self.slot(*index) = Some(b.clone());
+                }
+            }
+            CoreStreamEvent::MessageDelta { stop_reason, usage } => {
+                if let Some(sr) = stop_reason {
+                    self.stop_reason = Some(*sr);
+                }
+                if let Some(u) = usage {
+                    let a = &mut self.usage;
+                    a.input_tokens = a.input_tokens.max(u.input_tokens);
+                    a.output_tokens = a.output_tokens.max(u.output_tokens);
+                    a.cache_read_tokens = a.cache_read_tokens.max(u.cache_read_tokens);
+                    a.cache_write_tokens = a.cache_write_tokens.max(u.cache_write_tokens);
+                    a.reasoning_tokens = a.reasoning_tokens.max(u.reasoning_tokens);
+                }
+            }
+            CoreStreamEvent::MessageStop | CoreStreamEvent::Error { .. } => {}
+        }
+    }
+
+    /// 聚合完成 → CoreResponse JSON；流上没有任何内容时返回 Null（不伪造空响应）。
+    fn finish(mut self) -> Value {
+        use moonbridge_core::ContentBlock as B;
+        for (i, raw) in std::mem::take(&mut self.tool_args) {
+            if let Some(Some(B::ToolUse { input, .. })) = self.blocks.get_mut(i) {
+                *input = serde_json::from_str(&raw).unwrap_or(Value::String(raw));
+            }
+        }
+        if self.blocks.is_empty() && self.id.is_empty() {
+            return Value::Null;
+        }
+        serde_json::to_value(moonbridge_core::CoreResponse {
+            id: self.id,
+            model: self.model,
+            content: self.blocks.into_iter().flatten().collect(),
+            stop_reason: self.stop_reason,
+            usage: self.usage,
+            ext: moonbridge_core::Map::new(),
+        })
+        .unwrap_or(Value::Null)
+    }
 }
 
 /// 单个 Core 事件的客户端方向处理管线：流事件钩子 → 内容块过滤 → 协议编码。
@@ -120,6 +257,11 @@ struct StreamAudit {
     failed: Option<String>,
     /// 上游流是否自然读尽（未读尽且无失败 = 客户端断开等提前终止）。
     completed: bool,
+    /// 上游侧聚合：decode 后、Core 钩子前喂入——记录上游实际发送的内容。
+    up_asm: StreamAssembler,
+    /// 客户端侧聚合：仅喂入实际编码下发的事件——记录客户端实际收到的内容
+    /// （含插件过滤、会话水印注入的效果，可与上游侧对比插件行为）。
+    down_asm: StreamAssembler,
 }
 
 impl StreamAudit {
@@ -155,6 +297,11 @@ impl Drop for StreamAudit {
             t.ttft_ms = self.ttft_ms.map(|v| v as u64);
             t.status = status.to_string();
             t.error = err;
+            // 流式 trace 的两个响应字段由事件聚合回填（非流式在 dispatch 已填）。
+            if t.stream {
+                t.upstream_response = std::mem::take(&mut self.up_asm).finish();
+                t.client_response = std::mem::take(&mut self.down_asm).finish();
+            }
             if !self.record_bodies {
                 crate::trace::strip_bodies(&mut t);
             }
@@ -199,6 +346,8 @@ pub fn build_stream_response(
         start,
         failed: None,
         completed: false,
+        up_asm: StreamAssembler::default(),
+        down_asm: StreamAssembler::default(),
     };
 
     let body = async_stream::stream! {
@@ -295,6 +444,12 @@ pub fn build_stream_response(
                 }
             };
 
+            // 上游侧聚合：decode 后即喂（先于水印注入与 Core 钩子），
+            // 记录上游实际发送的内容。
+            for ev in &events {
+                audit.up_asm.feed(ev);
+            }
+
             // 先按本批事件更新水印判定状态，再决定注入 —— 顺序反了会漏判
             // 同批里 MessageStop 之前刚出现的 tool_use 块。
             // BlockDelta 也要算：chat 系上游从不为正文发 BlockStart（OpenAI Chat
@@ -385,6 +540,7 @@ pub fn build_stream_response(
                         break 'stream;
                     }
                 };
+                let mut sent = false;
                 for mut cc in cchunks {
                     // [RAW] 客户端 chunk 钩子（可改写/丢弃）。
                     // 出错时与上游侧对称地记 warn 后放行——原先被 `if let Ok(..)` 静默吞掉。
@@ -394,6 +550,11 @@ pub fn build_stream_response(
                         Ok(ChunkVerdict::Forward) => {}
                     }
                     yield Ok(chunk_to_event(&cc));
+                    sent = true;
+                }
+                // 只有真正产出了客户端字节的事件才算「客户端收到的」。
+                if sent {
+                    audit.down_asm.feed(&ev);
                 }
             }
         }
@@ -454,6 +615,7 @@ pub fn build_stream_response(
                 .await
                 {
                     Ok(cchunks) => {
+                        let mut sent = false;
                         for mut cc in cchunks {
                             match hooks.on_client_chunk_raw(&ctx, &mut cc).await {
                                 Ok(ChunkVerdict::Drop) => continue,
@@ -461,6 +623,10 @@ pub fn build_stream_response(
                                 Ok(ChunkVerdict::Forward) => {}
                             }
                             yield Ok(chunk_to_event(&cc));
+                            sent = true;
+                        }
+                        if sent {
+                            audit.down_asm.feed(&ev);
                         }
                     }
                     Err(e) => tracing::warn!(error = %e, "收尾事件编码失败"),
@@ -496,6 +662,8 @@ mod tests {
             start: Instant::now(),
             failed: failed.map(str::to_string),
             completed,
+            up_asm: StreamAssembler::default(),
+            down_asm: StreamAssembler::default(),
         }
     }
 
@@ -536,6 +704,88 @@ mod tests {
             })
             .unwrap();
         assert_eq!(rows[0].status.as_deref(), Some("aborted"));
+    }
+
+    /// 聚合器把事件流还原成 CoreResponse：裸 delta 建占位块、tool 参数
+    /// 拼串后 parse、usage 取逐帧最大值。
+    #[test]
+    fn assembler_merges_deltas_into_response() {
+        use moonbridge_core::StopReason;
+        let mut a = StreamAssembler::default();
+        a.feed(&CoreStreamEvent::MessageStart {
+            id: "m1".into(),
+            model: "gpt-x".into(),
+        });
+        // chat 系正文是裸 delta：无 BlockStart 也要聚出 Text 块
+        a.feed(&CoreStreamEvent::BlockDelta {
+            index: 0,
+            delta: StreamDelta::Text { text: "Hel".into() },
+        });
+        a.feed(&CoreStreamEvent::BlockDelta {
+            index: 0,
+            delta: StreamDelta::Text { text: "lo".into() },
+        });
+        a.feed(&CoreStreamEvent::BlockStart {
+            index: 1,
+            block: moonbridge_core::ContentBlock::ToolUse {
+                id: "c1".into(),
+                name: "f".into(),
+                namespace: None,
+                input: Value::Null,
+                signature: None,
+            },
+        });
+        a.feed(&CoreStreamEvent::BlockDelta {
+            index: 1,
+            delta: StreamDelta::ToolInput {
+                partial_json: "{\"a\":".into(),
+            },
+        });
+        a.feed(&CoreStreamEvent::BlockDelta {
+            index: 1,
+            delta: StreamDelta::ToolInput {
+                partial_json: "1}".into(),
+            },
+        });
+        a.feed(&CoreStreamEvent::MessageDelta {
+            stop_reason: Some(StopReason::ToolUse),
+            usage: Some(Usage {
+                input_tokens: 5,
+                output_tokens: 3,
+                ..Usage::default()
+            }),
+        });
+        a.feed(&CoreStreamEvent::MessageStop);
+
+        let v = a.finish();
+        assert_eq!(v["id"], "m1");
+        assert_eq!(v["stop_reason"], "tool_use");
+        assert_eq!(v["content"][0]["text"], "Hello");
+        assert_eq!(v["content"][1]["input"], json!({"a": 1}));
+        assert_eq!(v["usage"]["input_tokens"], 5);
+    }
+
+    /// BlockStop 携带的完整块优先于累积值；空流不伪造响应。
+    #[test]
+    fn assembler_block_stop_wins_and_empty_is_null() {
+        let mut a = StreamAssembler::default();
+        a.feed(&CoreStreamEvent::BlockDelta {
+            index: 0,
+            delta: StreamDelta::Reasoning { text: "思".into() },
+        });
+        a.feed(&CoreStreamEvent::BlockStop {
+            index: 0,
+            block: Some(moonbridge_core::ContentBlock::Reasoning {
+                text: "思考".into(),
+                signature: Some("sig".into()),
+                redacted: false,
+            }),
+        });
+        let v = a.finish();
+        assert_eq!(v["content"][0]["text"], "思考");
+        assert_eq!(v["content"][0]["signature"], "sig");
+
+        assert!(StreamAssembler::default().finish().is_null());
     }
 
     #[test]

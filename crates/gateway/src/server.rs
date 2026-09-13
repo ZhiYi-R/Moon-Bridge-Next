@@ -30,7 +30,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/models", get(handlers::models))
         .route("/models", get(handlers::models))
         // 入站 body 上限：axum 默认仅 2MB，大上下文/多图请求会被 413 误拒。
-        // 复用 max_body_bytes（默认 8MB）与插件报文层钩子同一口径。
+        // 复用 max_body_bytes（默认 100MB）与插件报文层钩子同一口径。
         .layer(DefaultBodyLimit::max(state.config.max_body_bytes))
         .layer(CorsLayer::permissive())
         .with_state(state)

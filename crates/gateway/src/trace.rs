@@ -65,9 +65,11 @@ pub struct TraceRecord {
     pub client_request: Value,
     /// 上游出站请求快照 `{ method, url, headers, body }`（经出站报文钩子后）。
     pub upstream_request: Value,
-    /// 上游入站响应体（非流式）；流式为 `null`。
+    /// 上游入站响应体（非流式）；流式为上游事件流聚合出的最终消息
+    /// （`CoreResponse` 形态，见 `stream::StreamAssembler`）。
     pub upstream_response: Value,
-    /// 回写客户端的响应体（非流式）；流式为 `null`。
+    /// 回写客户端的响应体（非流式）；流式为实际下发事件聚合出的最终消息
+    /// （含插件过滤与水印注入效果）。
     pub client_response: Value,
     pub error: Option<String>,
 }

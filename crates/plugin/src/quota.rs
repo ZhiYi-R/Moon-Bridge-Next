@@ -43,8 +43,9 @@ impl Default for SandboxLimits {
             // 2 亿指令：足够正常插件跑完，又能秒级掐断死循环
             max_instructions: 200_000_000,
             instruction_step: 2000,
-            // 256 MB：单插件 Lua 状态内存上限
-            max_memory_bytes: 256 * 1024 * 1024,
+            // 1024 MB：单插件 Lua 状态内存上限。网关 max_body_bytes 默认
+            // 100MB，大报文展开为 Lua table 需要数倍于原体的内存余量。
+            max_memory_bytes: 1024 * 1024 * 1024,
             call_timeout: Duration::from_secs(10),
             // 4 MB：超过此体积的 raw body 不展开为 Lua table
             max_body_bytes: 4 * 1024 * 1024,

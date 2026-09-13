@@ -18,8 +18,10 @@ pub struct GatewayConfig {
     /// 所有上游调用的出站代理（HTTP(S)）。
     #[serde(default)]
     pub egress_proxy: Option<String>,
-    /// body 大小上限（字节）。两处生效：报文层钩子处理（超限降级为只读并
-    /// 跳过 Lua）与上游非流式/错误响应体读取（超限以 502 拒绝）。
+    /// body 大小上限（字节）。三处生效：入站请求体（axum DefaultBodyLimit）、
+    /// 报文层钩子处理（超限降级为只读并跳过 Lua）、上游非流式/错误响应体读取
+    /// （超限以 502 拒绝）。默认 100MB：大上下文/多图/长文档场景足够，
+    /// 又保留了对失控请求的最后防线。
     #[serde(default = "default_max_body")]
     pub max_body_bytes: usize,
     /// 插件脚本目录：`script_ref` 里的相对 `.lua` 路径归一到此处，绝对路径也必须
@@ -63,7 +65,7 @@ fn default_addr() -> String {
     "127.0.0.1:38440".to_string()
 }
 fn default_max_body() -> usize {
-    8 * 1024 * 1024
+    100 * 1024 * 1024
 }
 fn default_timeout() -> u64 {
     300

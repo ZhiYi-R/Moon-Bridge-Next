@@ -195,9 +195,9 @@ function MB.on_request(ctx, req) ... end -- 就地修改 req 即生效，亦可 
 
 - **沙箱与配额**（`crates/plugin/src/quota.rs` + `host::sandbox`）：把 `os / io / loadfile / dofile / require / package` 六个全局**整体置 nil**（`require` 与 `package` 必须一起移除——留着它们等于留着 `require("io")` / `package.loadlib` 的重取通道），并施加四项硬性配额：
   - **指令计数**：每插件一个 `ExecutionBudget`，经 Lua debug hook（`every_nth_instruction`，默认 step 2000）累加，超 `max_instructions`（默认 2 亿）即中止，掐断死循环。因 Lua debug hook **按 `lua_State`（线程）生效且不被新建线程继承**，需两处补挂：宿主侧 `call_async` 以 `create_thread + Thread::set_hook + into_async` 绑定本次调用的协程；插件侧则注入 `COROUTINE_PATCH` 覆写 `coroutine.create`/`wrap`，线程一诞生即经宿主回调 `__mb_bind_thread` 补挂**同一颗**预算钩子。否则插件内 `coroutine.wrap(function() while true do end end)()` 会在全新无钩线程里死循环，绕过指令配额与超时，并因 `Lua` 互斥守卫跨 await 持有而永久卡死该插件的请求链路。补丁内 `bind` 与 `new_thread` 均为 upvalue，插件覆写 `coroutine.create` 或置空 `__mb_bind_thread` 都无法造出无钩线程。
-  - **内存上限**：`Lua::set_memory_limit`（默认 256 MB），越界分配触发 `MemoryError`。
+  - **内存上限**：`Lua::set_memory_limit`（默认 1024 MB），越界分配触发 `MemoryError`。
   - **执行超时**：hook 内附带 wall-clock 截止时间（`call_timeout`），覆盖缓慢（非死循环）的长计算。
-  - **body 降级**：raw body 超 `max_body_bytes` 时不展开为 Lua table（置 `nil` + `body_truncated` 标记），回写时保留原始报文，避免超大报文撑爆沙箱。
+  - **body 降级**：raw body 超 `max_body_bytes` 时不展开为 Lua table（置 `nil` + `body_truncated` 标记），回写时保留原始报文，避免超大报文撑爆沙箱。阈值随 `GatewayConfig.max_body_bytes`（默认 100 MB），故大报文展开依赖内存上限（默认 1024 MB）兜底。
   - `mb.http.request` 未显式指定超时则由 gateway bridge 施加兜底超时（默认 30s），防止 raw 钩子内挂死。
   - 配额上限由 `SandboxLimits` 描述，gateway 从 `GatewayConfig` 派生注入。注意 `request_timeout_secs` **只**用于推导插件的 `call_timeout`；上游 HTTP 请求**刻意不设总超时**（长流式请求不应被网关截断），仅受连接与 egress 策略约束。
 - **HostBridge**（crates/plugin/src/bridge.rs）：受控宿主能力契约，由 gateway 实现并注入，维持 plugin 不依赖 gateway 的单向依赖。
@@ -231,7 +231,8 @@ SQLite（rusqlite, bundled + WAL），手写版本化 migration，每表一个 D
 
 - api_key 加密：`EncKey` 抽象（脚手架用 `PlaintextKey`，**当前 API Key 明文落库**，生产可换 aes-gcm/keyring）。列名 `api_key_enc` 是为切换预留的。
 - `status` 取值 `ok` / `error` / `aborted`（流未读尽即结束，如客户端断开）；`ttft_ms` 仅流式请求有值。
-- trace 大对象存文件系统 `app_data_dir/traces/<session>/<model>/<seq>.json`，不入库。
+- trace 大对象存文件系统 `app_data_dir/traces/<session>/<model>/<created_at>-<short_id>.json`（`short_id` 为 request_id 首段），不入库。
+- trace 的 `upstreamResponse`/`clientResponse`：**非流式**记协议响应体原文；**流式**记 `StreamAssembler` 从事件流聚合出的最终消息（`CoreResponse` 形态，见 §8）。
 
 ---
 
@@ -296,6 +297,13 @@ Client → axum: POST /v1/responses | /v1/messages | /v1/chat/completions
 > 根本不会执行。解码错误与**编码错误**都以 `'stream` 标签跳出整条流（编码错误原先只 break 内层
 > `for`，会反复刷 error 事件）；raw chunk 钩子返回 `Err` 时上下游侧对称地记 `warn` 后放行，
 > 不再被 `if let Ok(..)` 静默吞掉。
+>
+> **流式响应体由 `StreamAssembler` 聚合落盘**：trace 的两个响应字段不再是 `null`——
+> `upstream_response` 喂入 decode 后、Core 钩子**前**的事件（上游实际发送的内容），
+> `client_response` 只喂入实际编码下发的事件（客户端实际收到的内容，含插件过滤与
+> 会话水印注入的效果）；两者对照即可看出插件对流的改写。聚合以最终消息体为上界
+> （裸 delta 自动建占位块、`ToolUse` 的 `partial_json` 拼串后一次 parse、`BlockStop`
+> 携带的完整块优先），不存逐 chunk 时序；`record_bodies=false` 时照常抹除。
 
 > **出站改写经 `dispatch::apply_outbound` 全量回读**：`method` / `url` / `headers` / `body`
 > 四项都写回 `UpstreamRequest`。历史上 `method` 只写进递给 Lua 的表却从不回读（改它无效），
@@ -341,8 +349,10 @@ Vue 3.5 + Vite 7 + TS 5 + Pinia + Vue Router + TailwindCSS 3 + shadcn-vue 风格
 - `src/lib/api.ts`：前后端契约层（DTO 类型 + command 封装，按领域分组）。
 - `src/stores/`：Pinia（gateway 状态、provider 列表）。
 - `src/router`：hash 路由（Tauri 自定义协议友好）。
-- `src/views/`：Dashboard（网关状态 + 用量 + Provider 概览）、Providers（完整 CRUD）、Models（模型 CRUD + 从 models.dev 搜索勾选批量导入 + provider 维度 Offer 管理，Offer 可绑定端点协议）、Routes、Plugins（在线脚本编辑 + 启停/增删 + 一键重启网关生效）、Usage（汇总卡片 + token 时序堆叠柱图 + 模型分布条图 + 明细表，纯CSS/SVG 无额外依赖）、Traces（主从布局浏览 + 各阶段报文 JSON + 删除）、Settings。
-- `src/components/ui`：Button / Badge / Input / Label / Card（精简 shadcn 风格）。
+- `src/views/`：Dashboard（网关状态 + 用量 + Provider 概览）、Providers（完整 CRUD）、Models（模型 CRUD + 从 models.dev 搜索勾选批量导入 + provider 维度 Offer 管理，Offer 可绑定端点协议；两区可拖拽分栏）、Routes（别名 CRUD + 必填校验 + 可搜索模型下拉）、Plugins（在线脚本编辑 + 启停/增删 + 一键重启网关生效）、Usage（汇总卡片 + token 时序堆叠柱图 + 模型分布 Top 3 + 其他聚合 + 明细表，纯CSS/SVG 无额外依赖）、Traces（主从布局 + 可拖宽列表 + ↑↓ 键盘导航 + 各阶段报文只读高亮，超 256KB 回退纯文本 + 删除）、Settings（网关分区默认展开）。
+- `src/components/ui`：Button / Badge / Card / Input / Label / Modal（动画 + dirty 守卫）/ Select / Switch / Pagination / ToastHost / CodeEditor（CodeMirror 6）等，精简 shadcn 风格。
+- `src/composables/`：`useConfirm`（Promise 化确认弹窗）、`useToast`（全局通知）、`useAutoPageSize`（实测行高分页 + 页首行锚定防漂移）、`usePointerDrag`（拖宽/分栏共用）。
+- 反馈与自适应：保存/删除统一走 toast；网关状态 4s 轮询；列表区分加载态与空态；表单网格 `auto-fit minmax` 随窗口宽度换列。
 
 ---
 
@@ -384,8 +394,8 @@ cargo tauri build
 M5 Lua 插件系统（Core 层 + 报文层 raw 钩子、宿主 API、沙箱配额硬化、示例插件、Plugins 管理页）·
 M6 四协议全矩阵 + Usage/Traces 可视化。
 
-- 5 个 lib crate + src-tauri + ui 全部编译通过；`cargo test --workspace` 全绿 **152 项**
-  （core 9 / protocol 41 / plugin 19 lib + 4 integration / store 5 / gateway 45 lib + 23 e2e / app 6）；
+- 5 个 lib crate + src-tauri + ui 全部编译通过；`cargo test --workspace` 全绿 **233 项**
+  （core 9 / protocol 101 / plugin 19 lib + 5 integration / store 7 / gateway 52 lib + 26 e2e / app 14）；
   `cargo check --workspace --all-targets` 与 `cargo clippy --workspace --all-targets` 均**零告警**；
   `pnpm --dir ui type-check`（`vue-tsc --noEmit`）无错。
   原存量的 6 条 clippy 提示已全部清理：4 处真改（两处 markdown 文档列表缺空行分隔、
@@ -409,7 +419,8 @@ M6 四协议全矩阵 + Usage/Traces 可视化。
   均有回归测试（死循环中止、内存越界报错、超大 body 降级且保留原始报文、`require`/`package`
   逃逸通道被切断、`coroutine.wrap` 死循环仍被指令配额中止、且补丁不破坏协程正常语义）。
 - **trace 落盘**：网关按 `GatewayConfig.trace_dir` 将每次请求的各阶段报文快照写入
-  `<trace_dir>/<session>/<model>/<created_at>-<id>.json`（见 §7/§8）；前端 Traces 页可浏览/查看/删除。
+  `<trace_dir>/<session>/<model>/<created_at>-<short_id>.json`（见 §7/§8）；流式请求的
+  两个响应字段由 `StreamAssembler` 聚合（见 §8）；前端 Traces 页可浏览/查看/删除。
 - **前端**：Dashboard / Providers / Models(+Offer) / Routes / Plugins(在线编辑) / Usage(图表) /
   Traces(浏览) / Settings 全部打通；脚本与 JSON 编辑走 `components/ui/CodeEditor.vue`
   （CodeMirror 6 + oneDark，lua 经 `@codemirror/legacy-modes` 的 `StreamLanguage`，json 经 `@codemirror/lang-json`）。

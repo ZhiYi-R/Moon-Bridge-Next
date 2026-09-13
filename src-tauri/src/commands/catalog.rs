@@ -352,11 +352,13 @@ mod tests {
         use moonbridge_store::Database;
         let db = Database::open_in_memory().unwrap();
         let pricing = json!({ "input": 3.0, "output": 15.0 });
-        // 用户 key 下的空定价行（Provider 页绑定的产物）+ 手填过的行 + 目录 key 行
+        // 用户 key 下的空定价行（Provider 页绑定的产物）+ 目录 key 行 + 手填过的行。
+        // 注意顺序：upsert_offer 对 pricing=None 的新行会经 same_slug_pricing 继承
+        // 同 slug 的已有定价——空行须先于手填行插入才能保持 NULL。
         for (key, p) in [
             ("mykey", None),
-            ("mykey2", Some(json!({ "input": 99.0 }))),
             ("anthropic", None),
+            ("mykey2", Some(json!({ "input": 99.0 }))),
         ] {
             db.upsert_offer(&Offer {
                 provider_key: key.into(),
