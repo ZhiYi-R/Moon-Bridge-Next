@@ -86,6 +86,7 @@ impl ProviderStreamAdapter for AnthropicAdapter {
                 let block = match cb.get("type").and_then(|t| t.as_str()) {
                     Some("tool_use") => ContentBlock::ToolUse {
                         id: cb.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                        item_id: None,
                         name: cb.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
                         namespace: None,
                         input: cb.get("input").cloned().unwrap_or_else(|| Value::Null),
@@ -396,10 +397,9 @@ impl ClientStreamAdapter for AnthropicAdapter {
                 // 官方 message_delta.usage 为累计口径：发跨 delta 合并后的累计值——
                 // 上游（OpenAI 系）仅在流末给出用量，Anthropic 上游则把 input 放在
                 // message_start；客户端（Claude Code 等）靠它管理上下文，缺了
-                // input_tokens 会退化为无法估算上下文窗口占用
-                if st.usage_acc != Usage::default() {
-                    data["usage"] = anthropic_usage_out(&st.usage_acc);
-                }
+                // input_tokens 会退化为无法估算上下文窗口占用。
+                // usage 字段本身必填（Anthropic SDK 模型要求），上游未上报时发零值。
+                data["usage"] = anthropic_usage_out(&st.usage_acc);
                 out.push(client_sse("message_delta", data));
             }
             CoreStreamEvent::MessageStop => {

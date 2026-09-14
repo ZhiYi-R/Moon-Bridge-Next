@@ -140,6 +140,7 @@ fn call_item_to_message(item: &Value, namespace: Option<String>) -> Message {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
+    let item_id = item.get("id").and_then(|v| v.as_str()).map(String::from);
     let name = item
         .get("name")
         .and_then(|v| v.as_str())
@@ -168,6 +169,7 @@ fn call_item_to_message(item: &Value, namespace: Option<String>) -> Message {
         role: Role::Assistant,
         content: vec![ContentBlock::ToolUse {
             id,
+            item_id,
             name,
             namespace,
             input,
@@ -470,12 +472,17 @@ impl ClientAdapter for OpenAiResponsesAdapter {
                 }
                 ContentBlock::ToolUse {
                     id,
+                    item_id,
                     name,
                     input,
                     ..
                 } => {
                     flush_text(&mut text_buf, &mut output, &mut item_seq);
+                    let iid = item_id
+                        .clone()
+                        .unwrap_or_else(|| format!("fc_{}", { item_seq += 1; item_seq }));
                     output.push(dto::function_call_item(
+                        &iid,
                         id,
                         name,
                         &input.to_string(),

@@ -53,10 +53,20 @@ pub fn message_item(id: &str, text: &str, status: &str) -> Value {
     })
 }
 
-/// 构造一个 function_call output item。
-pub fn function_call_item(call_id: &str, name: &str, arguments: &str, status: &str) -> Value {
+/// 构造一个 function_call output item。`id` 是 item 级标识（流式
+/// `item_id` 关联键），`call_id` 是工具调用关联键——两者都是规范
+/// 必填字段；严格校验的客户端（AI SDK/ZCode 系）缺 `id` 会直接
+/// 丢弃整个 output_item 事件，工具调用静默消失。
+pub fn function_call_item(
+    id: &str,
+    call_id: &str,
+    name: &str,
+    arguments: &str,
+    status: &str,
+) -> Value {
     json!({
         "type": "function_call",
+        "id": id,
         "call_id": call_id,
         "name": name,
         "arguments": arguments,

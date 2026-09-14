@@ -383,6 +383,7 @@ mod tests {
                 ContentBlock::text("sure"),
                 ContentBlock::ToolUse {
                     id: "t".into(),
+                    item_id: None,
                     name: "n".into(),
                     namespace: None,
                     input: serde_json::json!({}),

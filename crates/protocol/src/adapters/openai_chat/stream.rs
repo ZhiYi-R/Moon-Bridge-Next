@@ -351,6 +351,7 @@ impl ProviderStreamAdapter for OpenAiChatAdapter {
                             .and_then(|v| v.as_str())
                             .unwrap_or_default()
                             .to_string(),
+                        item_id: None,
                         name: fn_obj
                             .get("name")
                             .and_then(|v| v.as_str())
@@ -455,6 +456,7 @@ mod tests {
                     index: 2,
                     block: ContentBlock::ToolUse {
                         id: "call_1".into(),
+                        item_id: None,
                         name: "get_time".into(),
                         namespace: None,
                         input: json!({}),
@@ -487,6 +489,7 @@ mod tests {
                     index: 5,
                     block: ContentBlock::ToolUse {
                         id: "call_2".into(),
+                        item_id: None,
                         name: "f".into(),
                         namespace: None,
                         input: json!({}),

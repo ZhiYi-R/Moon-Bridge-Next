@@ -163,6 +163,7 @@ pub fn chat_to_core_messages(msgs: &[Value]) -> Vec<Message> {
                 let args = parse_call_arguments(fn_obj.get("arguments"));
                 content.push(ContentBlock::ToolUse {
                     id: tc.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    item_id: None,
                     name: fn_obj.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
                     namespace: None,
                     input: args,
@@ -459,6 +460,7 @@ pub fn chat_choice_to_core(choice: &Value) -> (Vec<ContentBlock>, Option<StopRea
             let args = parse_call_arguments(fn_obj.get("arguments"));
             content.push(ContentBlock::ToolUse {
                 id: tc.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                item_id: None,
                 name: fn_obj.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
                 namespace: None,
                 input: args,
@@ -909,6 +911,7 @@ mod tests {
             content: vec![
                 ContentBlock::ToolUse {
                     id: "c1".into(),
+                    item_id: None,
                     name: "f".into(),
                     namespace: None,
                     input: json!({ "x": 1 }),

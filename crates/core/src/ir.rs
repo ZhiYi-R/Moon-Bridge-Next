@@ -57,6 +57,11 @@ pub enum ContentBlock {
     /// 模型发起的工具调用。
     ToolUse {
         id: String,
+        /// item 级标识：Responses `function_call` item 的 `id`（`fc_...`），
+        /// 与 `id`（call_id，工具调用关联键）是两个不同字段。仅
+        /// Responses 协议有此概念，其余协议恒为 None。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item_id: Option<String>,
         name: String,
         /// namespace 工具（如 Codex `multi_agent_v1`）的 wrapper 名，可为空。
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -395,6 +400,7 @@ mod tests {
     fn content_block_tool_use_roundtrip() {
         let block = ContentBlock::ToolUse {
             id: "call_1".into(),
+            item_id: None,
             name: "get_time".into(),
             namespace: None,
             input: serde_json::json!({"tz": "UTC"}),

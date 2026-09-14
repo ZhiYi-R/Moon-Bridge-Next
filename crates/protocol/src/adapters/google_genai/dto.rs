@@ -624,6 +624,7 @@ pub fn part_to_blocks(p: &Value) -> Vec<ContentBlock> {
         }
         out.push(ContentBlock::ToolUse {
             id,
+            item_id: None,
             name,
             namespace: None,
             input: args,
@@ -699,6 +700,7 @@ pub fn part_to_blocks(p: &Value) -> Vec<ContentBlock> {
         }
         out.push(ContentBlock::ToolUse {
             id: EXEC_CODE.to_string(),
+            item_id: None,
             name: EXEC_CODE.to_string(),
             namespace: None,
             input: ec.clone(),
@@ -988,6 +990,7 @@ mod tests {
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
                     id: "c1".into(),
+                    item_id: None,
                     name: "get_time".into(),
                     namespace: None,
                     input: json!({"tz": "UTC"}),
@@ -1062,6 +1065,7 @@ mod tests {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
                 id: "c1".into(),
+                item_id: None,
                 name: "get_time".into(),
                 namespace: None,
                 input: json!({"tz": "UTC"}),
@@ -1120,8 +1124,8 @@ mod tests {
             Message {
                 role: Role::Assistant,
                 content: vec![
-                    ContentBlock::ToolUse { id: "c1".into(), name: "a".into(), namespace: None, input: json!({}), signature: None },
-                    ContentBlock::ToolUse { id: "c2".into(), name: "b".into(), namespace: None, input: json!({}), signature: None },
+                    ContentBlock::ToolUse { id: "c1".into(), item_id: None, name: "a".into(), namespace: None, input: json!({}), signature: None },
+                    ContentBlock::ToolUse { id: "c2".into(), item_id: None, name: "b".into(), namespace: None, input: json!({}), signature: None },
                 ],
                 ext: Default::default(),
             },
@@ -1158,6 +1162,7 @@ mod tests {
                     },
                     ContentBlock::ToolUse {
                         id: "c1".into(),
+                        item_id: None,
                         name: "f".into(),
                         namespace: None,
                         input: json!({}),
@@ -1195,6 +1200,7 @@ mod tests {
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
                     id: "c1".into(),
+                    item_id: None,
                     name: "read_file".into(),
                     namespace: None,
                     input: json!({ "path": "a.png" }),
@@ -1390,6 +1396,7 @@ mod tests {
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
                     id: "t1".into(),
+                    item_id: None,
                     name: "exec".into(),
                     namespace: None,
                     input: json!({}),

@@ -156,6 +156,7 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
                     index: idx,
                     block: ContentBlock::ToolUse {
                         id: id.clone(),
+                        item_id: None,
                         name: name.clone(),
                         namespace: None,
                         input: json!({}),
@@ -170,6 +171,7 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
                     index: idx,
                     block: Some(ContentBlock::ToolUse {
                         id,
+                        item_id: None,
                         name,
                         namespace: None,
                         input: args,

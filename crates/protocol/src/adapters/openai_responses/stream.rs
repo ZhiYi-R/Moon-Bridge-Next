@@ -30,6 +30,16 @@ fn item_id(index: usize) -> String {
     format!("msg_{index}")
 }
 
+/// function_call item 的 `id`/`item_id`：优先用上游透传的真实 item id，
+/// 上游未给（或非 Responses 上游）时由 output_index 稳定派生，
+/// added / arguments.delta / arguments.done / done / completed 共用。
+fn tool_item_id(st: &StreamEncodeState, index: usize) -> String {
+    if let Some(ContentBlock::ToolUse { item_id: Some(id), .. }) = st.blocks.get(&index) {
+        return id.clone();
+    }
+    format!("fc_{index}")
+}
+
 #[async_trait]
 impl ClientStreamAdapter for OpenAiResponsesAdapter {
     fn protocol(&self) -> Protocol {
@@ -70,7 +80,9 @@ impl ClientStreamAdapter for OpenAiResponsesAdapter {
                         json!({
                             "type": event::OUTPUT_ITEM_ADDED,
                             "output_index": index,
-                            "item": dto::function_call_item(id, name, "", "in_progress"),
+                            "item": dto::function_call_item(
+                                &tool_item_id(st, *index), id, name, "", "in_progress"
+                            ),
                         }),
                     ));
                 }
@@ -128,7 +140,7 @@ impl ClientStreamAdapter for OpenAiResponsesAdapter {
                         event::FUNC_ARGS_DELTA,
                         json!({
                             "type": event::FUNC_ARGS_DELTA,
-                            "item_id": item_id(*index),
+                            "item_id": tool_item_id(st, *index),
                             "output_index": index,
                             "delta": partial_json,
                         }),
@@ -136,13 +148,15 @@ impl ClientStreamAdapter for OpenAiResponsesAdapter {
                 }
                 StreamDelta::Reasoning { text } => {
                     st.push_delta(*index, text);
-                    // 摘要明文增量：客户端累积后随 output_item.done 的 item 一致
+                    // 摘要明文增量：客户端累积后随 output_item.done 的 item 一致。
+                    // summary_index 必填——严格校验的客户端缺它丢弃整个增量。
                     out.push(sse(
                         event::REASONING_SUMMARY_TEXT_DELTA,
                         json!({
                             "type": event::REASONING_SUMMARY_TEXT_DELTA,
                             "item_id": item_id(*index),
                             "output_index": index,
+                            "summary_index": 0,
                             "delta": text,
                         }),
                     ));
@@ -202,7 +216,7 @@ impl ClientStreamAdapter for OpenAiResponsesAdapter {
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| {
                             if input.is_object() && input.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-                                String::new()
+                                "{}".to_string()
                             } else {
                                 input.to_string()
                             }
@@ -211,7 +225,7 @@ impl ClientStreamAdapter for OpenAiResponsesAdapter {
                         event::FUNC_ARGS_DONE,
                         json!({
                             "type": event::FUNC_ARGS_DONE,
-                            "item_id": item_id(*index),
+                            "item_id": tool_item_id(st, *index),
                             "output_index": index,
                             "name": name,
                             "arguments": args,
@@ -222,7 +236,9 @@ impl ClientStreamAdapter for OpenAiResponsesAdapter {
                         json!({
                             "type": event::OUTPUT_ITEM_DONE,
                             "output_index": index,
-                            "item": dto::function_call_item(&id, &name, &args, "completed"),
+                            "item": dto::function_call_item(
+                                &tool_item_id(st, *index), &id, &name, &args, "completed"
+                            ),
                         }),
                     ));
                 }
@@ -272,11 +288,10 @@ impl ClientStreamAdapter for OpenAiResponsesAdapter {
                 // 用量取跨 delta 合并后的累计值：Anthropic 上游把 input 放在
                 // message_start、output 放在收尾 message_delta，单看末个 delta
                 // 只有半份。
-                let usage = if st.usage_acc == moonbridge_core::Usage::default() {
-                    Value::Null
-                } else {
-                    dto::usage_object(&st.usage_acc)
-                };
+                // usage 是终态 response 的必填对象：上游未上报时也要发
+                // 零值对象，发 null 会让严格校验的客户端丢掉整个
+                // response.completed（finish 事件随之丢失）。
+                let usage = dto::usage_object(&st.usage_acc);
                 // 截断终止 → response.incomplete（缺省视为 completed）。
                 let (ty, status, detail) = match reason {
                     StopReason::MaxTokens => (
@@ -361,14 +376,14 @@ fn assembled_output(st: &StreamEncodeState) -> Vec<Value> {
             ContentBlock::ToolUse { id, name, input, .. } => {
                 let args = if acc.is_empty() {
                     if input.is_object() && input.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-                        String::new()
+                        "{}".to_string()
                     } else {
                         input.to_string()
                     }
                 } else {
                     acc
                 };
-                dto::function_call_item(id, name, &args, "completed")
+                dto::function_call_item(&tool_item_id(st, index), id, name, &args, "completed")
             }
             ContentBlock::Text { text } => {
                 let text = if acc.is_empty() { text.clone() } else { acc };
@@ -413,6 +428,7 @@ impl ProviderStreamAdapter for OpenAiResponsesAdapter {
                 let block = match item.get("type").and_then(|t| t.as_str()) {
                     Some("function_call") => ContentBlock::ToolUse {
                         id: item.get("call_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                        item_id: item.get("id").and_then(|v| v.as_str()).map(String::from),
                         name: item.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
                         namespace: None,
                         input: json!({}),
@@ -494,6 +510,7 @@ impl ProviderStreamAdapter for OpenAiResponsesAdapter {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or_default()
                                 .to_string(),
+                            item_id: item.get("id").and_then(|v| v.as_str()).map(String::from),
                             name: item
                                 .get("name")
                                 .and_then(|v| v.as_str())
@@ -713,6 +730,7 @@ mod tests {
                 index: 1,
                 block: ContentBlock::ToolUse {
                     id: "call_9".into(),
+                    item_id: Some("fc_up".into()),
                     name: "get_time".into(),
                     namespace: None,
                     input: json!({}),
@@ -723,6 +741,9 @@ mod tests {
         let item = &start[0].data.as_json().unwrap();
         assert_eq!(item["type"], "response.output_item.added");
         assert_eq!(item["item"]["type"], "function_call");
+        // item 级 id 必填：严格校验的客户端缺它直接丢弃整个事件；
+        // 上游给了 item id 时优先透传
+        assert_eq!(item["item"]["id"], "fc_up");
         assert_eq!(item["item"]["call_id"], "call_9");
 
         adapter.encode(&ctx, &CoreStreamEvent::BlockDelta {
@@ -735,6 +756,7 @@ mod tests {
                 index: 1,
                 block: Some(ContentBlock::ToolUse {
                     id: "call_9".into(),
+                    item_id: Some("fc_up".into()),
                     name: "get_time".into(),
                     namespace: None,
                     input: json!({"tz": "UTC"}),
@@ -751,11 +773,34 @@ mod tests {
             vec!["response.function_call_arguments.done", "response.output_item.done"],
             "FC 收尾应是 arguments.done + output_item.done"
         );
+        // arguments.done / output_item.done 的 item_id 与 item.id 一致
+        assert_eq!(stop[0].data.as_json().unwrap()["item_id"], "fc_up");
         let done_item = &stop[1].data.as_json().unwrap();
         assert_eq!(done_item["item"]["type"], "function_call");
+        assert_eq!(done_item["item"]["id"], "fc_up");
         assert_eq!(done_item["item"]["call_id"], "call_9");
         assert_eq!(done_item["item"]["arguments"], "{\"tz\":\"UTC\"}");
         assert_eq!(done_item["item"]["status"], "completed");
+    }
+
+    /// 推理摘要增量必须携带 summary_index——严格校验的客户端（AI SDK 系）
+    /// schema 里它是必填 number，缺失会使整个增量事件被丢弃。
+    #[test]
+    fn reasoning_summary_delta_carries_summary_index() {
+        let adapter = OpenAiResponsesAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::OpenAiResponse);
+        let mut st = StreamEncodeState::default();
+        let evs = adapter
+            .encode(&ctx, &CoreStreamEvent::BlockDelta {
+                index: 0,
+                delta: StreamDelta::Reasoning { text: "hmm".into() },
+            }, &mut st)
+            .unwrap();
+        let d = evs[0].data.as_json().unwrap();
+        assert_eq!(d["type"], "response.reasoning_summary_text.delta");
+        assert_eq!(d["summary_index"], 0);
+        assert_eq!(d["item_id"], "msg_0");
+        assert_eq!(d["delta"], "hmm");
     }
 
     /// response.completed 必须携带组装好的 output（reasoning/message/
@@ -799,6 +844,8 @@ mod tests {
             .iter()
             .find_map(|c| c.data.as_json().cloned())
             .unwrap();
+        // 上游未上报 usage 时也必须发 usage 对象（必填字段）
+        assert_eq!(completed["response"]["usage"]["input_tokens"], 0);
         let output = completed["response"]["output"].as_array().unwrap();
         assert_eq!(output.len(), 2);
         assert_eq!(output[0]["type"], "reasoning");

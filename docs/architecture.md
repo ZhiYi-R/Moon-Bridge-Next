@@ -51,8 +51,8 @@ Rust enum + serde，类型安全；mlua 的 `serialize` 特性自动与 Lua tabl
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text { text }, Image { image_data, media_type },
-    ToolUse { id, name, namespace, input }, ToolResult { tool_use_id, content, is_error },
-    Reasoning { text, signature },
+    ToolUse { id, item_id, name, namespace, input, signature }, ToolResult { tool_use_id, content, is_error },
+    Reasoning { text, signature, redacted },
 }
 #[serde(rename_all = "lowercase")] pub enum Role { System, User, Assistant, Tool }
 pub struct Message { role, content: Vec<ContentBlock>, ext: Map }

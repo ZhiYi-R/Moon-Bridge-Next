@@ -280,6 +280,7 @@ pub(super) fn anthropic_to_block(v: &Value) -> Option<ContentBlock> {
         }
         "tool_use" => Some(ContentBlock::ToolUse {
             id: v.get("id").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+            item_id: None,
             name: v.get("name").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
             namespace: None,
             input: v.get("input").cloned().unwrap_or_else(|| json!({})),
@@ -813,6 +814,7 @@ mod tests {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
                 id: "t1".into(),
+                item_id: None,
                 name: "f".into(),
                 namespace: None,
                 input: json!({}),

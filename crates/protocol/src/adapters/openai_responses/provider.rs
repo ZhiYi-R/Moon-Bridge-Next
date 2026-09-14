@@ -154,6 +154,7 @@ fn build_input(req: &CoreRequest) -> Vec<Value> {
                 },
                 ContentBlock::ToolUse {
                     id,
+                    item_id,
                     name,
                     input: tool_input,
                     namespace,
@@ -167,6 +168,11 @@ fn build_input(req: &CoreRequest) -> Vec<Value> {
                         .filter(|n| n.ends_with("_call"))
                         .unwrap_or("function_call");
                     let mut item = json!({ "type": ty });
+                    // item 级 id（function_call/custom_tool_call 的 `id`）：
+                    // 回传时原样带出，保住上游的 item 关联。
+                    if let Some(iid) = item_id {
+                        item["id"] = json!(iid);
+                    }
                     match ty {
                         "custom_tool_call" => {
                             item["call_id"] = json!(id);
@@ -418,6 +424,7 @@ impl ProviderAdapter for OpenAiResponsesAdapter {
                             .unwrap_or_else(|| json!({}));
                         content.push(ContentBlock::ToolUse {
                             id: item.get("call_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                            item_id: item.get("id").and_then(|v| v.as_str()).map(String::from),
                             name: item.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
                             namespace: None,
                             input: args,
@@ -818,6 +825,7 @@ mod tests {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
                 id: "ct1".into(),
+                item_id: None,
                 name: "exec".into(),
                 namespace: Some("custom_tool_call".into()),
                 input: json!({ "c": "ls" }),

@@ -135,6 +135,7 @@ impl StreamAssembler {
                         self.tool_args.entry(i).or_default().push_str(partial_json);
                         self.block_or(i, || B::ToolUse {
                             id: String::new(),
+                            item_id: None,
                             name: String::new(),
                             namespace: None,
                             input: Value::Null,
@@ -729,6 +730,7 @@ mod tests {
             index: 1,
             block: moonbridge_core::ContentBlock::ToolUse {
                 id: "c1".into(),
+                item_id: None,
                 name: "f".into(),
                 namespace: None,
                 input: Value::Null,
