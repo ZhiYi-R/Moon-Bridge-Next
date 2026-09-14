@@ -106,7 +106,17 @@ const seedModels: ModelDef[] = [
 ];
 
 const seedOffers: Offer[] = [
-  { providerKey: "anthropic-official", modelSlug: "claude-sonnet-4", pricing: { input: 3, output: 15 } },
+  {
+    providerKey: "anthropic-official",
+    modelSlug: "claude-sonnet-4",
+    pricing: {
+      input: 3,
+      output: 15,
+      cache_read: 0.3,
+      cache_write: 3.75,
+      context_over_200k: { input: 6, output: 22.5, cache_read: 0.6, cache_write: 7.5 },
+    },
+  },
   { providerKey: "openai-relay", modelSlug: "deepseek-v4-pro", pricing: { input: 0.3, output: 1.2 } },
   { providerKey: "openai-relay", modelSlug: "deepseek-v4-flash", pricing: { input: 0.08, output: 0.3 } },
   { providerKey: "gemini-direct", modelSlug: "deepseek-v4-pro", pricing: null },
@@ -139,7 +149,16 @@ const seedCatalog: CatalogModel[] = [
     maxOutputTokens: 64000,
     modalities: ["text", "image"],
     reasoningLevels: [],
-    pricing: { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 },
+    pricing: {
+      input: 3,
+      output: 15,
+      cache_read: 0.3,
+      cache_write: 3.75,
+      tiers: [
+        { input: 6, output: 22.5, cache_read: 0.6, cache_write: 7.5, tier: { type: "context", size: 200000 } },
+      ],
+      context_over_200k: { input: 6, output: 22.5, cache_read: 0.6, cache_write: 7.5 },
+    },
   },
   {
     providerKey: "google",
@@ -191,6 +210,11 @@ const seedBindings: PluginBinding[] = [
 // 注意：createdAt 与后端契约一致使用 unix 秒（store::now_unix）。
 function seedUsage(): UsageRecord[] {
   const models = ["claude-sonnet-4", "deepseek-v4-pro", "deepseek-v4-flash"];
+  const providersByModel: Record<string, string> = {
+    "claude-sonnet-4": "anthropic-official",
+    "deepseek-v4-pro": "openai-relay",
+    "deepseek-v4-flash": "openai-relay",
+  };
   const weights = [0.5, 0.3, 0.2];
   const recs: UsageRecord[] = [];
   let seq = 0;
@@ -222,6 +246,7 @@ function seedUsage(): UsageRecord[] {
         sessionId: `sess-${Math.random().toString(36).slice(2, 10)}`,
         model,
         upstreamModel: model,
+        providerKey: providersByModel[model] ?? "openai-relay",
         inputTokens: input,
         outputTokens: output,
         cacheReadTokens: cacheRead,
@@ -520,17 +545,31 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
     case "usage_query": {
       let list = usageRecords;
       if (args.model) list = list.filter((r) => r.model === args.model);
+      if (args.providerKey) list = list.filter((r) => r.providerKey === args.providerKey);
       if (args.status) list = list.filter((r) => r.status === args.status);
+      if (args.since) list = list.filter((r) => r.createdAt >= Number(args.since));
+      if (args.until) list = list.filter((r) => r.createdAt <= Number(args.until));
       const offset = Number(args.offset ?? 0);
       const limit = Number(args.limit ?? 500);
       return list.slice(offset, offset + limit).map((r) => ({ ...r })) as T;
     }
     case "usage_summary": {
-      const s: UsageSummary = { requests: 0, inputTokens: 0, outputTokens: 0, totalCost: 0 };
+      const s: UsageSummary = {
+        requests: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 0,
+        totalCost: 0,
+      };
       for (const r of usageRecords) {
         s.requests++;
         s.inputTokens += r.inputTokens;
         s.outputTokens += r.outputTokens;
+        s.cacheReadTokens += r.cacheReadTokens;
+        s.cacheWriteTokens += r.cacheWriteTokens;
+        s.reasoningTokens += r.reasoningTokens;
         s.totalCost += r.cost;
       }
       s.totalCost = Number(s.totalCost.toFixed(6));

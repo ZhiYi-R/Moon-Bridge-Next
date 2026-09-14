@@ -361,6 +361,12 @@ const offerForm = reactive({
   reasoningPrice: "",
 });
 
+/** 定价表单 5 个扁平键之外的 pricing 字段（tiers/context_over_200k 等长上下文
+ *  分层价目）。表单不展示这些字段，但保存时必须原样带回，否则编辑一次报价
+ *  就把目录导入的分层数据抹掉。 */
+const PRICING_FORM_KEYS = ["input", "output", "cache_read", "cache_write", "reasoning"];
+const pricingExtras = ref<Record<string, unknown>>({});
+
 /** 当前所选 provider 的端点协议去重列表（供 offer 绑定端点下拉）。 */
 const endpointProtocolOptions = computed(() => {
   const p = providers.value.find((x) => x.key === selectedProvider.value);
@@ -373,6 +379,7 @@ const endpointProtocolOptions = computed(() => {
 
 function openAddOffer() {
   offerError.value = null;
+  pricingExtras.value = {};
   Object.assign(offerForm, {
     endpointProtocol: "",
     inputPrice: "",
@@ -387,6 +394,9 @@ function openAddOffer() {
 function editOffer(o: Offer) {
   offerError.value = null;
   const p = (o.pricing ?? {}) as Record<string, unknown>;
+  pricingExtras.value = Object.fromEntries(
+    Object.entries(p).filter(([k]) => !PRICING_FORM_KEYS.includes(k)),
+  );
   const num = (k: string) => (typeof p[k] === "number" ? String(p[k]) : "");
   offerForm.modelSlug = o.modelSlug;
   offerForm.endpointProtocol = o.endpointProtocol ?? "";
@@ -413,7 +423,7 @@ async function confirmOffer() {
     ["cache_write", offerForm.cacheWritePrice],
     ["reasoning", offerForm.reasoningPrice],
   ];
-  let pricing: Record<string, number> | null = null;
+  let pricing: Record<string, unknown> | null = null;
   for (const [key, raw] of fields) {
     const t = raw.trim();
     if (t === "") continue;
@@ -423,6 +433,9 @@ async function confirmOffer() {
       return;
     }
     (pricing ??= {})[key] = n;
+  }
+  if (Object.keys(pricingExtras.value).length > 0) {
+    pricing = { ...pricingExtras.value, ...(pricing ?? {}) };
   }
   offerBusy.value = true;
   try {
@@ -489,6 +502,20 @@ async function removeOffer(modelSlug: string) {
 function price(p: unknown, key: string): string {
   const v = (p as Record<string, unknown> | null)?.[key];
   return typeof v === "number" ? String(v) : "—";
+}
+
+/** 长上下文分层价目提示：pricing 含 tiers/context_over_200k 时返回如 ">200K"。 */
+function tierHint(p: unknown): string | null {
+  const o = p as Record<string, unknown> | null;
+  if (!o) return null;
+  const tiers = Array.isArray(o.tiers) ? o.tiers : [];
+  const sizes = tiers
+    .map((t) => (t as Record<string, unknown>)?.tier as Record<string, unknown> | undefined)
+    .filter((m) => m?.type === "context" && typeof m.size === "number")
+    .map((m) => m.size as number);
+  if (o.context_over_200k != null) sizes.push(200_000);
+  if (sizes.length === 0) return null;
+  return `>${Math.min(...sizes) / 1000}K 加价`;
 }
 
 // ── 上下分区拖拽比例（持久化；高度变化经 useAutoPageSize 自动换算页号） ──
@@ -818,7 +845,15 @@ onMounted(async () => {
               </thead>
               <tbody>
                 <tr v-for="o in pagedOffers" :key="o.modelSlug" class="border-b last:border-0">
-                  <td class="py-2 font-mono text-xs">{{ o.modelSlug }}</td>
+                  <td class="py-2 font-mono text-xs">
+                    {{ o.modelSlug }}
+                    <span
+                      v-if="tierHint(o.pricing)"
+                      class="ml-1 rounded bg-muted px-1 py-px font-sans text-[10px] text-muted-foreground"
+                      :title="'长上下文分层计价：输入超过阈值后按档位价计费'"
+                      >{{ tierHint(o.pricing) }}</span
+                    >
+                  </td>
                   <td class="py-2 font-mono text-xs text-muted-foreground">{{ o.endpointProtocol || "全部" }}</td>
                   <td class="py-2 text-right tabular-nums">{{ price(o.pricing, "input") }}</td>
                   <td class="py-2 text-right tabular-nums">{{ price(o.pricing, "output") }}</td>

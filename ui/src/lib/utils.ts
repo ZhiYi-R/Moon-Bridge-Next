@@ -41,6 +41,13 @@ export function formatLatency(ms: number): string {
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(2)}s`;
 }
 
+/** 格式化美元成本：单请求成本常为分以下，≥$1 用两位小数，否则四位——
+ *  避免 $0.003 被 toFixed(2) 抹成 $0.00。 */
+export function formatCost(n: number): string {
+  const v = n ?? 0;
+  return v >= 1 ? `$${v.toFixed(2)}` : `$${v.toFixed(4)}`;
+}
+
 /** 上下文窗口缩写：自适应单位（200000 → 200K，1.5M → 1.5M）。 */
 export function formatCtx(n: number | null | undefined): string {
   if (!n) return "—";

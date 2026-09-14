@@ -13,7 +13,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use moonbridge_core::Protocol;
 use moonbridge_gateway::{bootstrap, dispatch, server, AppState, GatewayConfig};
-use moonbridge_store::{Database, Endpoint, ModelDef, PluginRecord, Provider, Route, UsageQuery};
+use moonbridge_store::{Database, Endpoint, ModelDef, Offer, PluginRecord, Provider, Route, UsageQuery};
 use serde_json::{json, Value};
 
 /// 起一个 mock Anthropic 上游（`POST /v1/messages`），按请求 `stream` 返回 JSON 或 SSE。
@@ -91,6 +91,14 @@ async fn setup_state() -> (Arc<AppState>, Arc<Database>) {
         extra: Value::Null,
     })
     .unwrap();
+    // 计价数据流：offer 定价存在时 usage 记录的 cost 应按价目现算。
+    db.upsert_offer(&Offer {
+        provider_key: "mock".into(),
+        model_slug: "claude-x".into(),
+        pricing: Some(json!({ "input": 3.0, "output": 15.0 })),
+        endpoint_protocol: None,
+    })
+    .unwrap();
     let state = bootstrap(GatewayConfig::default(), db.clone()).unwrap();
     (state, db)
 }
@@ -129,6 +137,20 @@ async fn e2e_non_stream_responses_to_anthropic() {
     assert_eq!(sum.requests, 1);
     assert_eq!(sum.input_tokens, 10);
     assert_eq!(sum.output_tokens, 5);
+
+    // 成本按命中 offer 的价目现算：(10 in × $3 + 5 out × $15) / 1M
+    let rows = db
+        .query_usage(&UsageQuery {
+            limit: 1,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(rows[0].provider_key.as_deref(), Some("mock"));
+    assert!(
+        (rows[0].cost - 0.000105).abs() < 1e-9,
+        "cost 应为 (10×3 + 5×15)/1e6 = 0.000105，实际 {}",
+        rows[0].cost
+    );
 }
 
 /// 流式：Responses 入口（stream=true）→ Anthropic SSE → Responses SSE。

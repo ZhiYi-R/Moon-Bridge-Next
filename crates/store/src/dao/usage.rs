@@ -15,10 +15,13 @@ pub struct UsageSummary {
     pub requests: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub reasoning_tokens: i64,
     pub total_cost: f64,
 }
 
-const COLS: &str = "id,session_id,model,upstream_model,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,cost,status,error,latency_ms,ttft_ms,created_at";
+const COLS: &str = "id,session_id,model,upstream_model,provider_key,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,cost,status,error,latency_ms,ttft_ms,created_at";
 
 fn row_to_usage(r: &rusqlite::Row) -> rusqlite::Result<UsageRecord> {
     Ok(UsageRecord {
@@ -26,17 +29,18 @@ fn row_to_usage(r: &rusqlite::Row) -> rusqlite::Result<UsageRecord> {
         session_id: r.get(1)?,
         model: r.get(2)?,
         upstream_model: r.get(3)?,
-        input_tokens: r.get::<_, i64>(4)? as u32,
-        output_tokens: r.get::<_, i64>(5)? as u32,
-        cache_read_tokens: r.get::<_, i64>(6)? as u32,
-        cache_write_tokens: r.get::<_, i64>(7)? as u32,
-        reasoning_tokens: r.get::<_, i64>(8)? as u32,
-        cost: r.get(9)?,
-        status: r.get(10)?,
-        error: r.get(11)?,
-        latency_ms: r.get(12)?,
-        ttft_ms: r.get(13)?,
-        created_at: r.get(14)?,
+        provider_key: r.get(4)?,
+        input_tokens: r.get::<_, i64>(5)? as u32,
+        output_tokens: r.get::<_, i64>(6)? as u32,
+        cache_read_tokens: r.get::<_, i64>(7)? as u32,
+        cache_write_tokens: r.get::<_, i64>(8)? as u32,
+        reasoning_tokens: r.get::<_, i64>(9)? as u32,
+        cost: r.get(10)?,
+        status: r.get(11)?,
+        error: r.get(12)?,
+        latency_ms: r.get(13)?,
+        ttft_ms: r.get(14)?,
+        created_at: r.get(15)?,
     })
 }
 
@@ -55,10 +59,10 @@ impl Database {
             crate::now_unix()
         };
         conn.execute(
-            "INSERT INTO usage_records (id,session_id,model,upstream_model,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,cost,status,error,latency_ms,ttft_ms,created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+            "INSERT INTO usage_records (id,session_id,model,upstream_model,provider_key,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,cost,status,error,latency_ms,ttft_ms,created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
             params![
-                id, rec.session_id, rec.model, rec.upstream_model,
+                id, rec.session_id, rec.model, rec.upstream_model, rec.provider_key,
                 rec.input_tokens as i64, rec.output_tokens as i64,
                 rec.cache_read_tokens as i64, rec.cache_write_tokens as i64,
                 rec.reasoning_tokens as i64,
@@ -76,6 +80,10 @@ impl Database {
         if let Some(m) = &q.model {
             sql.push_str(" AND model = ?");
             binds.push(Box::new(m.clone()));
+        }
+        if let Some(p) = &q.provider_key {
+            sql.push_str(" AND provider_key = ?");
+            binds.push(Box::new(p.clone()));
         }
         if let Some(s) = &q.status {
             sql.push_str(" AND status = ?");
@@ -110,14 +118,17 @@ impl Database {
     pub fn usage_summary(&self) -> Result<UsageSummary> {
         let conn = self.conn.lock();
         Ok(conn.query_row(
-            "SELECT COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cost),0) FROM usage_records",
+            "SELECT COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0), COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cost),0) FROM usage_records",
             [],
             |r| {
                 Ok(UsageSummary {
                     requests: r.get(0)?,
                     input_tokens: r.get(1)?,
                     output_tokens: r.get(2)?,
-                    total_cost: r.get(3)?,
+                    cache_read_tokens: r.get(3)?,
+                    cache_write_tokens: r.get(4)?,
+                    reasoning_tokens: r.get(5)?,
+                    total_cost: r.get(6)?,
                 })
             },
         )?)

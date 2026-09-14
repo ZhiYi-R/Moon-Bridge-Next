@@ -219,6 +219,14 @@ pub enum StopReason {
 }
 
 /// token 用量统计。
+///
+/// 口径不变量（计价与跨协议转换都依赖它，各 Adapter 入站归一化时须满足）：
+/// - `input_tokens` = prompt **总量**，含 `cache_read_tokens` + `cache_write_tokens`
+///   （OpenAI `prompt_tokens` 口径；Anthropic 原生 input 不含缓存，入站时已并入）；
+/// - `output_tokens` = 输出**总量**，含 `reasoning_tokens`
+///   （OpenAI `completion_tokens` / Anthropic `output_tokens` 口径；Gemini 的
+///   `candidatesTokenCount` 不含 thoughts，入站时已并入）。
+/// - `cache_*` / `reasoning` 均为子集拆分，供按价目分项计费；不另加进总量。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     #[serde(default)]
@@ -229,7 +237,8 @@ pub struct Usage {
     pub cache_read_tokens: u32,
     #[serde(default)]
     pub cache_write_tokens: u32,
-    /// 推理 token（OpenAI reasoning / Gemini thoughts）；无此概念的协议恒为 0。
+    /// 推理 token（OpenAI reasoning / Gemini thoughts），已含在 output_tokens 内；
+    /// 无此概念的协议恒为 0。
     #[serde(default)]
     pub reasoning_tokens: u32,
 }

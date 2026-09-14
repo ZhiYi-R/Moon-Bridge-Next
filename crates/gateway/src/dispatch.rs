@@ -456,8 +456,19 @@ async fn non_stream(
     {
         RawVerdict::ShortCircuit { status, headers, body } => {
             trace.upstream_response = body_snapshot(&inbound_resp.body);
+            // 上游响应已含真实 usage（token 实际消耗、上游已计费）——被插件
+            // 替换前尽力解析出来记账，否则这轮成本记 0 且账单对不上。
+            // 解析失败（非标准响应体）回落 0。
+            let usage = match inbound_resp.body.as_json().cloned() {
+                Some(v) => provider_adapter
+                    .to_core_response(&ctx, v)
+                    .await
+                    .map(|r| r.usage)
+                    .unwrap_or_default(),
+                None => Usage::default(),
+            };
             return Ok(answered(
-                &state, &ctx, start, trace, Usage::default(), status, headers, body,
+                &state, &ctx, start, trace, usage, status, headers, body,
             ));
         }
         RawVerdict::Abort { message } => {

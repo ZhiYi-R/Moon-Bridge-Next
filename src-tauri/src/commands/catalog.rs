@@ -139,7 +139,10 @@ fn parse_model(provider_key: &str, provider_name: &str, id: &str, raw: &Value) -
         }
     }
 
-    // cost → pricing（只搬 5 个已知键，与 UI 的定价表单一致；其余长尾字段忽略）
+    // cost → pricing（搬 5 个扁平价键 + 长上下文分层；其余长尾字段忽略）。
+    // 分层的权威形态是 `tiers: [{input, output, …, tier: {type:"context", size}}]`
+    // （context 阈值按 prompt/input token 计）；`context_over_200k` 是生成器为旧
+    // 消费者同步输出的单档镜像，一并保留——计价时两种形态都认。
     let mut pricing = Map::new();
     if let Some(cost) = raw.get("cost").and_then(Value::as_object) {
         for key in ["input", "output", "cache_read", "cache_write", "reasoning"] {
@@ -148,6 +151,11 @@ fn parse_model(provider_key: &str, provider_name: &str, id: &str, raw: &Value) -
                     key.to_string(),
                     serde_json::Number::from_f64(num).map(Value::Number).unwrap_or(Value::Null),
                 );
+            }
+        }
+        for key in ["tiers", "context_over_200k"] {
+            if let Some(v) = cost.get(key) {
+                pricing.insert(key.to_string(), v.clone());
             }
         }
         // 过滤掉解析失败落进来的 Null
@@ -279,7 +287,12 @@ mod tests {
                         "name": "Claude Sonnet 4.6",
                         "modalities": { "input": ["text", "image"], "output": ["text"] },
                         "limit": { "context": 200000 },
-                        "cost": { "input": 3, "output": 15, "cache_read": 0.3, "cache_write": 3.75 }
+                        "cost": {
+                            "input": 3, "output": 15, "cache_read": 0.3, "cache_write": 3.75,
+                            "tiers": [{ "input": 6, "output": 22.5, "cache_read": 0.6, "cache_write": 7.5,
+                                        "tier": { "type": "context", "size": 200000 } }],
+                            "context_over_200k": { "input": 6, "output": 22.5, "cache_read": 0.6, "cache_write": 7.5 }
+                        }
                     }
                 }
             }
@@ -327,6 +340,11 @@ mod tests {
         let pricing = offer.pricing.expect("定价应写入 offer");
         assert_eq!(pricing.get("input").and_then(Value::as_f64), Some(3.0));
         assert_eq!(pricing.get("cache_write").and_then(Value::as_f64), Some(3.75));
+        // 长上下文分层价目随目录导入保留（计价按 input_tokens 越阈值换挡）
+        let tiers = pricing.get("tiers").and_then(Value::as_array).unwrap();
+        assert_eq!(tiers[0]["tier"]["size"].as_u64(), Some(200_000));
+        assert_eq!(tiers[0]["input"].as_f64(), Some(6.0));
+        assert!(pricing.get("context_over_200k").is_some(), "旧式镜像也保留");
         assert_eq!(offer.provider_key, "anthropic");
     }
 

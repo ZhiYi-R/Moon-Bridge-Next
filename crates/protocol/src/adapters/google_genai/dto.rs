@@ -889,22 +889,36 @@ pub fn candidate_to_core(cand: &Value) -> (Vec<ContentBlock>, Option<StopReason>
 }
 
 /// Gemini `usageMetadata` → Core Usage。
+///
+/// Core 不变量：`output_tokens` 含 reasoning——`candidatesTokenCount` 不含
+/// `thoughtsTokenCount`（OpenAI 的 `completion_tokens` 则含），必须补上，否则
+/// Gemini 上游的输出 token 系统性少算、计价漏掉按输出价计费的思考 token。
+/// `toolUsePromptTokenCount` 独立于 `promptTokenCount`（官方 totalTokenCount =
+/// prompt + toolUse + candidates + thoughts），按输入价计费，并入 input。
 pub fn usage_from_gemini(v: &Value) -> Usage {
+    let thoughts = v
+        .get("thoughtsTokenCount")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0) as u32;
     Usage {
-        input_tokens: v.get("promptTokenCount").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+        input_tokens: v
+            .get("promptTokenCount")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0) as u32
+            + v.get("toolUsePromptTokenCount")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0) as u32,
         output_tokens: v
             .get("candidatesTokenCount")
             .and_then(|x| x.as_u64())
-            .unwrap_or(0) as u32,
+            .unwrap_or(0) as u32
+            + thoughts,
         cache_read_tokens: v
             .get("cachedContentTokenCount")
             .and_then(|x| x.as_u64())
             .unwrap_or(0) as u32,
         cache_write_tokens: 0,
-        reasoning_tokens: v
-            .get("thoughtsTokenCount")
-            .and_then(|x| x.as_u64())
-            .unwrap_or(0) as u32,
+        reasoning_tokens: thoughts,
     }
 }
 
@@ -1472,5 +1486,25 @@ mod tests {
         assert_eq!(u.input_tokens, 7);
         assert_eq!(u.output_tokens, 3);
         assert_eq!(u.cache_read_tokens, 2);
+    }
+
+    /// Core 不变量：output 含 reasoning（thoughts）、input 含 toolUse prompt。
+    /// 官方 totalTokenCount = prompt + toolUse + candidates + thoughts。
+    #[test]
+    fn usage_output_includes_thoughts_and_input_includes_tool_use() {
+        let u = usage_from_gemini(&json!({
+            "promptTokenCount": 7,
+            "toolUsePromptTokenCount": 2,
+            "candidatesTokenCount": 3,
+            "thoughtsTokenCount": 4,
+        }));
+        assert_eq!(u.input_tokens, 9);
+        assert_eq!(u.output_tokens, 7);
+        assert_eq!(u.reasoning_tokens, 4);
+
+        // 出站 totalTokenCount 与官方口径一致（input + output 已各自含子项）
+        let out = usage_object(&u);
+        assert_eq!(out["totalTokenCount"], 16);
+        assert_eq!(out["thoughtsTokenCount"], 4);
     }
 }

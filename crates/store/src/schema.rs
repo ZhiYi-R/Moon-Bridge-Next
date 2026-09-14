@@ -147,6 +147,11 @@ const V7: &str = "ALTER TABLE models DROP COLUMN pricing_json;";
 /// 上限时按模型真实上限兜底——避免凭空注入 4096 之类的小值把输出截断。
 const V8: &str = "ALTER TABLE models ADD COLUMN max_output_tokens INTEGER;";
 
+/// V9：usage_records 增加 `provider_key`（可空）。定价口径是 (provider, model)，
+/// 不存 provider 就无法事后按价目回溯成本，也无法按 provider 聚合；路由前失败
+/// 的记录该列为 NULL。
+const V9: &str = "ALTER TABLE usage_records ADD COLUMN provider_key TEXT;";
+
 /// 全部 migration，按版本升序。
 const MIGRATIONS: &[Migration] = &[
     Migration { version: 1, sql: V1 },
@@ -157,6 +162,7 @@ const MIGRATIONS: &[Migration] = &[
     Migration { version: 6, sql: V6 },
     Migration { version: 7, sql: V7 },
     Migration { version: 8, sql: V8 },
+    Migration { version: 9, sql: V9 },
 ];
 
 /// 对连接执行 migration（幂等）。

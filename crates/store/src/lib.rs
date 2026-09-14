@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn migrates_and_reports_version() {
         let db = Database::open_in_memory().unwrap();
-        assert_eq!(db.version().unwrap(), 8);
+        assert_eq!(db.version().unwrap(), 9);
     }
 
     /// 回归：V8 新增 max_output_tokens 列须随模型定义往返（供上游必填
@@ -185,11 +185,12 @@ mod tests {
             session_id: Some("s1".into()),
             model: Some("moonbridge".into()),
             upstream_model: Some("deepseek-v4-pro".into()),
+            provider_key: Some("deepseek".into()),
             input_tokens: 10,
             output_tokens: 20,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            reasoning_tokens: 0,
+            cache_read_tokens: 3,
+            cache_write_tokens: 2,
+            reasoning_tokens: 1,
             cost: 0.001,
             status: Some("ok".into()),
             error: None,
@@ -203,12 +204,25 @@ mod tests {
         assert_eq!(sum.requests, 1);
         assert_eq!(sum.input_tokens, 10);
         assert_eq!(sum.output_tokens, 20);
+        assert_eq!(sum.cache_read_tokens, 3);
+        assert_eq!(sum.reasoning_tokens, 1);
+        assert_eq!(sum.total_cost, 0.001);
+
+        let rows = db.query_usage(&q_all()).unwrap();
+        assert_eq!(rows[0].provider_key.as_deref(), Some("deepseek"));
 
         let q = UsageQuery {
             limit: 10,
             ..Default::default()
         };
         assert_eq!(db.query_usage(&q).unwrap().len(), 1);
+    }
+
+    fn q_all() -> UsageQuery {
+        UsageQuery {
+            limit: 10,
+            ..Default::default()
+        }
     }
 
     #[test]

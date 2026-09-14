@@ -7,7 +7,7 @@ import Button from "@/components/ui/Button.vue";
 import Card from "@/components/ui/Card.vue";
 import Pagination from "@/components/ui/Pagination.vue";
 import { errMsg, modelApi, usageApi, type UsageRecord, type UsageSummary } from "@/lib/api";
-import { formatLatency, formatTime, formatTokens } from "@/lib/utils";
+import { formatCost, formatLatency, formatTime, formatTokens } from "@/lib/utils";
 
 const records = ref<UsageRecord[]>([]);
 const summary = ref<UsageSummary | null>(null);
@@ -218,8 +218,16 @@ watch(pageCount, (n) => {
         <span class="font-semibold text-foreground tabular-nums">{{ formatTokens(summary?.outputTokens ?? 0) }}</span>
       </span>
       <span>
+        缓存读
+        <span class="font-semibold text-foreground tabular-nums">{{ formatTokens(summary?.cacheReadTokens ?? 0) }}</span>
+      </span>
+      <span>
+        推理
+        <span class="font-semibold text-foreground tabular-nums">{{ formatTokens(summary?.reasoningTokens ?? 0) }}</span>
+      </span>
+      <span>
         总成本
-        <span class="font-semibold text-foreground tabular-nums">${{ (summary?.totalCost ?? 0).toFixed(2) }}</span>
+        <span class="font-semibold text-foreground tabular-nums">{{ formatCost(summary?.totalCost ?? 0) }}</span>
       </span>
     </div>
 
@@ -290,7 +298,7 @@ watch(pageCount, (n) => {
               </span>
               <span class="text-xs text-muted-foreground">
                 {{ m.requests }} 次 · 输入 {{ formatTokens(m.input) }} / 输出 {{ formatTokens(m.output) }}
-                <template v-if="m.cost > 0"> · ${{ m.cost.toFixed(2) }}</template>
+                <template v-if="m.cost > 0"> · {{ formatCost(m.cost) }}</template>
               </span>
             </div>
             <!-- 0/0（无 token）不渲染轨道：满宽空轨道看起来像满值进度条 -->
@@ -356,12 +364,16 @@ watch(pageCount, (n) => {
                     {{ formatTime(r.createdAt) }}
                   </td>
                   <td class="py-2" :title="r.model ?? ''">{{ displayName(r.model) }}</td>
-                  <td class="py-2 text-xs text-muted-foreground" :title="r.upstreamModel ?? ''">
-                    {{ displayName(r.upstreamModel) }}
+                  <td
+                    class="py-2 text-xs text-muted-foreground"
+                    :title="[r.providerKey, r.upstreamModel].filter(Boolean).join(' / ')"
+                  >
+                    <span v-if="r.providerKey" class="text-foreground/60">{{ r.providerKey }}</span>
+                    <template v-if="r.providerKey"> · </template>{{ displayName(r.upstreamModel) }}
                   </td>
                   <td class="py-2 text-right tabular-nums">{{ formatTokens(r.inputTokens) }}</td>
                   <td class="py-2 text-right tabular-nums">{{ formatTokens(r.outputTokens) }}</td>
-                  <td class="py-2 text-right tabular-nums">${{ r.cost.toFixed(2) }}</td>
+                  <td class="py-2 text-right tabular-nums">{{ formatCost(r.cost) }}</td>
                   <td class="py-2 text-right text-xs tabular-nums text-muted-foreground">{{ formatLatency(r.latencyMs) }}</td>
                   <td class="py-2 text-center">
                     <Badge :variant="r.status === 'ok' ? 'success' : 'destructive'">

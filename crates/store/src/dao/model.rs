@@ -108,6 +108,25 @@ impl Database {
         Ok(())
     }
 
+    /// 按 (provider, model) 取单个报价（计价按它检索 pricing）。
+    pub fn get_offer(&self, provider_key: &str, model_slug: &str) -> Result<Option<Offer>> {
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT provider_key,model_slug,pricing_json,endpoint_protocol FROM offers WHERE provider_key = ?1 AND model_slug = ?2",
+            params![provider_key, model_slug],
+            |r| {
+                Ok(Offer {
+                    provider_key: r.get(0)?,
+                    model_slug: r.get(1)?,
+                    pricing: opt_json(r.get(2)?),
+                    endpoint_protocol: r.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     /// 列出某 provider 的模型报价。
     pub fn list_offers(&self, provider_key: &str) -> Result<Vec<Offer>> {
         let conn = self.conn.lock();

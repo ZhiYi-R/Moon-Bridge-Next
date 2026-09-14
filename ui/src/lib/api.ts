@@ -72,8 +72,9 @@ export interface CatalogModel {
   maxOutputTokens?: number | null;
   modalities: string[];
   reasoningLevels: string[];
-  /** 定价（USD / 1M tokens），仅含有值项：input/output/cache_read/cache_write/reasoning。 */
-  pricing: Record<string, number>;
+  /** 定价（USD / 1M tokens）：input/output/cache_read/cache_write/reasoning 扁平价键，
+   *  另可含长上下文分层 `tiers`/`context_over_200k`（对象值，非 number）。 */
+  pricing: Record<string, Json>;
 }
 
 export interface Route {
@@ -106,6 +107,8 @@ export interface UsageRecord {
   sessionId?: string | null;
   model?: string | null;
   upstreamModel?: string | null;
+  /** 命中的 provider key（定价粒度是 provider+model）；路由前失败为 null */
+  providerKey?: string | null;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
@@ -124,6 +127,9 @@ export interface UsageSummary {
   requests: number;
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
   totalCost: number;
 }
 
@@ -282,8 +288,17 @@ export const pluginApi = {
 };
 
 export const usageApi = {
-  query: (params: { model?: string; status?: string; limit?: number; offset?: number } = {}) =>
-    call<UsageRecord[]>("usage_query", params),
+  query: (
+    params: {
+      model?: string;
+      providerKey?: string;
+      status?: string;
+      since?: number;
+      until?: number;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ) => call<UsageRecord[]>("usage_query", params),
   summary: () => call<UsageSummary>("usage_summary"),
 };
 

@@ -155,6 +155,9 @@ pub struct UsageRecord {
     pub model: Option<String>,
     #[serde(default)]
     pub upstream_model: Option<String>,
+    /// 命中的 provider key（定价按 (provider, model) 检索的依据）；路由前失败为 None。
+    #[serde(default)]
+    pub provider_key: Option<String>,
     #[serde(default)]
     pub input_tokens: u32,
     #[serde(default)]
@@ -167,7 +170,7 @@ pub struct UsageRecord {
     pub reasoning_tokens: u32,
     #[serde(default)]
     pub cost: f64,
-    /// 请求状态：ok / error。
+    /// 请求状态：ok / error / aborted（流未读尽即结束，如客户端断开）。
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]
@@ -185,6 +188,8 @@ pub struct UsageRecord {
 #[derive(Debug, Clone, Default)]
 pub struct UsageQuery {
     pub model: Option<String>,
+    /// 按 provider key 过滤（成本维度：定价是 (provider, model) 粒度）。
+    pub provider_key: Option<String>,
     pub status: Option<String>,
     pub since: Option<i64>,
     pub until: Option<i64>,

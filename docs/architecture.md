@@ -64,6 +64,10 @@ pub struct CoreRequest {
 }
 pub struct CoreResponse { id, model, content, stop_reason, usage: Usage, ext }
 pub struct Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens }
+// 口径不变量：input_tokens 为 prompt 总量（含 cache_read + cache_write），
+// output_tokens 为输出总量（含 reasoning_tokens）；cache_*/reasoning 是子集
+// 拆分，供按价目分项计费，不另加进总量。各 Adapter 入站归一化须满足该口径
+//（如 Anthropic input 并入缓存、Gemini output 并入 thoughtsTokenCount）。
 
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CoreStreamEvent {
@@ -215,7 +219,7 @@ function MB.on_request(ctx, req) ... end -- 就地修改 req 即生效，亦可 
 
 SQLite（rusqlite, bundled + WAL），手写版本化 migration，每表一个 DAO 模块，统一由 `Database` 暴露。并发模型：单连接 + `parking_lot::Mutex` 串行化（本地网关低并发足够）。
 
-当前 schema 版本 **V8**（`schema.rs` 的 `MIGRATIONS` 按版本升序手写，`schema_version` 表记录已应用版本）。
+当前 schema 版本 **V9**（`schema.rs` 的 `MIGRATIONS` 按版本升序手写，`schema_version` 表记录已应用版本）。
 
 | 表 | 关键列 |
 |----|--------|
@@ -226,11 +230,21 @@ SQLite（rusqlite, bundled + WAL），手写版本化 migration，每表一个 D
 | `routes` | alias PK, model_slug, provider_key, extra_json |
 | `plugins` | name PK, source(lua), script_ref, enabled, config_json, scopes_json, capabilities_json |
 | `plugin_bindings` | plugin_name + scope + scope_key PK, enabled, config_json |
-| `usage_records` | id PK, session_id, model, upstream_model, input/output/cache_read/cache_write/**reasoning**_tokens, cost, status, error, latency_ms, **ttft_ms**, created_at |
+| `usage_records` | id PK, session_id, model, upstream_model, **provider_key（V9，可空）**, input/output/cache_read/cache_write/**reasoning**_tokens, cost, status, error, latency_ms, **ttft_ms**, created_at |
 | `settings` | key PK, value_json |
 
 - api_key 加密：`EncKey` 抽象（脚手架用 `PlaintextKey`，**当前 API Key 明文落库**，生产可换 aes-gcm/keyring）。列名 `api_key_enc` 是为切换预留的。
 - `status` 取值 `ok` / `error` / `aborted`（流未读尽即结束，如客户端断开）；`ttft_ms` 仅流式请求有值。
+- `cost` 由 `usage::record` 在落库时按 `(provider_key, upstream_model)` 命中的 offer
+  `pricing_json` 现算（价目单位 USD/1M tokens，键 `input`/`output`/`cache_read`/
+  `cache_write`/`reasoning`）。Core 口径里 cache_* 与 reasoning 分别是 input/output
+  的子集：先按 input 价拆出 `input − cache_read − cache_write`、按 output 价拆出
+  `output − reasoning`，缓存按各自价、reasoning 缺省回退 output 价、cache_* 缺省
+  回退 input 价。**存的是当时价**——价目后续变动不回改历史账单；无定价/定价缺失
+  时 cost 为 0（与免费模型同值，不区分）。
+- 长上下文分层计价：pricing 可含 `tiers`（models.dev 权威形态，`tier.size` 为
+  context 阈值）或旧式 `context_over_200k` 镜像；`input_tokens` 超过阈值后整档
+  价键逐项覆盖基价（未列价键回退基价）。目录导入保留两种形态。
 - trace 大对象存文件系统 `app_data_dir/traces/<session>/<model>/<created_at>-<short_id>.json`（`short_id` 为 request_id 首段），不入库。
 - trace 的 `upstreamResponse`/`clientResponse`：**非流式**记协议响应体原文；**流式**记 `StreamAssembler` 从事件流聚合出的最终消息（`CoreResponse` 形态，见 §8）。
 

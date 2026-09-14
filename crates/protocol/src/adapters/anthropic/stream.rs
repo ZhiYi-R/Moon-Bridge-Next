@@ -191,12 +191,19 @@ impl ProviderStreamAdapter for AnthropicAdapter {
                     .and_then(|d| d.get("stop_reason"))
                     .and_then(|v| v.as_str())
                     .and_then(stop_reason);
-                let usage = data.get("usage").map(|u| Usage {
-                    input_tokens: 0,
-                    output_tokens: u32_of(u, "output_tokens"),
-                    cache_read_tokens: 0,
-                    cache_write_tokens: 0,
-                    reasoning_tokens: 0,
+                // message_delta 的 usage 不只 output_tokens：server tool（web search
+                // 等）会让 input/cache 在轮内增长并在此处上报。全字段按 message_start
+                // 同口径归一化读出，聚合端按字段取 max，新旧值自然取大者。
+                let usage = data.get("usage").map(|u| {
+                    let cache_r = u32_of(u, "cache_read_input_tokens");
+                    let cache_w = u32_of(u, "cache_creation_input_tokens");
+                    Usage {
+                        input_tokens: u32_of(u, "input_tokens") + cache_r + cache_w,
+                        output_tokens: u32_of(u, "output_tokens"),
+                        cache_read_tokens: cache_r,
+                        cache_write_tokens: cache_w,
+                        reasoning_tokens: 0,
+                    }
                 });
                 out.push(CoreStreamEvent::MessageDelta { stop_reason: sr, usage });
             }
@@ -508,13 +515,19 @@ mod tests {
             _ => panic!("expected text delta"),
         }
 
+        // message_delta 携带完整 usage（server tool 等会让 input/cache 轮内增长）：
+        // 全字段须被解析，聚合端 max 归并后新增量不丢。
         let evs = adapter
-            .decode(&ctx, &mut st, &chunk(json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}})))
+            .decode(&ctx, &mut st, &chunk(json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":9,"output_tokens":3,"cache_read_input_tokens":4,"cache_creation_input_tokens":2}})))
             .unwrap();
         match &evs[0] {
             CoreStreamEvent::MessageDelta { stop_reason, usage } => {
                 assert_eq!(*stop_reason, Some(StopReason::EndTurn));
-                assert_eq!(usage.unwrap().output_tokens, 3);
+                let u = usage.unwrap();
+                assert_eq!(u.output_tokens, 3);
+                assert_eq!(u.input_tokens, 15, "input 须并入 cache（Core 口径总量）");
+                assert_eq!(u.cache_read_tokens, 4);
+                assert_eq!(u.cache_write_tokens, 2);
             }
             _ => panic!("expected message delta"),
         }

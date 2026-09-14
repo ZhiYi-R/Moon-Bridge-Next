@@ -7,7 +7,7 @@ import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
 import Card from "@/components/ui/Card.vue";
 import { errMsg, providerApi, usageApi, type Provider, type UsageRecord, type UsageSummary } from "@/lib/api";
-import { formatTokens } from "@/lib/utils";
+import { formatCost, formatTokens } from "@/lib/utils";
 import { useGatewayStore } from "@/stores/gateway";
 
 const gateway = useGatewayStore();
@@ -189,7 +189,7 @@ onMounted(loadAll);
           <span class="card-description">总成本</span>
         </div>
         <div class="card-content">
-          <div class="text-2xl font-semibold tabular-nums">${{ (summary?.totalCost ?? 0).toFixed(4) }}</div>
+          <div class="text-2xl font-semibold tabular-nums">{{ formatCost(summary?.totalCost ?? 0) }}</div>
         </div>
       </Card>
     </div>
