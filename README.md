@@ -40,7 +40,7 @@ Moon Bridge Next 是一个本地 LLM 网关，把客户端和上游模型服务�
 
 ### 会话识别
 
-会话身份按以下优先级解析：请求显式携带的标识（body 中的 `session_id`、`previous_response_id`，或 `X-Codex-Window-Id` 请求头）优先。对完全不带会话标识的客户端（如 Qwen Code），网关会在助手文本输出末尾附加 `[mb:xxxxxx]` 短标记，客户端下一轮带回完整对话历史时即可认回同一会话。标记在转发上游前被完整剥除，不进入模型上下文，也不存在被模型模仿的风险；该功能可在设置中关闭，关闭后入站方向的存量标记仍会被剥除。会话识别决定了插件 `mb.session` 的状态隔离粒度与 trace 的会话目录归类。
+会话身份按以下优先级解析：请求显式携带的标识（body 中的 `session_id`、`previous_response_id`，或 `X-Codex-Window-Id` 请求头）优先。对完全不带会话标识的客户端（如 Qwen Code），网关会把 `[mb:<载荷>]` 标记嵌进助手**推理（CoT）块明文的首部**，客户端下一轮带回完整对话历史时即可认回同一会话；网关自分配会话的载荷就是会话 uuid，因此身份不随活跃会话表淘汰或网关重启而漂移（无推理块的轮次不打标）。标记在转发上游前被完整剥除，不进入模型上下文，也不存在被模型模仿的风险；该功能可在设置中关闭，关闭后入站方向的存量标记仍会被剥除。会话识别决定了插件 `mb.session` 的状态隔离粒度与 trace 的会话目录归类。
 
 ### 访问控制
 
@@ -114,7 +114,7 @@ Moon Bridge Next 是一个本地 LLM 网关，把客户端和上游模型服务�
 | `filter_content(ctx, block)` | 返回 `true` 跳过该内容块；流式下被丢块的后续增量一并压制 |
 | `transform_error(ctx, msg)` | 返回改写后的错误消息 |
 
-`req`（CoreRequest）的主要字段：`model`（路由后的上游模型名）、`model_alias`、`system`（ContentBlock 数组）、`messages`、`tools`、`tool_choice`、`max_tokens`、`temperature`、`top_p`、`stop`、`stream`、`reasoning`、`metadata`。内容块形如 `{ type = "text", text = "..." }`。`resp`（CoreResponse）含 `content`、`stop_reason` 与 `usage`（`input_tokens` / `output_tokens` / `cache_read_tokens` / `cache_write_tokens` / `reasoning_tokens`）。
+`req`（CoreRequest）的主要字段：`model`（路由后的上游模型名）、`model_alias`、`system`（ContentBlock 数组）、`messages`、`tools`、`tool_choice`、`max_tokens`、`temperature`、`top_p`、`stop`、`stream`、`reasoning`、`meta`（请求级元数据：`session_id`、原始 headers、客户端标识等）。内容块形如 `{ type = "text", text = "..." }`。`resp`（CoreResponse）含 `content`、`stop_reason` 与 `usage`（`input_tokens` / `output_tokens` / `cache_read_tokens` / `cache_write_tokens` / `reasoning_tokens`）。
 
 ### 报文层钩子
 
@@ -217,4 +217,4 @@ end
 
 ## 许可
 
-本项目以 [GPL-3.0-or-later](https://www.gnu.org/licenses/gpl-3.0.html) 许可发布。
+本项目以 GPL-3.0-or-later 许可发布，许可全文见 [LICENSE](LICENSE)。

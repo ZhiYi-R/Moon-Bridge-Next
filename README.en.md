@@ -40,7 +40,7 @@ With tracing enabled, the raw messages of every request are snapshotted to disk 
 
 ### Session Recognition
 
-Session identity is resolved with the following precedence: explicit identifiers carried by the request (the `session_id` or `previous_response_id` body fields, or the `X-Codex-Window-Id` header) come first. For clients that carry no session identifier at all (Qwen Code, for example), the gateway appends a short `[mb:xxxxxx]` marker to assistant text output; when the client returns the full conversation history on the next turn, the session is recognized from that marker. The marker is stripped before anything is forwarded upstream — it never enters the model's context and cannot be imitated by the model. The feature can be disabled in Settings; even then, inbound residual markers continue to be stripped. Session recognition determines the isolation granularity of the plugin API `mb.session` and the session-based organization of trace directories.
+Session identity is resolved with the following precedence: explicit identifiers carried by the request (the `session_id` or `previous_response_id` body fields, or the `X-Codex-Window-Id` header) come first. For clients that carry no session identifier at all (Qwen Code, for example), the gateway embeds an `[mb:<payload>]` marker at the head of the assistant's **reasoning (chain-of-thought) plaintext**; when the client returns the full conversation history on the next turn, the session is recognized from that marker. For gateway-assigned sessions the payload is the session UUID itself, so the identity does not drift when the active-session table evicts the entry or the gateway restarts (turns without a reasoning block carry no marker). The marker is stripped before anything is forwarded upstream — it never enters the model's context and cannot be imitated by the model. The feature can be disabled in Settings; even then, inbound residual markers continue to be stripped. Session recognition determines the isolation granularity of the plugin API `mb.session` and the session-based organization of trace directories.
 
 ### Access Control
 
@@ -114,7 +114,7 @@ Host-provided APIs live under the lowercase global `mb`.
 | `filter_content(ctx, block)` | Return `true` to skip a content block; in streaming, subsequent deltas of a dropped block are suppressed as well |
 | `transform_error(ctx, msg)` | Return the rewritten error message |
 
-The main fields of `req` (CoreRequest): `model` (the resolved upstream model name), `model_alias`, `system` (an array of ContentBlocks), `messages`, `tools`, `tool_choice`, `max_tokens`, `temperature`, `top_p`, `stop`, `stream`, `reasoning`, `metadata`. Content blocks look like `{ type = "text", text = "..." }`. `resp` (CoreResponse) carries `content`, `stop_reason`, and `usage` (`input_tokens` / `output_tokens` / `cache_read_tokens` / `cache_write_tokens` / `reasoning_tokens`).
+The main fields of `req` (CoreRequest): `model` (the resolved upstream model name), `model_alias`, `system` (an array of ContentBlocks), `messages`, `tools`, `tool_choice`, `max_tokens`, `temperature`, `top_p`, `stop`, `stream`, `reasoning`, `meta` (request-level metadata: `session_id`, raw headers, client identity). Content blocks look like `{ type = "text", text = "..." }`. `resp` (CoreResponse) carries `content`, `stop_reason`, and `usage` (`input_tokens` / `output_tokens` / `cache_read_tokens` / `cache_write_tokens` / `reasoning_tokens`).
 
 ### Wire-Layer Hooks
 
@@ -217,4 +217,4 @@ Each plugin owns a dedicated Lua VM running in a sandbox:
 
 ## License
 
-This project is released under [GPL-3.0-or-later](https://www.gnu.org/licenses/gpl-3.0.html).
+This project is released under GPL-3.0-or-later; see [LICENSE](LICENSE) for the full text.
