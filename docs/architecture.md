@@ -110,6 +110,26 @@ pub enum CoreStreamEvent {
 > 一个空文本块（各入口编码器可容忍）。Gemini 入口为次要链路（未挂载 HTTP 路由），
 > 主要用于矩阵完整性与测试。
 
+> **推理凭据（加密 CoT / thoughtSignature）的四协议形态**。凭据是 thinking 模式的硬性回传物：
+> 多轮历史缺凭据即 400。跨协议时凭据按**来源前缀**标记（`ant:` / `oai:` / `gem:` / `chat:`，
+> 见 `adapters/mod.rs` 的 `tag_signature` / `untag_signature` / `emit_signature`）——归属协议
+> 解标还原原文，异源协议按 opaque 原样透传，不会以假凭据污染真上游：
+>
+> - **Responses**：出站无条件补 `include: ["reasoning.encrypted_content"]`（summary 默认
+>   `auto`）；凭据在 reasoning item 的 `encrypted_content`（下发给客户端时明文 summary 并存，
+>   但**回传上游只带 `encrypted_content`**——明文 summary 是展示产物，异源凭据会被上游拒收
+>   故跳过）。
+> - **Anthropic**：redacted 推理以 `redacted_thinking` 块承载，凭据在 `data` 字段；入口编码器
+>   对推理块**惰性开块**（`StreamEncodeState.open_blocks`，消灭空 thinking 块；凭据先至按
+>   redacted 形态开块）。
+> - **Gemini**：thought part 的 `thoughtSignature`（含流式末块空 text 搭凭据）。
+> - **Chat**：上游无独立凭据字段——**推理明文本体即凭据**，decode 侧打 `chat:` 前缀
+>   （payload 为推理原文），使客户端方向（Responses 等）有可回传的不透明凭据；`<mb-cot>…</mb-cot>`
+>   搭车 `reasoning_content` 尾部承载**异源**凭据。上游方向：assistant 历史双写
+>   `reasoning_content` / `reasoning`（此前 Reasoning 块整体丢弃 ⇒ thinking 上游多轮 tool_calls
+>   链必 400），并**合并连续 assistant 消息**——Responses 入口把同一轮展平成相邻 assistant 消息，
+>   而 thinking 上游要求推理与 `tool_calls` 落在同一条上。
+
 ---
 
 ## 5. 双层钩子模型（PluginHooks）
@@ -184,6 +204,15 @@ function MB.on_request(ctx, req) ... end -- 就地修改 req 即生效，亦可 
 - **清单**：`Manifest { name, version, scopes, capabilities, config_schema, entry }`。`name` 以 store 记录为权威。
 - **运行时**：每插件一个 `mlua::Lua`（`lua54 + async + send + serialize + vendored`），封装为 `Arc<tokio::sync::Mutex<Lua>>` 串行化；利用 Lua table 引用语义实现「就地修改 → 宿主回写」。
 - **注册表**：`LuaPluginRegistry` 串联多插件、`impl PluginHooks`，按 capability 门控；单插件钩子出错只记 warn 并跳过，不拖垮请求链路。
+- **启用门控 `MB.requires`（仅 app 层）**：脚本可额外声明 `MB.requires = { <网关配置键> = <期望值>, ... }`
+  （bool / int / float / 字符串；提取时行级剥掉 `--` 注释，注释里的声明不生效）。`src-tauri`
+  的 `plugin_save` 在**启用动作**（新建即启用、或停用→启用）时对照当前网关配置逐项校验，
+  不满足则拒绝并返回 `REQUIREMENTS_ERROR_PREFIX` 开头的结构化错误（前端据此弹「设置不满足」
+  提示框而非普通错误横幅）；`plugin_import` 不阻断导入——导入后若 `requires` 未满足则**保持停用**
+  并在结果 message 里说明。
+  `runtime.rs` **不解析** `requires`——网关侧不感知该字段，门控是 app 层策略。
+  示例：`plugins/utils/FxxkDax.lua` 声明 `requires = { sessionMarker = true }`，在出站报文层
+  注入 `x-opencode-session`（无会话时占位 `no-session`；上游缺该头即 400）。
 
 ### 宿主 API（`mb.*` 白名单，crates/plugin/src/host.rs）
 
@@ -247,6 +276,7 @@ SQLite（rusqlite, bundled + WAL），手写版本化 migration，每表一个 D
   价键逐项覆盖基价（未列价键回退基价）。目录导入保留两种形态。
 - trace 大对象存文件系统 `app_data_dir/traces/<session>/<model>/<created_at>-<short_id>.json`（`short_id` 为 request_id 首段），不入库。
 - trace 的 `upstreamResponse`/`clientResponse`：**非流式**记协议响应体原文；**流式**记 `StreamAssembler` 从事件流聚合出的最终消息（`CoreResponse` 形态，见 §8）。
+- **trace 治理**：`trace_record_bodies`（默认 `true`）为 `false` 时在 `dispatch::finish_audit` 收口统一抹体——`clientRequest`/`clientResponse`/`upstreamResponse` 置 null，`upstreamRequest` 只清 `body`（它的 URL/headers 已脱敏，但 body 含完整 prompt；只清 `clientRequest` 会留下旁路，流式路径曾因此泄漏）。`trace_retention`（默认 `500`；`0` = 关闭整理）按 mtime **全局** prune（跨会话/模型目录）并清掉空目录。快照脱敏在 `dispatch` 构造时完成：头名含 `auth`/`api-key`/`apikey`/`token`/`cookie`/`secret` 的值整体替换为 `[REDACTED]`；URL 查询参数名含 `key`/`token`/`secret` 的值同样脱敏（Google 风格 `?key=`）。上游非 2xx 的 `trace.error` 只记 `上游返回 HTTP {status}` 摘要，HTML 错误页不再整页入库。
 
 ---
 
@@ -343,7 +373,7 @@ Client → axum: POST /v1/responses | /v1/messages | /v1/chat/completions
 > （说明是**谁**答的、答成什么样），usage 侧则按客户端视角记（`2xx` 短路 ⇒ `ok`，其余 ⇒ `error`）。
 > 路由之前的短路只有请求侧信息，trace 的上游字段留空（`pre_route_trace`）。
 
-模块划分：`server`（axum 路由/启动，含 `serve_with_shutdown` 优雅关闭）、`dispatch`（编排 RAW/CORE 两组钩子）、`stream`（SSE 编排）、`router`（别名解析）、`session`（会话水印编解码 + 活跃会话 FIFO 表）、`upstream`（reqwest 客户端 + SSE 读取）、`bridge`（`HostBridge` 实现）、`usage`（统计落库）、`trace`（报文快照落盘）、`state`（`AppState`，含 `sessions: SessionTable`）、`config`（`GatewayConfig`）。
+模块划分：`server`（axum 路由/启动，含 `serve_with_shutdown` 优雅关闭）、`dispatch`（编排 RAW/CORE 两组钩子）、`stream`（SSE 编排）、`router`（别名解析）、`session`（会话水印编解码 + 活跃会话 LRU 表）、`upstream`（reqwest 客户端 + SSE 读取）、`bridge`（`HostBridge` 实现）、`usage`（统计落库）、`trace`（报文快照落盘）、`state`（`AppState`，含 `sessions: SessionTable`）、`config`（`GatewayConfig`）。
 
 顶层入口：`bootstrap(config, db) -> Arc<AppState>`（装配内置 adapter、加载插件、构建 HTTP 客户端）、`serve` / `server::serve_with_shutdown`。
 
@@ -357,7 +387,7 @@ Client → axum: POST /v1/responses | /v1/messages | /v1/chat/completions
 - **commands**（前端 `invoke`）：
   - 网关：`gateway_start / stop / restart / status`
   - CRUD：`provider_* / model_* / offer_* / route_* / plugin_*（含 `plugin_read_script` / `plugin_write_script` 在线编辑）/ binding_* / usage_* / settings_*`
-  - 模型目录：`catalog_fetch`（后端 reqwest 拉取 `models.dev/api.json`，解析精简为扁平候选列表）/ `catalog_import`（勾选批量 upsert 到 `models` 表，含定价）
+  - 模型目录：`catalog_fetch`（后端 reqwest 拉取 `models.dev/api.json`，解析精简为扁平候选列表）/ `catalog_import`（勾选批量导入：模型**元数据** upsert 到 `models`，**定价**经 `insert_offer_if_absent` 写入对应 provider 的 offer，并对同 slug 已有空定价的行回填 `backfill_offer_pricing`；刻意不触碰 provider 端点配置）
   - Trace：`trace_list / trace_read / trace_delete`（只读浏览 `trace_dir`，含路径穿越校验）
   - 应用：`app_info / config_get / config_set`
 - **托盘**：显示主窗口 / 一键启停网关 / 退出；左键单击显示窗口。
@@ -415,11 +445,11 @@ cargo tauri build
 ## 12. 当前实现状态
 
 **已交付**：M1 脚手架 · M2 Provider/Model/Offer/Route CRUD · M3 非流式链路 · M4 SSE 流式 ·
-M5 Lua 插件系统（Core 层 + 报文层 raw 钩子、宿主 API、沙箱配额硬化、示例插件、Plugins 管理页）·
+M5 Lua 插件系统（Core 层 + 报文层 raw 钩子、宿主 API、沙箱配额硬化、启用门控 `MB.requires`、示例插件、Plugins 管理页）·
 M6 四协议全矩阵 + Usage/Traces 可视化。
 
-- 5 个 lib crate + src-tauri + ui 全部编译通过；`cargo test --workspace` 全绿 **233 项**
-  （core 9 / protocol 101 / plugin 19 lib + 5 integration / store 7 / gateway 52 lib + 26 e2e / app 14）；
+- 5 个 lib crate + src-tauri + ui 全部编译通过；`cargo test --workspace` 全绿 **262 项**
+  （core 9 / protocol 108 / plugin 19 lib + 5 integration / store 7 / gateway 70 lib + 30 e2e / app 14）；
   `cargo check --workspace --all-targets` 与 `cargo clippy --workspace --all-targets` 均**零告警**；
   `pnpm --dir ui type-check`（`vue-tsc --noEmit`）无错。
   原存量的 6 条 clippy 提示已全部清理：4 处真改（两处 markdown 文档列表缺空行分隔、
@@ -428,6 +458,10 @@ M6 四协议全矩阵 + Usage/Traces 可视化。
   `wrong_self_convention` 用**带理由的作用域 `#[allow]`** 保留——`from_core_*`/`to_core_*`
   表达的是 Core ↔ 协议的转换方向且与配对方法对称，不是构造函数，而 `&self` 为
   `Arc<dyn Adapter>` 动态派发所必需，改名只会破坏对称性。
+  其后 usage 计价链路新增的 3 条亦已清零：`gateway/usage.rs` 的 `needless_lifetimes` 与
+  `needless_update` 真改；`commands/usage.rs::usage_query` 的 `too_many_arguments` 用
+  **带理由的作用域 `#[allow]`** 保留——参数逐项平铺就是前端 `invoke("usage_query", {...})`
+  的载荷形状（`ui/src/lib/api.ts`），收拢成结构体会改 IPC 契约。
 - **推理强度传导**：`CoreRequest.reasoning.effort` 由四个上游 adapter 各自落地——Chat 用
   `reasoning_effort`、Responses 用 `reasoning.{effort,summary}`、Anthropic 用
   `thinking:{type,budget_tokens}`（effort→预算表，并按 `max_tokens` 夹逼）、Gemini 用
@@ -439,6 +473,10 @@ M6 四协议全矩阵 + Usage/Traces 可视化。
 - **协议矩阵**：OpenAI Responses / Anthropic / OpenAI Chat / Google GenAI(Gemini) 四协议均实现
   入口 + 上游四象限，`builtin_registry` 注册为 4×4 全矩阵；e2e 覆盖 Responses→Anthropic、
   Chat→Chat、Anthropic 入口、Chat→Gemini 等跨协议链路（含流式）。
+- **推理凭据全链路**：四协议凭据形态与来源前缀见 §4。Chat 上游 reasoning 回传（连续 assistant
+  消息合并 + `reasoning_content`/`reasoning` 双写）与 `chat:` 自凭据修补了「thinking 上游多轮
+  tool_calls 链必 400」；Responses 入口 → Chat thinking 上游的凭据/推理回程有端到端回归
+  （`e2e_reasoning_content_roundtrips_responses_to_chat`）。
 - **插件沙箱硬化**：危险全局移除 / 指令计数 / 内存上限 / 执行超时 / body 降级 / http 兜底超时（见 §6），
   均有回归测试（死循环中止、内存越界报错、超大 body 降级且保留原始报文、`require`/`package`
   逃逸通道被切断、`coroutine.wrap` 死循环仍被指令配额中止、且补丁不破坏协程正常语义）。
@@ -467,5 +505,4 @@ M6 四协议全矩阵 + Usage/Traces 可视化。
 
 **可选后续增强**（非阻塞）：
 
-- usage `cost` 按 offers pricing 实际计价（当前恒为 0）。
 - Gemini 入口挂载 HTTP 路由（当前 Gemini 主要作上游）。

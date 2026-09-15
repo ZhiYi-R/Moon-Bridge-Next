@@ -27,10 +27,10 @@ pub fn accumulate(acc: &mut Usage, u: &Usage) {
 /// 触发口径与上游一致：`input_tokens`（Core 口径含缓存）> size——上游语义是
 /// 「超过 N token 才加价」（`context_over_200k` 的命名同理）。多档命中取 size
 /// 最大者；层内未列出的价键回退基价。
-fn tier_overlay<'a>(
-    p: &'a serde_json::Map<String, Value>,
+fn tier_overlay(
+    p: &serde_json::Map<String, Value>,
     input_tokens: u64,
-) -> Option<&'a serde_json::Map<String, Value>> {
+) -> Option<&serde_json::Map<String, Value>> {
     let mut best: Option<(u64, &serde_json::Map<String, Value>)> = p
         .get("context_over_200k")
         .and_then(Value::as_object)
@@ -227,7 +227,6 @@ mod tests {
             cache_read_tokens: 100_000,
             cache_write_tokens: 10_000,
             reasoning_tokens: 200,
-            ..Usage::default()
         };
         let expect = ((200_001.0 - 110_000.0) * 6.0
             + 100_000.0 * 0.6

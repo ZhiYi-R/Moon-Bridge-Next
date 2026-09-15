@@ -9,6 +9,11 @@ use crate::commands::CmdResult;
 use crate::state::ManagedState;
 
 /// 按条件查询用量记录（model/provider_key/status/since/until 可选，limit 默认 100）。
+///
+/// 参数逐项平铺是 IPC 契约的一部分——前端 `invoke("usage_query", {...})` 直接传扁平
+/// 对象（`ui/src/lib/api.ts`）。收拢成结构体会改变 invoke 载荷形状、需同步改 UI，
+/// 故此处保留多参数签名并带理由放行。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn usage_query(
     state: State<'_, Arc<ManagedState>>,

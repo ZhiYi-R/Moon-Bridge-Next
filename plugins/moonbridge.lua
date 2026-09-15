@@ -33,6 +33,8 @@
 ---@field version string|nil 版本
 ---@field scopes string[]|nil 作用域："global"|"provider"|"model"|"route"
 ---@field capabilities string[] 能力："core"|"raw_request"|"raw_response"|"raw_stream"
+---@field requires table|nil 启用门控：`{ <网关配置键> = <期望值>, ... }`（bool/int/float/字符串）。
+---仅 app 层校验——启用动作（新建即启用 / 停用→启用）时不满足则拒绝并弹提示；网关侧不感知。
 ---@field config_schema table|nil 配置 JSON Schema（供 UI 渲染表单）
 ---@field entry string|nil 入口提示
 ---@field init fun()|nil 加载后调用一次
@@ -42,6 +44,7 @@
 ---@field on_response (fun(ctx: MbCtx, resp: MbCoreResponse): MbCoreResponse|nil)|nil
 ---@field inject_tools (fun(ctx: MbCtx): MbTool[])|nil
 ---@field filter_content (fun(ctx: MbCtx, block: table): boolean|table)|nil 返回 true 跳过该块
+---@field on_stream_event (fun(ctx: MbCtx, ev: table): boolean)|nil 处理单个流事件；返回 true 丢弃该事件
 ---@field transform_error (fun(ctx: MbCtx, msg: string): string)|nil
 ---出入站原始报文钩子（需声明对应 raw_* 能力）。
 ---@field on_client_request_raw (fun(ctx: MbCtx, msg: MbRawMessage): MbVerdict|nil)|nil
@@ -90,7 +93,7 @@ MB = {}
 ---@field stop string[]
 ---@field stream boolean
 ---@field reasoning table|nil 推理配置
----@field metadata table|nil 请求级元数据（session_id、原始 headers 等）
+---@field meta table|nil 请求级元数据（session_id、原始 headers、客户端标识等）
 
 ---@class MbCoreResponse
 ---@field content table ContentBlock 数组
@@ -135,7 +138,7 @@ MB = {}
 
 ---@class MbHttpRequest
 ---@field method string|nil 默认 "GET"
----@field url string 完整 URL（经宿主 egress proxy / 超时 / 域名白名单约束）
+---@field url string 完整 URL（经宿主 egress proxy 与兜底超时；**无目标白名单/过滤**——收口≠授权）
 ---@field headers MbHeaderList|nil
 ---@field body table|nil JSON 请求体
 ---@field timeout_ms number|nil

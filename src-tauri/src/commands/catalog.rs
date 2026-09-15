@@ -1,14 +1,14 @@
-//! 模型目录：从 [models.dev](https://models.dev) 拉取公开模型库，供用户搜索并批量
-//! 导入到本地 `models` 表（含定价）。
+//! 模型目录：从 [models.dev](https://models.dev) 拉取公开模型库，供用户搜索并批量导入。
 //!
 //! 数据源为 `https://models.dev/api.json`（约 4.5MB）：顶层是 provider 字典，每个
 //! provider 含 `name` / `api` / `models`，每个模型含 `id / name / limit / modalities /
 //! reasoning_options / cost` 等。本模块在**后端**拉取并解析，只把精简后的扁平候选列表
 //! 交给前端（避免大 JSON 过 webview，也把字段映射收在一处）。
 //!
-//! 导入内容：模型定义（slug/名称/上下文/输出上限/模态/推理档）+ 定价（`cost` →
-//! `pricing`），一并写入 `models` 表。刻意**不触碰** provider 端点配置（端点在
-//! Providers 页单独管理）。
+//! 导入内容分两处落库：模型**元数据**（slug/名称/上下文/输出上限/模态/推理档）→ `models` 表；
+//! **定价**（`cost` → `pricing`）→ 对应 provider 的 **offer**（`insert_offer_if_absent`，
+//! 并对同 slug 已有空定价的行 `backfill_offer_pricing`）——V7 起定价口径统一在 offers，
+//! `models.pricing_json` 已删除。刻意**不触碰** provider 端点配置（端点在 Providers 页单独管理）。
 
 use std::sync::Arc;
 use std::time::Duration;
