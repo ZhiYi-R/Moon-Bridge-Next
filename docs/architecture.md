@@ -136,7 +136,7 @@ pub enum CoreStreamEvent {
 
 - 不经 capability、不经 provider 三态门控：初始化是插件自身的事，与它对哪些请求生效无关。
 - 单插件 init/shutdown 抛错只记 warn，不阻断其它插件（与请求链路钩子的容错口径一致）。
-- `forget_session(session_id)` 同属这一层：由会话表 FIFO 淘汰触发（见 §8），跨插件清掉该会话在
+- `forget_session(session_id)` 同属这一层：由会话表 LRU 淘汰触发（见 §8），跨插件清掉该会话在
   `SessionStore` 里的桶。它不需要脚本实现——`LuaPluginRegistry` 的实现直接落到它与各插件运行时
   共享的那个 `SessionStore::clear_session`，插件无需感知。
 
@@ -265,45 +265,55 @@ Client → axum: POST /v1/responses | /v1/messages | /v1/chat/completions
   → reqwest 发送(受 egress proxy)
   → [流式] 逐 chunk:
              [RAW] on_upstream_chunk_raw → [CORE] decode + on_stream_event
-             → [CORE] filter_content（丢块连带压制同 index 增量；水印在 message_stop 前插独立块）
+             → [CORE] filter_content（丢块连带压制同 index 增量；水印注入首个
+               推理块的首部增量）
              → [CORE] encode → [RAW] on_client_chunk_raw → 回写入口 SSE(axum Sse)
      [非流式] [RAW] on_upstream_response_raw → to_core_response → [CORE] on_response
-             → [CORE] filter_content → 追加会话水印
+             → [CORE] filter_content → 嵌入会话水印（首个推理块明文首部）
              → from_core_response → [RAW] on_client_response_raw → 回写
   → usage 落库 + trace 落盘（若配置 trace_dir）
 ```
 
-> **会话水印（`crates/gateway/src/session.rs`）**：给助手**纯文本**输出末尾附一段
-> `[mb:xxxxxx]`（6 位小写 hex 短 tag），客户端下一轮把整段历史带回来时即可认回同一会话。
+> **会话水印（`crates/gateway/src/session.rs`）**：把 marker 嵌进助手**推理（CoT）块**的
+> 明文首部（`" [mb:<载荷>]"`），客户端下一轮把整段历史带回来时即可认回同一会话。
 > 存在的理由：Qwen Code 这类客户端在请求头与请求体里都不带会话标识（其 `prompt_cache_key`
 > 注入路径以 hostname 恰为 `api.openai.com` 为前提，经网关时不生效），于是 `ctx.session_id`
 > 恒为 `None`，插件的 `mb.session` 与 trace 的会话目录一起失去粒度。
 >
+> - **为什么嵌 CoT 而非正文**：thinking 回传是硬语义——thinking 模式上游缺
+>   `reasoning_content`/thinking 块直接 400，客户端必然原样带回，与 `<mb-cot>` 凭据机制
+>   同一条可靠通道；且每个 thinking 响应都带推理块（含 tool_use 轮），首轮起即可打标。
+>   正文是用户可见输出、且会被客户端包进 tool_result 等结构——marker 不再污染它。
 > - **入站即剥除，剥完才往下走**：`extract_from_request` 在 `to_core_request` 之后、路由与
->   插件 `on_request` 之前原地改写 `CoreRequest`。上游模型的输入里永远不出现 marker，因此
->   不存在「模型模仿 marker」的可能（模仿只在 marker 进入上下文时才会发生），marker 的唯一
+>   插件 `on_request` 之前原地改写 `CoreRequest`，覆盖 `Text` / `Reasoning.text` /
+>   `Reasoning.signature`（`chat:` 自凭据的载荷就是推理明文）与 `ToolResult` 子块。
+>   上游模型的输入里永远不出现 marker，因此不存在「模型模仿 marker」的可能，marker 的唯一
 >   存活期是客户端本地 transcript。trace 的 `clientRequest` 记剥除**前**的客户端原样、
 >   `upstreamRequest.body` 记剥除**后**的转发内容，两者对照即是这条不变量的证据。
-> - **tag ≠ session id**：短 tag 只是 `SessionTable`（`tag → uuid`，按登记顺序 FIFO 淘汰）里
->   指向完整 uuid 的键，省 token 而内部主键仍是 uuid。表深由 `session_table_depth` 配置
->   （默认 64，`<1` 钳到 1）；tag 由 id 定长哈希（FNV-1a 低 24 bit）派生——不能只挑 id 里
->   现成的 hex 字符，外部 `session_id` 未必是 uuid，挑出的短 tag 下一轮认不出来，水印就会
->   逐轮在 transcript 里累积。撞车时换新 tag 而非顶掉已有会话。
-> - **解析优先级**：外部显式身份（body `session_id` / `previous_response_id` /
->   `X-Codex-Window-Id`）> marker 命中活跃表 > 新分配。tag 合法但不在表内（被淘汰 / 重启）
->   按新会话处理。
-> - **两处打标**：非流式 `append_to_response` 附在最后一个文本块末尾（多隔一个空白，剥除时
->   连带吃掉，故打标→剥除字节还原）；流式 `marker_blocks` 在 `message_stop` 前插一段
->   **独立 text 块**（`start → delta → stop`，index 取已见最大 +1）——不并入已有文本块是为了
->   避开在各入口编码器的块状态机里重放事件。两处都遵守「整轮出现过 `tool_use` 就不打标」，
->   非流式还要求至少有一个文本块，绝不凭空造块。独立块被剥除后会变空块，`strip_blocks`
->   连同空块一起删掉（Anthropic 拒收空 text 块），但保底不把 `content` 删成空数组。
-> - **淘汰即清理**：被 FIFO 挤出的 session id 交回 `dispatch::forget_sessions` →
+> - **载荷即 session id**：网关自分配会话的 marker 载荷就是 session uuid 本身——
+>   `ctx.session_id` 由载荷直接还原，活跃表淘汰 / 网关重启都不再改判身份
+>   （`x-opencode-session` 等下游亲和头不漂移，这正是长对话缓存失效的修复点）。
+>   外部身份（body `session_id` / `previous_response_id` / `X-Codex-Window-Id`）的载荷是
+>   `tag_from_id` 派生的定长 6-hex 短 tag，经 `SessionTable`（`载荷 → id`，LRU 淘汰，
+>   表深 `session_table_depth` 默认 64，`<1` 钳到 1）还原；表里查不到的短 tag 合成
+>   确定性 `mb-{tag}`——同一 tag 反复回带恒落同一会话。短 tag 撞车时换新 tag 而非
+>   顶掉已有会话。
+> - **解析优先级**：外部显式身份 > marker 载荷 > 新分配。
+> - **两处打标**：非流式 `tag_response` 把 `" [mb:<载荷>]"` 插进首个非 redacted 推理块的
+>   明文首部（前置空格剥除时连带吃掉，打标→剥除字节还原）；流式在首个可承载推理块的
+>   `BlockStart`（或首个裸推理增量）处向**同 index** 注入一条推理明文增量，marker 成为
+>   该 thinking 块首部——不新占块、不动块序、不拦截 `BlockStop`。redacted / 凭据先行的
+>   块不可注入（入口编码器会把它开成 `redacted_thinking` 完整块）。无推理块的轮次不打标
+>   （纯 CoT 方案：不向正文注水、不凭空造块），身份顺延到下一个含推理块的响应。
+>   打标块的 `BlockStop` 若携带完整块（chat 上游的收尾块、responses 的 done item 组装料），
+>   其明文同样补上 marker 首部，保证只存完成态的客户端也能回带水印。
+>   被剥成空壳的幻影块（marker 独占、无凭据）连同删除；保底不把 `content` 删成空数组。
+> - **淘汰即清理**：被 LRU 挤出的 session id 交回 `dispatch::forget_sessions` →
 >   `PluginHooks::forget_session` → `SessionStore::clear_session`，回收插件侧 `mb.session` 的桶。
-> - **代价与关闭**：每轮多约 5 个 token，且客户端 transcript 里看得见这个后缀。
->   `session_marker = false` 时不再打标，但**入站 marker 照剥**（客户端可能带着开启期间
->   留下的历史，不该污染上游 prompt）。已经自带会话标识的客户端（走 `session_id` 字段或
->   `X-Codex-Window-Id`）可直接关掉。
+> - **代价与关闭**：每轮多约十余 token，marker 出现在客户端 transcript 的 thinking 明文里
+>   （正文不可见）。`session_marker = false` 时不再嵌入，但**入站 marker 照剥**（客户端
+>   可能带着开启期间留下的历史，不该污染上游 prompt）。已经自带会话标识的客户端
+>   （走 `session_id` 字段或 `X-Codex-Window-Id`）可直接关掉。
 
 > **流式收尾由 `StreamAudit::Drop` 承担**，而非写在读流循环之后。流可能以三种方式结束——
 > 正常读尽（`ok`）、中途出错并已下发带内 error 事件（`error`）、客户端断开或上游提前关闭
@@ -442,13 +452,16 @@ M6 四协议全矩阵 + Usage/Traces 可视化。
   增量）；`MB.init` / `MB.shutdown` 由 `serve_with_shutdown` 成对扇出（见 §5）。三项均有
   带对照组的 e2e（`e2e_blocks_survive_without_filter_content` 等）——对照组断言「不挂钩子
   时块必须原样到达」，防止 e2e 因上游报文本身不含该块而假绿。
-- **会话水印**：为不带会话标识的客户端（Qwen Code 等）补上 `ctx.session_id`——纯文本输出
-  尾随 `[mb:xxxxxx]` 短 tag，下一轮入站**先剥净再转发**，故 marker 永不进入上游 prompt、
-  模型无从模仿；活跃会话由可配深度的 FIFO 表承载，淘汰时联动清理插件侧 `mb.session`（见 §8）。
-  6 项 e2e 覆盖：多轮 tag 稳定与会话归属、陈旧 tag 改派新会话、`upstreamRequest.body`
-  全程无 marker 而 `clientRequest` 照实留痕、工具轮不打标（流式与非流式各一）、
-  关闭开关后仍剥除入站 marker、外部 `session_id` 优先于 marker。流式侧断言逐帧解析
-  SSE（块 index 连续、`content_block_start`/`stop` 配对、水印不成为末帧）。
+- **会话水印**：为不带会话标识的客户端（Qwen Code 等）补上 `ctx.session_id`——marker
+  嵌进首个推理块的明文首部（`" [mb:<载荷>]"`，载荷即 session id），下一轮入站**先剥净
+  再转发**，故 marker 永不进入上游 prompt、模型无从模仿；uuid 载荷自带身份，活跃表
+  淘汰/重启不改判会话（下游 `x-opencode-session` 亲和头恒定）；外部身份仍经定长短 tag
+  走活跃表（LRU）还原，淘汰时联动清理插件侧 `mb.session`（见 §8）。e2e 覆盖：多轮
+  marker 稳定与会话归属、淘汰后身份还原、陈旧短 tag 合成确定性身份、
+  `upstreamRequest.body` 全程无 marker 而 `clientRequest` 照实留痕、tool_use 轮照常打标、
+  无推理块轮次不打标（流式与非流式各一）、关闭开关后仍剥除入站 marker、外部
+  `session_id` 优先于 marker。流式侧断言逐帧解析 SSE（marker 为 thinking 首部增量、
+  不占新块、signature_delta 随行、responses done item 摘要同带 marker）。
 - **短路不再绕过审计**：8 个 `ShortCircuit`/`Abort` 返回点统一走 `answered` / `aborted`
   → `finish_audit`，插件代答与被插件拒绝的请求都留下 usage 行和 trace 文件（见 §8）。
 

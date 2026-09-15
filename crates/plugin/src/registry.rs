@@ -11,9 +11,7 @@ use async_trait::async_trait;
 use moonbridge_core::{
     ContentBlock, CoreRequest, CoreResponse, CoreStreamEvent, Result as CoreResult, Tool,
 };
-use moonbridge_protocol::{
-    ChunkVerdict, PluginHooks, RawChunk, RawMessage, RawVerdict, ReqCtx,
-};
+use moonbridge_protocol::{ChunkVerdict, PluginHooks, RawChunk, RawMessage, RawVerdict, ReqCtx};
 
 use crate::manifest::{CAP_CORE, CAP_RAW_REQUEST, CAP_RAW_RESPONSE, CAP_RAW_STREAM};
 use crate::runtime::LuaRuntime;
@@ -125,7 +123,9 @@ impl LuaPluginRegistry {
             (&t.route, ctx.route_alias.as_deref()),
             (
                 &t.model,
-                ctx.upstream_model.as_deref().or(Some(ctx.model_alias.as_str())),
+                ctx.upstream_model
+                    .as_deref()
+                    .or(Some(ctx.model_alias.as_str())),
             ),
             (&t.provider, ctx.provider_key.as_deref()),
         ] {
@@ -224,7 +224,9 @@ impl PluginHooks for LuaPluginRegistry {
             match p.on_client_request_raw(ctx, m).await {
                 Ok(RawVerdict::Pass) => continue,
                 Ok(v) => return Ok(v), // ShortCircuit / Abort 立即生效
-                Err(e) => tracing::warn!(plugin = %p.name, error = %e, "on_client_request_raw 失败"),
+                Err(e) => {
+                    tracing::warn!(plugin = %p.name, error = %e, "on_client_request_raw 失败")
+                }
             }
         }
         Ok(RawVerdict::Pass)
@@ -239,7 +241,9 @@ impl PluginHooks for LuaPluginRegistry {
             match p.on_upstream_request_raw(ctx, m).await {
                 Ok(RawVerdict::Pass) => continue,
                 Ok(v) => return Ok(v),
-                Err(e) => tracing::warn!(plugin = %p.name, error = %e, "on_upstream_request_raw 失败"),
+                Err(e) => {
+                    tracing::warn!(plugin = %p.name, error = %e, "on_upstream_request_raw 失败")
+                }
             }
         }
         Ok(RawVerdict::Pass)
@@ -288,7 +292,9 @@ impl PluginHooks for LuaPluginRegistry {
             match p.on_upstream_chunk_raw(ctx, c).await {
                 Ok(ChunkVerdict::Forward) => continue,
                 Ok(ChunkVerdict::Drop) => return Ok(ChunkVerdict::Drop),
-                Err(e) => tracing::warn!(plugin = %p.name, error = %e, "on_upstream_chunk_raw 失败"),
+                Err(e) => {
+                    tracing::warn!(plugin = %p.name, error = %e, "on_upstream_chunk_raw 失败")
+                }
             }
         }
         Ok(ChunkVerdict::Forward)

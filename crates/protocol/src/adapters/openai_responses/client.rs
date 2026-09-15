@@ -5,8 +5,8 @@
 
 use async_trait::async_trait;
 use moonbridge_core::{
-    ContentBlock, CoreRequest, CoreResponse, DocSource, Message, Protocol, Reasoning, Result,
-    Role, Tool, ToolChoice, Usage,
+    ContentBlock, CoreRequest, CoreResponse, DocSource, Message, Protocol, Reasoning, Result, Role,
+    Tool, ToolChoice, Usage,
 };
 use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -84,28 +84,32 @@ fn parse_image(item: &Value) -> Option<ContentBlock> {
     // source 解析不出值时回退到 image_url 字段。
     if let Some(src) = item.get("source") {
         let parsed = match src.get("type").and_then(|t| t.as_str()) {
-            Some("url") => src.get("url").and_then(|u| u.as_str()).map(|u| {
-                ContentBlock::Image {
+            Some("url") => src
+                .get("url")
+                .and_then(|u| u.as_str())
+                .map(|u| ContentBlock::Image {
                     data: u.to_string(),
                     media_type: "url".to_string(),
-                }
-            }),
-            Some("file") => src.get("file_id").and_then(|f| f.as_str()).map(|f| {
-                ContentBlock::Image {
-                    data: f.to_string(),
-                    media_type: "file".to_string(),
-                }
-            }),
-            _ => src.get("data").and_then(|d| d.as_str()).map(|d| {
-                ContentBlock::Image {
+                }),
+            Some("file") => {
+                src.get("file_id")
+                    .and_then(|f| f.as_str())
+                    .map(|f| ContentBlock::Image {
+                        data: f.to_string(),
+                        media_type: "file".to_string(),
+                    })
+            }
+            _ => src
+                .get("data")
+                .and_then(|d| d.as_str())
+                .map(|d| ContentBlock::Image {
                     data: d.to_string(),
                     media_type: src
                         .get("media_type")
                         .and_then(|m| m.as_str())
                         .unwrap_or("image/png")
                         .to_string(),
-                }
-            }),
+                }),
         };
         if parsed.is_some() {
             return parsed;
@@ -150,17 +154,16 @@ fn call_item_to_message(item: &Value, namespace: Option<String>) -> Message {
         .get("arguments")
         .map(|a| match a {
             // arguments 规范形态是 JSON 字符串；对象形态（非标准实现）直接收
-            Value::String(s) => {
-                serde_json::from_str::<Value>(s).unwrap_or_else(|_| json!({}))
-            }
+            Value::String(s) => serde_json::from_str::<Value>(s).unwrap_or_else(|_| json!({})),
             Value::Object(_) => a.clone(),
             _ => json!({}),
         })
         .or_else(|| item.get("action").cloned())
         .or_else(|| {
             item.get("input").map(|v| match v {
-                Value::String(s) => serde_json::from_str::<Value>(s)
-                    .unwrap_or_else(|_| json!({ "input": s })),
+                Value::String(s) => {
+                    serde_json::from_str::<Value>(s).unwrap_or_else(|_| json!({ "input": s }))
+                }
                 other => other.clone(),
             })
         })
@@ -192,8 +195,7 @@ fn call_output_to_message(item: &Value) -> Message {
     let content = match item.get("output") {
         Some(Value::String(s)) => vec![ContentBlock::text(s.clone())],
         Some(Value::Array(arr)) => {
-            let blocks: Vec<ContentBlock> =
-                arr.iter().filter_map(parse_content_item).collect();
+            let blocks: Vec<ContentBlock> = arr.iter().filter_map(parse_content_item).collect();
             if blocks.is_empty() {
                 vec![ContentBlock::text(String::new())]
             } else {
@@ -201,8 +203,7 @@ fn call_output_to_message(item: &Value) -> Message {
             }
         }
         Some(v @ Value::Object(_)) => {
-            vec![parse_content_item(v)
-                .unwrap_or_else(|| ContentBlock::text(v.to_string()))]
+            vec![parse_content_item(v).unwrap_or_else(|| ContentBlock::text(v.to_string()))]
         }
         Some(other) => vec![ContentBlock::text(other.to_string())],
         None => vec![ContentBlock::text(String::new())],
@@ -284,8 +285,7 @@ impl ClientAdapter for OpenAiResponsesAdapter {
         // input：字符串或 items 数组
         match raw.get("input") {
             Some(Value::String(s)) => {
-                req.messages
-                    .push(Message::text(Role::User, s.clone()));
+                req.messages.push(Message::text(Role::User, s.clone()));
             }
             Some(Value::Array(items)) => {
                 for item in items {
@@ -363,7 +363,11 @@ impl ClientAdapter for OpenAiResponsesAdapter {
                             }
                             req.messages.push(Message {
                                 role: Role::Assistant,
-                                content: vec![ContentBlock::Reasoning { text, signature, redacted: false }],
+                                content: vec![ContentBlock::Reasoning {
+                                    text,
+                                    signature,
+                                    redacted: false,
+                                }],
                                 ext: Default::default(),
                             });
                         }
@@ -392,14 +396,20 @@ impl ClientAdapter for OpenAiResponsesAdapter {
             .or_else(|| raw.get("max_tokens"))
             .and_then(|v| v.as_u64())
             .map(|v| v as u32);
-        req.temperature = raw.get("temperature").and_then(|v| v.as_f64()).map(|v| v as f32);
+        req.temperature = raw
+            .get("temperature")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32);
         req.top_p = raw.get("top_p").and_then(|v| v.as_f64()).map(|v| v as f32);
         req.stream = raw.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
         // reasoning
         if let Some(r) = raw.get("reasoning") {
             req.reasoning = Some(Reasoning {
-                effort: r.get("effort").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                effort: r
+                    .get("effort")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 summary: r.get("summary").cloned(),
             });
         }
@@ -417,9 +427,17 @@ impl ClientAdapter for OpenAiResponsesAdapter {
         // 经 Core 无字段位，整体收进 meta，出站时合并回请求体。
         if let Some(obj) = raw.as_object() {
             const KNOWN: &[&str] = &[
-                "model", "input", "tools", "tool_choice", "reasoning",
-                "instructions", "max_output_tokens", "max_tokens", "temperature",
-                "top_p", "stream",
+                "model",
+                "input",
+                "tools",
+                "tool_choice",
+                "reasoning",
+                "instructions",
+                "max_output_tokens",
+                "max_tokens",
+                "temperature",
+                "top_p",
+                "stream",
             ];
             let extra: serde_json::Map<String, Value> = obj
                 .iter()
@@ -454,7 +472,9 @@ impl ClientAdapter for OpenAiResponsesAdapter {
                 ContentBlock::Text { text } => {
                     text_buf.push_str(text);
                 }
-                ContentBlock::Reasoning { text, signature, .. } => {
+                ContentBlock::Reasoning {
+                    text, signature, ..
+                } => {
                     let mut item = json!({
                         "type": "reasoning",
                         "id": format!("rs_{}", { item_seq += 1; item_seq }),
@@ -478,9 +498,12 @@ impl ClientAdapter for OpenAiResponsesAdapter {
                     ..
                 } => {
                     flush_text(&mut text_buf, &mut output, &mut item_seq);
-                    let iid = item_id
-                        .clone()
-                        .unwrap_or_else(|| format!("fc_{}", { item_seq += 1; item_seq }));
+                    let iid = item_id.clone().unwrap_or_else(|| {
+                        format!("fc_{}", {
+                            item_seq += 1;
+                            item_seq
+                        })
+                    });
                     output.push(dto::function_call_item(
                         &iid,
                         id,
@@ -575,7 +598,11 @@ mod tests {
         let req = adapter.to_core_request(&ctx, raw).await.unwrap();
 
         assert_eq!(req.messages.len(), 2);
-        let ContentBlock::ToolResult { tool_use_id, content, .. } = &req.messages[0].content[0]
+        let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            ..
+        } = &req.messages[0].content[0]
         else {
             panic!("应为 ToolResult: {:?}", req.messages[0].content)
         };
@@ -649,15 +676,19 @@ mod tests {
             "type": "input_file", "file_id": "file-1", "filename": "a.pdf"
         }))
         .unwrap();
-        assert!(matches!(&by_id, ContentBlock::Document { source, data, name, .. }
-            if *source == DocSource::File && data == "file-1" && name.as_deref() == Some("a.pdf")));
+        assert!(
+            matches!(&by_id, ContentBlock::Document { source, data, name, .. }
+            if *source == DocSource::File && data == "file-1" && name.as_deref() == Some("a.pdf"))
+        );
 
         let by_data = parse_content_item(&json!({
             "type": "input_file", "file_data": "data:application/pdf;base64,PP", "filename": "b.pdf"
         }))
         .unwrap();
-        assert!(matches!(&by_data, ContentBlock::Document { source, media_type, data, .. }
-            if *source == DocSource::Base64 && media_type == "application/pdf" && data == "PP"));
+        assert!(
+            matches!(&by_data, ContentBlock::Document { source, media_type, data, .. }
+            if *source == DocSource::Base64 && media_type == "application/pdf" && data == "PP")
+        );
     }
 
     /// 回归：custom_tool_call/computer_call 等 *_call 族 item 入站不再丢弃——
@@ -680,12 +711,22 @@ mod tests {
         let req = adapter.to_core_request(&ctx, raw).await.unwrap();
         assert_eq!(req.messages.len(), 4);
 
-        let ContentBlock::ToolUse { id, name, namespace, input, .. } = &req.messages[0].content[0]
+        let ContentBlock::ToolUse {
+            id,
+            name,
+            namespace,
+            input,
+            ..
+        } = &req.messages[0].content[0]
         else {
             panic!()
         };
         assert_eq!((id.as_str(), name.as_str()), ("ct1", "exec"));
-        assert_eq!(namespace.as_deref(), Some("custom_tool_call"), "原始 type 须入 namespace");
+        assert_eq!(
+            namespace.as_deref(),
+            Some("custom_tool_call"),
+            "原始 type 须入 namespace"
+        );
         assert_eq!(input["c"], "ls");
 
         let ContentBlock::ToolResult { tool_use_id, .. } = &req.messages[1].content[0] else {
@@ -693,17 +734,29 @@ mod tests {
         };
         assert_eq!(tool_use_id, "ct1");
 
-        let ContentBlock::ToolUse { id, namespace, input, .. } = &req.messages[2].content[0] else {
+        let ContentBlock::ToolUse {
+            id,
+            namespace,
+            input,
+            ..
+        } = &req.messages[2].content[0]
+        else {
             panic!()
         };
-        assert_eq!((id.as_str(), namespace.as_deref()), ("cc1", Some("computer_call")));
+        assert_eq!(
+            (id.as_str(), namespace.as_deref()),
+            ("cc1", Some("computer_call"))
+        );
         assert_eq!(input["type"], "click", "action 对象整体收进 input");
 
         // 对象形态 output（computer_screenshot）按单项解析为图片，非 JSON 噪声
         let ContentBlock::ToolResult { content, .. } = &req.messages[3].content[0] else {
             panic!()
         };
-        assert!(matches!(&content[0], ContentBlock::Image { .. }), "截屏应解析为图片: {content:?}");
+        assert!(
+            matches!(&content[0], ContentBlock::Image { .. }),
+            "截屏应解析为图片: {content:?}"
+        );
     }
 
     /// 回归：function_call 的 arguments 对象形态（非标准实现）不得落 {}。
@@ -714,7 +767,9 @@ mod tests {
                      "arguments": { "x": 1 } }),
             None,
         );
-        let ContentBlock::ToolUse { input, .. } = &m.content[0] else { panic!() };
+        let ContentBlock::ToolUse { input, .. } = &m.content[0] else {
+            panic!()
+        };
         assert_eq!(input["x"], 1);
     }
 }

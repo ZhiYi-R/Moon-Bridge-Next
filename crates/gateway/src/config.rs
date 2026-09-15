@@ -52,11 +52,14 @@ pub struct GatewayConfig {
     /// 面向的是**不携带任何会话标识**的客户端（如 Qwen Code：其 `prompt_cache_key`
     /// 注入以直连 `api.openai.com` 为前提）。若你的客户端已通过 `session_id` 字段、
     /// `previous_response_id` 或 `X-Codex-Window-Id` 头表明身份，可关掉本开关。
-    /// 代价：标记会出现在用户可见的回复末尾与本地 transcript 里，并每轮占约 5 token。
-    /// 关掉后**仍会剥除**入站 marker（客户端可能带着开启期间留下的历史），只是不再追加。
+    /// 代价：标记出现在客户端本地 transcript 的 thinking 明文里（用户可见正文
+    /// 不受污染），每轮占约十余 token。关掉后**仍会剥除**入站 marker（客户端
+    /// 可能带着开启期间留下的历史），只是不再嵌入。
     #[serde(default = "default_session_marker")]
     pub session_marker: bool,
-    /// 活跃会话表的深度上限（FIFO，超深挤出最老者并连带清理其插件态）。
+    /// 活跃会话表的深度上限（LRU，超深挤出最久未命中者并连带清理其插件态）。
+    /// 注意：uuid 载荷自带身份，淘汰不会改变 marker 会话的 session id——表只
+    /// 承担外部身份 tag 映射与插件态回收。
     #[serde(default = "default_session_depth")]
     pub session_table_depth: usize,
 }
@@ -100,5 +103,3 @@ impl Default for GatewayConfig {
         }
     }
 }
-
-

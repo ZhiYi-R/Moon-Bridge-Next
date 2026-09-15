@@ -40,7 +40,10 @@ pub fn plugin_list(state: State<'_, Arc<ManagedState>>) -> CmdResult<Vec<PluginR
 
 /// 按名获取插件。
 #[tauri::command]
-pub fn plugin_get(state: State<'_, Arc<ManagedState>>, name: String) -> CmdResult<Option<PluginRecord>> {
+pub fn plugin_get(
+    state: State<'_, Arc<ManagedState>>,
+    name: String,
+) -> CmdResult<Option<PluginRecord>> {
     Ok(state.db.get_plugin(&name)?)
 }
 
@@ -59,7 +62,7 @@ pub fn plugin_save(state: State<'_, Arc<ManagedState>>, plugin: PluginRecord) ->
     if plugin.enabled && !old_enabled {
         let script = match script_file(&state, &plugin.script_ref)? {
             Some(f) if f.is_file() => std::fs::read_to_string(&f).map_err(|e| e.to_string())?,
-            Some(_) => String::new(), // 文件脚本尚未落盘
+            Some(_) => String::new(),          // 文件脚本尚未落盘
             None => plugin.script_ref.clone(), // 内联脚本即内容
         };
         let cfg = serde_json::to_value(state.config().gateway).map_err(|e| e.to_string())?;
@@ -186,7 +189,10 @@ fn extract_lua_requires(script: &str) -> Vec<(String, Value)> {
     let Some(pos) = cleaned.find("requires") else {
         return out;
     };
-    let Some(rest) = cleaned[pos + "requires".len()..].trim_start().strip_prefix('=') else {
+    let Some(rest) = cleaned[pos + "requires".len()..]
+        .trim_start()
+        .strip_prefix('=')
+    else {
         return out;
     };
     let Some(open) = rest.find('{') else {
@@ -210,7 +216,9 @@ fn extract_lua_requires(script: &str) -> Vec<(String, Value)> {
         } else if let Ok(n) = raw.parse::<i64>() {
             Value::Number(n.into())
         } else if let Ok(n) = raw.parse::<f64>() {
-            serde_json::Number::from_f64(n).map(Value::Number).unwrap_or(Value::Null)
+            serde_json::Number::from_f64(n)
+                .map(Value::Number)
+                .unwrap_or(Value::Null)
         } else {
             Value::String(raw.trim_matches(|c| c == '"' || c == '\'').to_string())
         };
@@ -268,10 +276,18 @@ pub fn plugin_import(
     state: State<'_, Arc<ManagedState>>,
     paths: Vec<String>,
 ) -> CmdResult<Vec<PluginImportOutcome>> {
-    Ok(paths.iter().map(|p| import_one(state.inner(), Path::new(p))).collect())
+    Ok(paths
+        .iter()
+        .map(|p| import_one(state.inner(), Path::new(p)))
+        .collect())
 }
 
-fn import_fail(path: &str, name: &str, status: &str, message: impl Into<String>) -> PluginImportOutcome {
+fn import_fail(
+    path: &str,
+    name: &str,
+    status: &str,
+    message: impl Into<String>,
+) -> PluginImportOutcome {
     PluginImportOutcome {
         path: path.to_string(),
         name: name.to_string(),
@@ -286,8 +302,17 @@ fn import_one(state: &ManagedState, path: &Path) -> PluginImportOutcome {
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
-    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')) {
-        return import_fail(&path_string, &name, "error", format!("文件名 “{name}” 不能作为插件名"));
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return import_fail(
+            &path_string,
+            &name,
+            "error",
+            format!("文件名 “{name}” 不能作为插件名"),
+        );
     }
     if matches!(state.db.get_plugin(&name), Ok(Some(_))) {
         return import_fail(&path_string, &name, "skipped", "同名插件已存在");
@@ -336,14 +361,20 @@ fn import_one(state: &ManagedState, path: &Path) -> PluginImportOutcome {
         message: if unmet.is_empty() {
             None
         } else {
-            Some(format!("已导入但保持停用：{}；可在设置中调整后启用", unmet.join("；")))
+            Some(format!(
+                "已导入但保持停用：{}；可在设置中调整后启用",
+                unmet.join("；")
+            ))
         },
     }
 }
 
 /// 列出某插件的全部作用域绑定。
 #[tauri::command]
-pub fn binding_list(state: State<'_, Arc<ManagedState>>, plugin_name: String) -> CmdResult<Vec<PluginBinding>> {
+pub fn binding_list(
+    state: State<'_, Arc<ManagedState>>,
+    plugin_name: String,
+) -> CmdResult<Vec<PluginBinding>> {
     Ok(state.db.list_bindings(&plugin_name)?)
 }
 
@@ -403,13 +434,23 @@ MB = {
     #[test]
     fn unmet_requirements_reports_current_and_expected() {
         // 未满足：消息含中文别名与双方值
-        let unmet = unmet_requirements(&json!({ "sessionMarker": false }), &[("sessionMarker".into(), json!(true))]);
+        let unmet = unmet_requirements(
+            &json!({ "sessionMarker": false }),
+            &[("sessionMarker".into(), json!(true))],
+        );
         assert_eq!(unmet.len(), 1);
         assert!(unmet[0].contains("会话水印"), "{}", unmet[0]);
         assert!(unmet[0].contains("开启") && unmet[0].contains("关闭"));
         // 满足：空
-        assert!(unmet_requirements(&json!({ "sessionMarker": true }), &[("sessionMarker".into(), json!(true))]).is_empty());
+        assert!(unmet_requirements(
+            &json!({ "sessionMarker": true }),
+            &[("sessionMarker".into(), json!(true))]
+        )
+        .is_empty());
         // 配置缺字段视为不满足
-        assert_eq!(unmet_requirements(&json!({}), &[("nope".into(), json!(true))]).len(), 1);
+        assert_eq!(
+            unmet_requirements(&json!({}), &[("nope".into(), json!(true))]).len(),
+            1
+        );
     }
 }

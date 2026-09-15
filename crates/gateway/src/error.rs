@@ -42,8 +42,9 @@ impl GatewayError {
         match self {
             GatewayError::Auth(_) => StatusCode::UNAUTHORIZED,
             GatewayError::Route(_) => StatusCode::NOT_FOUND,
-            GatewayError::Upstream { status, .. } => StatusCode::from_u16(*status)
-                .unwrap_or(StatusCode::BAD_GATEWAY),
+            GatewayError::Upstream { status, .. } => {
+                StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY)
+            }
             GatewayError::Protocol(_) => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }

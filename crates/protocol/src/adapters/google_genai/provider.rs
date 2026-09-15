@@ -82,7 +82,10 @@ impl ProviderAdapter for GoogleGenAiAdapter {
             .unwrap_or(false);
         let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
         if use_bearer {
-            headers.push(("authorization".to_string(), format!("Bearer {}", endpoint.api_key)));
+            headers.push((
+                "authorization".to_string(),
+                format!("Bearer {}", endpoint.api_key),
+            ));
         } else {
             headers.push(("x-goog-api-key".to_string(), endpoint.api_key.clone()));
         }
@@ -100,7 +103,11 @@ impl ProviderAdapter for GoogleGenAiAdapter {
     }
 
     async fn to_core_response(&self, _ctx: &ReqCtx, raw: Value) -> Result<CoreResponse> {
-        let id = raw.get("responseId").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let id = raw
+            .get("responseId")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
         let model = raw
             .get("modelVersion")
             .and_then(|v| v.as_str())
@@ -116,13 +123,19 @@ impl ProviderAdapter for GoogleGenAiAdapter {
         let (content, finish) = dto::candidate_to_core(&candidate);
 
         // Gemini 对函数调用同样返回 STOP；含 tool_use 时归一为 ToolUse
-        let stop_reason = if content.iter().any(|b| matches!(b, ContentBlock::ToolUse { .. })) {
+        let stop_reason = if content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+        {
             Some(StopReason::ToolUse)
         } else {
             finish.or(Some(StopReason::EndTurn))
         };
 
-        let usage = raw.get("usageMetadata").map(dto::usage_from_gemini).unwrap_or_default();
+        let usage = raw
+            .get("usageMetadata")
+            .map(dto::usage_from_gemini)
+            .unwrap_or_default();
 
         Ok(CoreResponse {
             id,
@@ -169,16 +182,30 @@ mod tests {
 
         let adapter = GoogleGenAiAdapter;
         let ctx = ReqCtx::new("r1", Protocol::OpenAiChat);
-        let up = adapter.from_core_request(&ctx, &req, &endpoint()).await.unwrap();
+        let up = adapter
+            .from_core_request(&ctx, &req, &endpoint())
+            .await
+            .unwrap();
 
-        assert!(up.url.ends_with("/v1beta/models/gemini-2.0-flash:generateContent"));
+        assert!(up
+            .url
+            .ends_with("/v1beta/models/gemini-2.0-flash:generateContent"));
         assert_eq!(up.body["systemInstruction"]["parts"][0]["text"], "Be brief");
         assert_eq!(up.body["contents"][0]["role"], "user");
         assert_eq!(up.body["contents"][0]["parts"][0]["text"], "Hi");
-        assert_eq!(up.body["tools"][0]["functionDeclarations"][0]["name"], "get_time");
-        assert_eq!(up.body["toolConfig"]["functionCallingConfig"]["mode"], "AUTO");
+        assert_eq!(
+            up.body["tools"][0]["functionDeclarations"][0]["name"],
+            "get_time"
+        );
+        assert_eq!(
+            up.body["toolConfig"]["functionCallingConfig"]["mode"],
+            "AUTO"
+        );
         assert_eq!(up.body["generationConfig"]["maxOutputTokens"], 256);
-        assert!(up.headers.iter().any(|(k, v)| k == "x-goog-api-key" && v == "AIza-test"));
+        assert!(up
+            .headers
+            .iter()
+            .any(|(k, v)| k == "x-goog-api-key" && v == "AIza-test"));
     }
 
     #[tokio::test]
@@ -188,7 +215,10 @@ mod tests {
         req.stream = true;
         let adapter = GoogleGenAiAdapter;
         let ctx = ReqCtx::new("r1", Protocol::OpenAiChat);
-        let up = adapter.from_core_request(&ctx, &req, &endpoint()).await.unwrap();
+        let up = adapter
+            .from_core_request(&ctx, &req, &endpoint())
+            .await
+            .unwrap();
         assert!(up.url.contains(":streamGenerateContent?alt=sse"));
         assert!(up.stream);
     }
@@ -252,8 +282,14 @@ mod tests {
             .from_core_request(&ctx, &req, &endpoint())
             .await
             .unwrap();
-        assert_eq!(up.body["generationConfig"]["thinkingConfig"]["thinkingBudget"], 2048);
-        assert_eq!(up.body["generationConfig"]["thinkingConfig"]["includeThoughts"], true);
+        assert_eq!(
+            up.body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            2048
+        );
+        assert_eq!(
+            up.body["generationConfig"]["thinkingConfig"]["includeThoughts"],
+            true
+        );
 
         // 未声明 reasoning 时不得长出 thinkingConfig
         let plain = CoreRequest::new("gemini-2.0-flash");
@@ -261,8 +297,6 @@ mod tests {
             .from_core_request(&ctx, &plain, &endpoint())
             .await
             .unwrap();
-        assert!(up2.body["generationConfig"]
-            .get("thinkingConfig")
-            .is_none());
+        assert!(up2.body["generationConfig"].get("thinkingConfig").is_none());
     }
 }

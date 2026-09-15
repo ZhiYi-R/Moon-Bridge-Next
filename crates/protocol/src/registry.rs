@@ -8,9 +8,7 @@ use std::sync::Arc;
 
 use moonbridge_core::Protocol;
 
-use crate::adapter::{
-    ClientAdapter, ClientStreamAdapter, ProviderAdapter, ProviderStreamAdapter,
-};
+use crate::adapter::{ClientAdapter, ClientStreamAdapter, ProviderAdapter, ProviderStreamAdapter};
 
 /// 协议 Adapter 注册表。
 #[derive(Default)]

@@ -164,8 +164,8 @@ mod tests {
             "cache_read": 0.3, "cache_write": 3.75, "reasoning": 15.0
         });
         // input 1000 含 cache 300 → 基础输入 700；output 500 含 reasoning 50 → 基础输出 450
-        let expect = (700.0 * 3.0 + 200.0 * 0.3 + 100.0 * 3.75 + 450.0 * 15.0 + 50.0 * 15.0)
-            / 1_000_000.0;
+        let expect =
+            (700.0 * 3.0 + 200.0 * 0.3 + 100.0 * 3.75 + 450.0 * 15.0 + 50.0 * 15.0) / 1_000_000.0;
         let got = cost_of(Some(&pricing), &usage());
         assert!((got - expect).abs() < 1e-12, "got {got}, expect {expect}");
     }
@@ -184,7 +184,10 @@ mod tests {
         assert_eq!(cost_of(None, &usage()), 0.0);
         assert_eq!(cost_of(Some(&json!({})), &usage()), 0.0);
         // 全 0 价目（免费模型）同样是 0
-        assert_eq!(cost_of(Some(&json!({"input": 0.0, "output": 0.0})), &usage()), 0.0);
+        assert_eq!(
+            cost_of(Some(&json!({"input": 0.0, "output": 0.0})), &usage()),
+            0.0
+        );
     }
 
     #[test]
@@ -263,10 +266,24 @@ mod tests {
                 { "input": 3.0, "output": 6.0, "tier": { "type": "context", "size": 500_000 } }
             ]
         });
-        let u = Usage { input_tokens: 600_000, output_tokens: 1_000, ..Usage::default() };
-        assert_eq!(cost_of(Some(&pricing), &u), (600_000.0 * 3.0 + 1_000.0 * 6.0) / 1e6);
-        let u = Usage { input_tokens: 150_000, output_tokens: 1_000, ..Usage::default() };
-        assert_eq!(cost_of(Some(&pricing), &u), (150_000.0 * 2.0 + 1_000.0 * 4.0) / 1e6);
+        let u = Usage {
+            input_tokens: 600_000,
+            output_tokens: 1_000,
+            ..Usage::default()
+        };
+        assert_eq!(
+            cost_of(Some(&pricing), &u),
+            (600_000.0 * 3.0 + 1_000.0 * 6.0) / 1e6
+        );
+        let u = Usage {
+            input_tokens: 150_000,
+            output_tokens: 1_000,
+            ..Usage::default()
+        };
+        assert_eq!(
+            cost_of(Some(&pricing), &u),
+            (150_000.0 * 2.0 + 1_000.0 * 4.0) / 1e6
+        );
     }
 
     #[test]
@@ -275,8 +292,15 @@ mod tests {
             "input": 3.0, "output": 15.0,
             "context_over_200k": { "input": 6.0, "output": 22.5 }
         });
-        let u = Usage { input_tokens: 250_000, output_tokens: 1_000, ..Usage::default() };
-        assert_eq!(cost_of(Some(&pricing), &u), (250_000.0 * 6.0 + 1_000.0 * 22.5) / 1e6);
+        let u = Usage {
+            input_tokens: 250_000,
+            output_tokens: 1_000,
+            ..Usage::default()
+        };
+        assert_eq!(
+            cost_of(Some(&pricing), &u),
+            (250_000.0 * 6.0 + 1_000.0 * 22.5) / 1e6
+        );
     }
 
     /// 计价数据流：offer 定价 → record() 落库的 cost。

@@ -97,10 +97,7 @@ impl CatalogModel {
 
 /// 从 models.dev 的单个模型对象提取候选。`raw` 为该模型的 JSON 值。
 fn parse_model(provider_key: &str, provider_name: &str, id: &str, raw: &Value) -> CatalogModel {
-    let name = raw
-        .get("name")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let name = raw.get("name").and_then(Value::as_str).map(str::to_string);
 
     let context_window = raw
         .get("limit")
@@ -149,7 +146,9 @@ fn parse_model(provider_key: &str, provider_name: &str, id: &str, raw: &Value) -
             if let Some(num) = cost.get(key).and_then(Value::as_f64) {
                 pricing.insert(
                     key.to_string(),
-                    serde_json::Number::from_f64(num).map(Value::Number).unwrap_or(Value::Null),
+                    serde_json::Number::from_f64(num)
+                        .map(Value::Number)
+                        .unwrap_or(Value::Null),
                 );
             }
         }
@@ -312,19 +311,28 @@ mod tests {
     #[test]
     fn maps_all_fields_for_muse_spark() {
         let list = parse_catalog(&sample_root());
-        let muse = list.iter().find(|m| m.id == "muse-spark-1.3-contributor-free").unwrap();
+        let muse = list
+            .iter()
+            .find(|m| m.id == "muse-spark-1.3-contributor-free")
+            .unwrap();
         assert_eq!(muse.provider_name, "OpenCode Zen");
         assert_eq!(muse.name.as_deref(), Some("Muse Spark 1.3 Free"));
         assert_eq!(muse.context_window, Some(1_048_576));
         assert_eq!(muse.max_output_tokens, Some(131_072));
-        assert_eq!(muse.modalities, vec!["text", "image", "video", "pdf", "audio"]);
+        assert_eq!(
+            muse.modalities,
+            vec!["text", "image", "video", "pdf", "audio"]
+        );
         assert_eq!(
             muse.reasoning_levels,
             vec!["minimal", "low", "medium", "high", "xhigh"]
         );
         // cost 全 0 也应保留为 0（用户可见其免费），三个键都在
         assert_eq!(muse.pricing.get("input").and_then(Value::as_f64), Some(0.0));
-        assert_eq!(muse.pricing.get("cache_read").and_then(Value::as_f64), Some(0.0));
+        assert_eq!(
+            muse.pricing.get("cache_read").and_then(Value::as_f64),
+            Some(0.0)
+        );
         assert!(!muse.pricing.contains_key("cache_write"), "缺失项不应出现");
     }
 
@@ -339,7 +347,10 @@ mod tests {
         let offer = claude.to_offer();
         let pricing = offer.pricing.expect("定价应写入 offer");
         assert_eq!(pricing.get("input").and_then(Value::as_f64), Some(3.0));
-        assert_eq!(pricing.get("cache_write").and_then(Value::as_f64), Some(3.75));
+        assert_eq!(
+            pricing.get("cache_write").and_then(Value::as_f64),
+            Some(3.75)
+        );
         // 长上下文分层价目随目录导入保留（计价按 input_tokens 越阈值换挡）
         let tiers = pricing.get("tiers").and_then(Value::as_array).unwrap();
         assert_eq!(tiers[0]["tier"]["size"].as_u64(), Some(200_000));

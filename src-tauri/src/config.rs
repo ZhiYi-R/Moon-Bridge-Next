@@ -96,7 +96,8 @@ impl AppConfig {
     /// 保存到文件（覆盖写，父目录须已存在）。
     pub fn save(&self, path: &Path) -> Result<()> {
         let text = toml::to_string_pretty(self).context("序列化配置失败")?;
-        std::fs::write(path, text).with_context(|| format!("写入配置文件失败: {}", path.display()))?;
+        std::fs::write(path, text)
+            .with_context(|| format!("写入配置文件失败: {}", path.display()))?;
         Ok(())
     }
 }

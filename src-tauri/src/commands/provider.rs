@@ -16,7 +16,10 @@ pub fn provider_list(state: State<'_, Arc<ManagedState>>) -> CmdResult<Vec<Provi
 
 /// 按 key 获取单个 provider（不存在返回 `None`）。
 #[tauri::command]
-pub fn provider_get(state: State<'_, Arc<ManagedState>>, key: String) -> CmdResult<Option<Provider>> {
+pub fn provider_get(
+    state: State<'_, Arc<ManagedState>>,
+    key: String,
+) -> CmdResult<Option<Provider>> {
     Ok(state.db.get_provider(&key)?)
 }
 

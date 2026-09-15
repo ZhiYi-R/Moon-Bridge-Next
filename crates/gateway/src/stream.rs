@@ -221,8 +221,7 @@ async fn process_stream_event(
                 Ok(false) => {}
             }
         }
-        CoreStreamEvent::BlockDelta { index, .. }
-        | CoreStreamEvent::BlockStop { index, .. }
+        CoreStreamEvent::BlockDelta { index, .. } | CoreStreamEvent::BlockStop { index, .. }
             if dropped_blocks.contains(index) =>
         {
             return Ok(Vec::new());
@@ -230,7 +229,9 @@ async fn process_stream_event(
         _ => {}
     }
     // [CORE] 编码为客户端 SSE chunk
-    client_stream.encode(ctx, ev, enc_state).map_err(|e| e.to_string())
+    client_stream
+        .encode(ctx, ev, enc_state)
+        .map_err(|e| e.to_string())
 }
 
 /// 流式请求的收尾审计：析构时落 usage 与 trace。
@@ -361,12 +362,17 @@ pub fn build_stream_response(
         // `filter_content` 丢弃的块序号：其后续增量一律压制（见下方 [CORE] 内容块过滤）。
         let mut dropped_blocks: std::collections::HashSet<usize> =
             std::collections::HashSet::new();
-        // 会话水印状态：整轮出现过 tool_use 就不打标（用户要求只标非工具调用输出）；
-        // 必须至少有一个文本块，否则这轮没有「输出文本」可承载 marker。
-        let mut saw_tool = false;
-        let mut saw_text = false;
-        let mut next_index = 0usize;
-        let mut tagged = false;
+        // 会话水印状态：marker 嵌进第一个可承载推理块的明文首部（同 index 的
+        // 推理增量）。凭据先行 / redacted 的推理块不可注入——入口编码器会把
+        // 凭据先行的块开成 redacted_thinking 完整块，再补明文增量会顶撞
+        // 客户端块状态机。整流无可用推理块则不打标（纯 CoT 方案）。
+        let mut tagged = session_tag.is_none();
+        // 打标落到的块 index：其 BlockStop 携带的完整块（chat 上游的 chat:
+        // 自凭据、responses 的 reasoning item 组装）也要补上 marker——
+        // 只存 done item 的客户端靠它把水印带进 transcript。
+        let mut marker_idx: Option<usize> = None;
+        let mut ineligible_reasoning: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
         // encode 每流状态（anthropic 入口的推理块惰性开块依赖它）
         let mut enc_state = StreamEncodeState::default();
         // decode 每流状态（Gemini 上游的块索引跨 chunk 分配依赖它）
@@ -451,31 +457,9 @@ pub fn build_stream_response(
                 audit.up_asm.feed(ev);
             }
 
-            // 先按本批事件更新水印判定状态，再决定注入 —— 顺序反了会漏判
-            // 同批里 MessageStop 之前刚出现的 tool_use 块。
-            // BlockDelta 也要算：chat 系上游从不为正文发 BlockStart（OpenAI Chat
-            // 的 content / reasoning 是裸 delta），只看 BlockStart 会把这类流误判
-            // 成「没有输出文本」⇒ 水印永不注入、客户端 transcript 里没有可带回的
-            // marker，每轮都被判成新会话。delta 携带的 index 同样要挤占 next_index，
-            // 否则 marker 块会与惰性承接正文的 0 号块撞车。
+            // 先按本批事件更新流状态，再决定注入。
             for ev in &events {
                 match ev {
-                    CoreStreamEvent::BlockStart { index, block } => {
-                        next_index = next_index.max(*index + 1);
-                        match block {
-                            moonbridge_core::ContentBlock::ToolUse { .. } => saw_tool = true,
-                            moonbridge_core::ContentBlock::Text { .. } => saw_text = true,
-                            _ => {}
-                        }
-                    }
-                    CoreStreamEvent::BlockDelta { index, delta } => {
-                        next_index = next_index.max(*index + 1);
-                        match delta {
-                            StreamDelta::Text { .. } => saw_text = true,
-                            StreamDelta::ToolInput { .. } => saw_tool = true,
-                            _ => {}
-                        }
-                    }
                     CoreStreamEvent::MessageDelta { stop_reason: Some(_), .. } => {
                         saw_finish = true;
                     }
@@ -485,29 +469,68 @@ pub fn build_stream_response(
                     _ => {}
                 }
             }
-            // [CORE] 会话水印：marker 必须插在「收尾组装事件」之前——
-            // 第一个带 stop_reason 的 MessageDelta（chat/gemini/responses 的
-            // response.completed 都由它触发组装 output），其次才是 MessageStop。
-            // 只认 MessageStop 会让 marker 排在 completed 之后：客户端按
-            // completed.output 存历史时（OpenCode 等），水印进不了 transcript。
-            if let Some(tag) = &session_tag {
-                if !tagged && !saw_tool && !saw_err && saw_text {
-                    let pos = events
-                        .iter()
-                        .position(|e| matches!(e, CoreStreamEvent::MessageDelta { stop_reason: Some(_), .. }))
-                        .or_else(|| {
-                            events
-                                .iter()
-                                .position(|e| matches!(e, CoreStreamEvent::MessageStop))
-                        });
-                    if let Some(pos) = pos {
-                        events.splice(pos..pos, crate::session::marker_blocks(tag, next_index));
+            // [CORE] 会话水印：向第一个可承载推理块注入首部明文增量。
+            // BlockStart 到达时插在其后（块内首个增量）；chat 系上游的裸
+            // 推理 delta（无 BlockStart）则插在其前，同样落在块首。
+            // redacted / 凭据先行的块标记为不可注入——它们按 redacted_thinking
+            // 完整块形态还原，混入明文增量会破坏客户端块结构。
+            if !tagged {
+                if let Some(payload) = &session_tag {
+                    let mut inject: Option<(usize, usize)> = None; // (splice 位, 块 index)
+                    for (i, ev) in events.iter().enumerate() {
+                        match ev {
+                            CoreStreamEvent::BlockStart {
+                                index,
+                                block: moonbridge_core::ContentBlock::Reasoning { redacted, .. },
+                            } => {
+                                if *redacted {
+                                    ineligible_reasoning.insert(*index);
+                                } else {
+                                    inject = Some((i + 1, *index));
+                                    break;
+                                }
+                            }
+                            CoreStreamEvent::BlockDelta {
+                                index,
+                                delta: StreamDelta::ReasoningSignature { .. },
+                            } => {
+                                ineligible_reasoning.insert(*index);
+                            }
+                            CoreStreamEvent::BlockDelta {
+                                index,
+                                delta: StreamDelta::Reasoning { .. },
+                            } if !ineligible_reasoning.contains(index) => {
+                                inject = Some((i, *index));
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let Some((pos, idx)) = inject {
+                        events.insert(pos, crate::session::marker_reasoning_delta(payload, idx));
                         tagged = true;
+                        marker_idx = Some(idx);
                     }
                 }
             }
 
             for mut ev in events {
+                // 打标块的 BlockStop 若携带完整块（chat 上游收尾的 BlockStop
+                // 带累积全文 + chat: 自凭据），其明文同样补上 marker 首部——
+                // responses 入口用它组装 done item，只存完成态的客户端靠它
+                // 把水印带进 transcript。凭据不补：chat: 自凭据在 decode 态
+                // 早已按上游原文封口，本就只覆盖原文。
+                if let (Some(mi), Some(payload)) = (marker_idx, session_tag.as_deref()) {
+                    if let CoreStreamEvent::BlockStop { index, block: Some(b) } = &mut ev {
+                        if *index == mi {
+                            if let moonbridge_core::ContentBlock::Reasoning { text, .. } = b {
+                                if !text.starts_with(crate::session::marker_head(payload).as_str()) {
+                                    text.insert_str(0, &crate::session::marker_head(payload));
+                                }
+                            }
+                        }
+                    }
+                }
                 if let CoreStreamEvent::MessageDelta { usage: Some(u), .. } = &ev {
                     usage::accumulate(&mut audit.acc, u);
                 }
@@ -584,14 +607,6 @@ pub fn build_stream_response(
                         block: dec_state.blocks.get(&idx).cloned(),
                     });
                 }
-                // 兜底帧同样是水印挂点：marker 要排在 MessageDelta 之前，
-                // 否则 responses 入口的 response.completed 组装不到水印 item。
-                if let Some(tag) = &session_tag {
-                    if !tagged && !saw_tool && saw_text {
-                        tail.extend(crate::session::marker_blocks(tag, next_index));
-                        tagged = true;
-                    }
-                }
                 if !saw_finish {
                     // 流已干净读尽（chunk 错误会走 failed 分支到不了这里）——
                     // 上游没报停因按 end_turn 收尾：responses 入口缺它就不发
@@ -605,6 +620,19 @@ pub fn build_stream_response(
                 tail.push(CoreStreamEvent::MessageStop);
             }
             for mut ev in tail {
+                // 与主循环同理：兜底合成的 BlockStop 若带打标块的完整推理块，
+                // 其明文补上 marker 首部，保证 done-item 形态也含水印。
+                if let (Some(mi), Some(payload)) = (marker_idx, session_tag.as_deref()) {
+                    if let CoreStreamEvent::BlockStop { index, block: Some(b) } = &mut ev {
+                        if *index == mi {
+                            if let moonbridge_core::ContentBlock::Reasoning { text, .. } = b {
+                                if !text.starts_with(crate::session::marker_head(payload).as_str()) {
+                                    text.insert_str(0, &crate::session::marker_head(payload));
+                                }
+                            }
+                        }
+                    }
+                }
                 match process_stream_event(
                     &hooks,
                     &ctx,
@@ -640,7 +668,9 @@ pub fn build_stream_response(
         // usage / trace 由 `audit` 析构时统一落笔
     };
 
-    Sse::new(body).keep_alive(KeepAlive::default()).into_response()
+    Sse::new(body)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 #[cfg(test)]
@@ -815,6 +845,12 @@ mod tests {
             "Empty 回落到 raw 文本"
         );
         // 二进制不得 panic
-        assert!(!chunk_data_text(&mk(RawBody::Binary { data: vec![0, 255, b'a'] }, "")).is_empty());
+        assert!(!chunk_data_text(&mk(
+            RawBody::Binary {
+                data: vec![0, 255, b'a']
+            },
+            ""
+        ))
+        .is_empty());
     }
 }

@@ -129,8 +129,7 @@ impl StreamEncodeState {
             self.usage_acc.cache_read_tokens.max(u.cache_read_tokens);
         self.usage_acc.cache_write_tokens =
             self.usage_acc.cache_write_tokens.max(u.cache_write_tokens);
-        self.usage_acc.reasoning_tokens =
-            self.usage_acc.reasoning_tokens.max(u.reasoning_tokens);
+        self.usage_acc.reasoning_tokens = self.usage_acc.reasoning_tokens.max(u.reasoning_tokens);
     }
 
     /// 记录 BlockStart 的起始块。
@@ -215,13 +214,14 @@ impl StreamDecodeState {
 
     /// 记录 `index` 处累积块的推理凭据。
     pub fn push_signature(&mut self, index: usize, signature: &str) {
-        let block = self.blocks.entry(index).or_insert_with(|| {
-            moonbridge_core::ContentBlock::Reasoning {
-                text: String::new(),
-                signature: None,
-                redacted: false,
-            }
-        });
+        let block =
+            self.blocks
+                .entry(index)
+                .or_insert_with(|| moonbridge_core::ContentBlock::Reasoning {
+                    text: String::new(),
+                    signature: None,
+                    redacted: false,
+                });
         if let moonbridge_core::ContentBlock::Reasoning { signature: s, .. } = block {
             *s = Some(signature.to_string());
         }

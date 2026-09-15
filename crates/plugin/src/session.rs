@@ -27,7 +27,11 @@ impl SessionStore {
     pub fn get(&self, plugin: &str, session: Option<&str>, key: &str) -> Option<Value> {
         let guard = self.inner.lock().ok()?;
         guard
-            .get(&(plugin.to_string(), session.map(|s| s.to_string()), key.to_string()))
+            .get(&(
+                plugin.to_string(),
+                session.map(|s| s.to_string()),
+                key.to_string(),
+            ))
             .cloned()
     }
 
@@ -35,7 +39,11 @@ impl SessionStore {
     pub fn set(&self, plugin: &str, session: Option<&str>, key: &str, value: Value) {
         if let Ok(mut guard) = self.inner.lock() {
             guard.insert(
-                (plugin.to_string(), session.map(|s| s.to_string()), key.to_string()),
+                (
+                    plugin.to_string(),
+                    session.map(|s| s.to_string()),
+                    key.to_string(),
+                ),
                 value,
             );
         }

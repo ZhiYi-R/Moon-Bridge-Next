@@ -118,18 +118,18 @@ impl HostBridge for GatewayBridge {
                 Ok(u) => u,
                 Err(e) => return Err(e.to_string()),
             };
-            let resp = match tokio::time::timeout(self.invoke_timeout, send(&self.client, &up)).await
-            {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => {
-                    last_err = e.to_string();
-                    continue;
-                }
-                Err(_) => {
-                    last_err = format!("上游调用超时（{:?}）", self.invoke_timeout);
-                    continue;
-                }
-            };
+            let resp =
+                match tokio::time::timeout(self.invoke_timeout, send(&self.client, &up)).await {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(e)) => {
+                        last_err = e.to_string();
+                        continue;
+                    }
+                    Err(_) => {
+                        last_err = format!("上游调用超时（{:?}）", self.invoke_timeout);
+                        continue;
+                    }
+                };
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             if status.is_success() {

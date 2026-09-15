@@ -17,9 +17,7 @@ use axum::body::Body;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use moonbridge_core::{CoreRequest, Protocol, Usage};
-use moonbridge_protocol::{
-    RawBody, RawMessage, RawStage, RawVerdict, ReqCtx, UpstreamRequest,
-};
+use moonbridge_protocol::{RawBody, RawMessage, RawStage, RawVerdict, ReqCtx, UpstreamRequest};
 use serde_json::Value;
 
 use crate::error::{GatewayError, Result};
@@ -66,16 +64,40 @@ pub async fn handle_request(
         .hooks
         .on_client_request_raw(&ctx, &mut inbound)
         .await
-        .map_err(|e| fail_audit(&state, &ctx, start, pre_route_trace(&ctx, &inbound), e.into()))?
-    {
-        RawVerdict::ShortCircuit { status, headers, body } => {
+        .map_err(|e| {
+            fail_audit(
+                &state,
+                &ctx,
+                start,
+                pre_route_trace(&ctx, &inbound),
+                e.into(),
+            )
+        })? {
+        RawVerdict::ShortCircuit {
+            status,
+            headers,
+            body,
+        } => {
             let trace = pre_route_trace(&ctx, &inbound);
             return Ok(answered(
-                &state, &ctx, start, trace, Usage::default(), status, headers, body,
+                &state,
+                &ctx,
+                start,
+                trace,
+                Usage::default(),
+                status,
+                headers,
+                body,
             ));
         }
         RawVerdict::Abort { message } => {
-            return Err(aborted(&state, &ctx, start, pre_route_trace(&ctx, &inbound), message))
+            return Err(aborted(
+                &state,
+                &ctx,
+                start,
+                pre_route_trace(&ctx, &inbound),
+                message,
+            ))
         }
         RawVerdict::Pass => {}
     }
@@ -85,7 +107,13 @@ pub async fn handle_request(
     let raw_body = match take_json_body(inbound.body, client_protocol) {
         Ok(v) => v,
         Err(e) => {
-            return Err(fail_audit(&state, &ctx, start, pre_core_trace(&ctx, &client_request_snapshot), e))
+            return Err(fail_audit(
+                &state,
+                &ctx,
+                start,
+                pre_core_trace(&ctx, &client_request_snapshot),
+                e,
+            ))
         }
     };
 
@@ -94,19 +122,42 @@ pub async fn handle_request(
         .registry
         .client(client_protocol)
         .ok_or_else(|| GatewayError::Route(format!("无入口 Adapter 支持协议 {client_protocol}")))
-        .map_err(|e| fail_audit(&state, &ctx, start, pre_core_trace(&ctx, &client_request_snapshot), e))?;
+        .map_err(|e| {
+            fail_audit(
+                &state,
+                &ctx,
+                start,
+                pre_core_trace(&ctx, &client_request_snapshot),
+                e,
+            )
+        })?;
     let mut core_req = client_adapter
         .to_core_request(&ctx, raw_body)
         .await
-        .map_err(|e| fail_audit(&state, &ctx, start, pre_core_trace(&ctx, &client_request_snapshot), e.into()))?;
+        .map_err(|e| {
+            fail_audit(
+                &state,
+                &ctx,
+                start,
+                pre_core_trace(&ctx, &client_request_snapshot),
+                e.into(),
+            )
+        })?;
     ctx.stream = core_req.stream;
 
     // ── 会话水印：入站即剥除，剥完才往下走（上游与插件都看不到 marker）──
     let session_tag = resolve_session(&state, &mut ctx, &mut core_req).await;
 
     // ── 路由解析 ──
-    let resolved = Router::resolve(&state.db, &core_req.model_alias)
-        .map_err(|e| fail_audit(&state, &ctx, start, pre_core_trace(&ctx, &client_request_snapshot), e))?;
+    let resolved = Router::resolve(&state.db, &core_req.model_alias).map_err(|e| {
+        fail_audit(
+            &state,
+            &ctx,
+            start,
+            pre_core_trace(&ctx, &client_request_snapshot),
+            e,
+        )
+    })?;
     core_req.model = resolved.upstream_model.clone();
     ctx = ctx.with_route(resolved.protocol, resolved.provider_key.clone());
     ctx.route_alias = resolved.route_alias.clone();
@@ -119,12 +170,24 @@ pub async fn handle_request(
         .hooks
         .on_request(&ctx, &mut core_req)
         .await
-        .map_err(|e| fail_audit(&state, &ctx, start, routed_trace(&ctx, &resolved, &client_request_snapshot), e.into()))?;
-    let extra_tools = state
-        .hooks
-        .inject_tools(&ctx)
-        .await
-        .map_err(|e| fail_audit(&state, &ctx, start, routed_trace(&ctx, &resolved, &client_request_snapshot), e.into()))?;
+        .map_err(|e| {
+            fail_audit(
+                &state,
+                &ctx,
+                start,
+                routed_trace(&ctx, &resolved, &client_request_snapshot),
+                e.into(),
+            )
+        })?;
+    let extra_tools = state.hooks.inject_tools(&ctx).await.map_err(|e| {
+        fail_audit(
+            &state,
+            &ctx,
+            start,
+            routed_trace(&ctx, &resolved, &client_request_snapshot),
+            e.into(),
+        )
+    })?;
     core_req.tools.extend(extra_tools);
 
     // ── Core → 上游协议（逐端点故障转移）──
@@ -137,13 +200,31 @@ pub async fn handle_request(
     let mut resp: Option<reqwest::Response> = None;
     let mut used_protocol = resolved.protocol;
     for (attempt, ep) in resolved.endpoints.iter().enumerate() {
-        let provider_adapter = state.registry.provider(ep.protocol).ok_or_else(|| {
-            GatewayError::Route(format!("无上游 Adapter 支持协议 {}", ep.protocol))
-        }).map_err(|e| fail_audit(&state, &ctx, start, routed_trace(&ctx, &resolved, &client_request_snapshot), e))?;
+        let provider_adapter = state
+            .registry
+            .provider(ep.protocol)
+            .ok_or_else(|| GatewayError::Route(format!("无上游 Adapter 支持协议 {}", ep.protocol)))
+            .map_err(|e| {
+                fail_audit(
+                    &state,
+                    &ctx,
+                    start,
+                    routed_trace(&ctx, &resolved, &client_request_snapshot),
+                    e,
+                )
+            })?;
         let mut u = provider_adapter
             .from_core_request(&ctx, &core_req, ep)
             .await
-            .map_err(|e| fail_audit(&state, &ctx, start, routed_trace(&ctx, &resolved, &client_request_snapshot), e.into()))?;
+            .map_err(|e| {
+                fail_audit(
+                    &state,
+                    &ctx,
+                    start,
+                    routed_trace(&ctx, &resolved, &client_request_snapshot),
+                    e.into(),
+                )
+            })?;
 
         // ── [RAW] 出站请求钩子（每端点一次）──
         let mut outbound = RawMessage {
@@ -161,10 +242,19 @@ pub async fn handle_request(
             .on_upstream_request_raw(&ctx, &mut outbound)
             .await
             .map_err(|e| {
-                fail_audit(&state, &ctx, start, outbound_trace(&ctx, &outbound, &resolved, &client_request_snapshot), e.into())
-            })?
-        {
-            RawVerdict::ShortCircuit { status, headers, body } => {
+                fail_audit(
+                    &state,
+                    &ctx,
+                    start,
+                    outbound_trace(&ctx, &outbound, &resolved, &client_request_snapshot),
+                    e.into(),
+                )
+            })? {
+            RawVerdict::ShortCircuit {
+                status,
+                headers,
+                body,
+            } => {
                 return Ok(answered(
                     &state,
                     &ctx,
@@ -217,10 +307,7 @@ pub async fn handle_request(
                 Ok(r) => r,
                 Err(_) => Err(GatewayError::Upstream {
                     status: 504,
-                    message: format!(
-                        "上游请求超时（{}s）",
-                        state.config.request_timeout_secs
-                    ),
+                    message: format!("上游请求超时（{}s）", state.config.request_timeout_secs),
                 }),
             }
         };
@@ -333,9 +420,13 @@ pub async fn handle_request(
 ///
 /// 优先级：外部显式身份（body `session_id` / `previous_response_id` /
 /// `X-Codex-Window-Id`，已由 `handlers::extract_session` 填进 `ctx`）> 请求带回的
-/// marker（命中活跃表）> 新分配。外部身份更可信，故两者冲突时以它为准。
+/// marker > 新分配。外部身份更可信，故两者冲突时以它为准。
 ///
-/// 返回本次响应应附加的短 tag；水印关闭时返回 `None`（**但仍照剥 marker**——
+/// marker 载荷即会话身份：uuid 载荷自带身份（活跃表淘汰 / 网关重启后带回同一
+/// marker 仍落同一 `ctx.session_id`，下游亲和头如 `x-opencode-session` 不再漂移）；
+/// 6-hex 短 tag 经活跃表还原外部 id，表里没有时合成确定性 `mb-{tag}`。
+///
+/// 返回本次响应应嵌入的 marker 载荷；水印关闭时返回 `None`（**但仍照剥 marker**——
 /// 客户端可能带着开启期间留下的历史，不该让它污染上游 prompt）。
 async fn resolve_session(
     state: &Arc<AppState>,
@@ -348,24 +439,24 @@ async fn resolve_session(
     // 其 `mb.session` 桶靠活跃表淘汰回收；只在水印开启时才登记会让这些桶
     // 永不被淘汰，SessionStore 无界增长。
     if let Some(id) = ctx.session_id.clone() {
-        let (tag, evicted) = state.sessions.note_external(&id);
+        let (payload, evicted) = state.sessions.note_external(&id);
         forget_sessions(state, evicted).await;
-        return state.config.session_marker.then_some(tag);
+        return state.config.session_marker.then_some(payload);
     }
     if !state.config.session_marker {
         return None;
     }
-    if let Some(tag) = carried.as_deref() {
-        if let Some(id) = state.sessions.lookup(tag) {
-            ctx.session_id = Some(id);
-            return Some(tag.to_string());
-        }
-        // tag 形似但不在活跃表：被淘汰过或网关重启 ⇒ 按新会话处理（陈旧 tag 已被剥净）
+    if let Some(payload) = carried {
+        let (id, evicted) = state.sessions.resolve(&payload);
+        ctx.session_id = Some(id);
+        forget_sessions(state, evicted).await;
+        // 回发同一载荷：客户端 transcript 里的 marker 形态保持恒定
+        return Some(payload);
     }
-    let (id, evicted, tag) = state.sessions.new_session();
+    let (id, evicted, payload) = state.sessions.new_session();
     ctx.session_id = Some(id);
     forget_sessions(state, evicted).await;
-    Some(tag)
+    Some(payload)
 }
 
 /// 会话被淘汰时顺手清理插件侧的会话状态（`mb.session` 的桶）。
@@ -389,9 +480,7 @@ async fn non_stream(
     let provider_adapter = state
         .registry
         .provider(upstream_protocol)
-        .ok_or_else(|| {
-            GatewayError::Route(format!("无上游 Adapter 支持协议 {upstream_protocol}"))
-        })
+        .ok_or_else(|| GatewayError::Route(format!("无上游 Adapter 支持协议 {upstream_protocol}")))
         .map_err(|e| fail_audit(&state, &ctx, start, trace.clone(), e))?;
     let client_adapter = state
         .registry
@@ -454,7 +543,11 @@ async fn non_stream(
         .await
         .map_err(|e| fail_audit(&state, &ctx, start, trace.clone(), e.into()))?
     {
-        RawVerdict::ShortCircuit { status, headers, body } => {
+        RawVerdict::ShortCircuit {
+            status,
+            headers,
+            body,
+        } => {
             trace.upstream_response = body_snapshot(&inbound_resp.body);
             // 上游响应已含真实 usage（token 实际消耗、上游已计费）——被插件
             // 替换前尽力解析出来记账，否则这轮成本记 0 且账单对不上。
@@ -471,9 +564,7 @@ async fn non_stream(
                 &state, &ctx, start, trace, usage, status, headers, body,
             ));
         }
-        RawVerdict::Abort { message } => {
-            return Err(aborted(&state, &ctx, start, trace, message))
-        }
+        RawVerdict::Abort { message } => return Err(aborted(&state, &ctx, start, trace, message)),
         RawVerdict::Pass => {}
     }
     let body_value = take_json_body(inbound_resp.body, upstream_protocol)
@@ -515,16 +606,14 @@ async fn non_stream(
             match state.hooks.filter_content(&ctx, &mut block).await {
                 Ok(true) => continue,
                 Ok(false) => kept.push(block),
-                Err(e) => {
-                    return Err(fail_audit(&state, &ctx, start, trace.clone(), e.into()))
-                }
+                Err(e) => return Err(fail_audit(&state, &ctx, start, trace.clone(), e.into())),
             }
         }
         core_resp.content = kept;
     }
-    // ── 会话水印：只给纯文本输出打标（含 tool_use 的轮次由 append_to_response 自行跳过）──
-    if let Some(tag) = &session_tag {
-        session::append_to_response(&mut core_resp, tag);
+    // ── 会话水印：嵌进首个非 redacted 推理块的明文首部（无推理块的轮次不打标）──
+    if let Some(payload) = &session_tag {
+        session::tag_response(&mut core_resp, payload);
     }
     let usage_snapshot = core_resp.usage;
 
@@ -551,14 +640,23 @@ async fn non_stream(
         .await
         .map_err(|e| fail_audit(&state, &ctx, start, trace.clone(), e.into()))?
     {
-        RawVerdict::ShortCircuit { status, headers, body } => {
+        RawVerdict::ShortCircuit {
+            status,
+            headers,
+            body,
+        } => {
             return Ok(answered(
-                &state, &ctx, start, trace, usage_snapshot, status, headers, body,
+                &state,
+                &ctx,
+                start,
+                trace,
+                usage_snapshot,
+                status,
+                headers,
+                body,
             ));
         }
-        RawVerdict::Abort { message } => {
-            return Err(aborted(&state, &ctx, start, trace, message))
-        }
+        RawVerdict::Abort { message } => return Err(aborted(&state, &ctx, start, trace, message)),
         RawVerdict::Pass => {}
     }
     let final_body = outbound_resp.body.as_json().cloned().unwrap_or(Value::Null);
@@ -581,10 +679,12 @@ fn take_json_body(body: RawBody, protocol: Protocol) -> Result<Value> {
             ))
         }),
         RawBody::Empty => Ok(Value::Null),
-        RawBody::Binary { .. } => Err(GatewayError::Protocol(moonbridge_core::CoreError::protocol(
-            protocol.to_string(),
-            "报文为二进制，无法作为 JSON 处理",
-        ))),
+        RawBody::Binary { .. } => Err(GatewayError::Protocol(
+            moonbridge_core::CoreError::protocol(
+                protocol.to_string(),
+                "报文为二进制，无法作为 JSON 处理",
+            ),
+        )),
     }
 }
 
@@ -644,9 +744,7 @@ fn new_trace(
         upstream_model,
         provider_key,
         client_protocol: ctx.client_protocol.to_string(),
-        upstream_protocol: upstream_protocol
-            .map(|p| p.to_string())
-            .unwrap_or_default(),
+        upstream_protocol: upstream_protocol.map(|p| p.to_string()).unwrap_or_default(),
         stream,
         status: "ok".to_string(),
         latency_ms: 0,
@@ -861,7 +959,11 @@ fn finish_audit(
         None,
     );
     trace.latency_ms = start.elapsed().as_millis() as u64;
-    trace::write(state.config.trace_dir.as_deref(), trace, state.config.trace_retention);
+    trace::write(
+        state.config.trace_dir.as_deref(),
+        trace,
+        state.config.trace_retention,
+    );
 }
 
 /// 插件短路直答：**照常**落 usage 与 trace 后，把插件给的报文回给客户端。
@@ -950,7 +1052,9 @@ fn short_circuit(status: u16, headers: Vec<(String, String)>, body: RawBody) -> 
     builder.body(Body::from(body_bytes)).unwrap_or_else(|_| {
         Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(Body::from(r#"{"error":{"message":"插件短路响应构造失败"}}"#))
+            .body(Body::from(
+                r#"{"error":{"message":"插件短路响应构造失败"}}"#,
+            ))
             .unwrap_or_else(|_| Response::new(Body::empty()))
     })
 }
@@ -964,7 +1068,10 @@ mod tests {
     fn redacts_sensitive_headers_and_url_keys() {
         let headers = vec![
             ("content-type".to_string(), "application/json".to_string()),
-            ("Authorization".to_string(), "Bearer sk-ant-secret".to_string()),
+            (
+                "Authorization".to_string(),
+                "Bearer sk-ant-secret".to_string(),
+            ),
             ("x-api-key".to_string(), "sk-123".to_string()),
             ("X-Goog-Api-Key".to_string(), "goog-key".to_string()),
             ("Cookie".to_string(), "session=abc".to_string()),

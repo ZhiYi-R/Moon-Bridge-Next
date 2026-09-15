@@ -31,7 +31,9 @@ pub mod usage;
 
 use std::sync::Arc;
 
-use moonbridge_plugin::{LuaPluginRegistry, LuaRuntime, SandboxLimits, ScopeOverrides, SessionStore};
+use moonbridge_plugin::{
+    LuaPluginRegistry, LuaRuntime, SandboxLimits, ScopeOverrides, SessionStore,
+};
 use moonbridge_protocol::{builtin_registry, NoopHooks, PluginHooks, Registry};
 use moonbridge_store::Database;
 
@@ -50,7 +52,9 @@ use crate::upstream::build_client;
 fn sandbox_limits(config: &GatewayConfig) -> SandboxLimits {
     SandboxLimits {
         max_body_bytes: config.max_body_bytes,
-        call_timeout: std::time::Duration::from_secs(config.request_timeout_secs.saturating_add(30)),
+        call_timeout: std::time::Duration::from_secs(
+            config.request_timeout_secs.saturating_add(30),
+        ),
         ..SandboxLimits::default()
     }
 }
@@ -90,7 +94,9 @@ fn canonicalize_pending(path: &std::path::Path) -> Option<std::path::PathBuf> {
 /// 两侧都做 canonicalize（不存在的一侧走 [`canonicalize_pending`]），因此可抵御
 /// `../` 上跳与任意层级的符号链接绕行。
 pub fn is_within_root(path: &std::path::Path, root: &std::path::Path) -> bool {
-    let Some(root_c) = canonicalize_pending(root) else { return false };
+    let Some(root_c) = canonicalize_pending(root) else {
+        return false;
+    };
     match canonicalize_pending(path) {
         Some(c) => c.starts_with(&root_c),
         None => false,
@@ -155,10 +161,11 @@ pub fn load_plugins(
     match db.list_bindings_all() {
         Ok(bindings) => {
             for b in bindings {
-                overrides
-                    .entry(b.plugin_name)
-                    .or_default()
-                    .insert(&b.scope, b.scope_key, b.enabled);
+                overrides.entry(b.plugin_name).or_default().insert(
+                    &b.scope,
+                    b.scope_key,
+                    b.enabled,
+                );
             }
         }
         Err(e) => tracing::error!(error = %e, "读取插件绑定失败"),
@@ -187,8 +194,7 @@ pub fn load_plugins(
                 ) {
                     Ok(mut rt) => {
                         rt.enabled = p.enabled;
-                        let caps: Vec<String> =
-                            rt.manifest.capabilities.iter().cloned().collect();
+                        let caps: Vec<String> = rt.manifest.capabilities.iter().cloned().collect();
                         tracing::info!(plugin = %p.name, enabled = p.enabled, capabilities = ?caps, "已加载 Lua 插件");
                         runtimes.push(Arc::new(rt));
                     }
@@ -203,7 +209,11 @@ pub fn load_plugins(
         Arc::new(NoopHooks)
     } else {
         // `sessions` 与所有插件运行时共享：会话淘汰时经它回收 `mb.session` 桶
-        Arc::new(LuaPluginRegistry::new(runtimes, overrides, sessions.clone()))
+        Arc::new(LuaPluginRegistry::new(
+            runtimes,
+            overrides,
+            sessions.clone(),
+        ))
     }
 }
 
@@ -261,10 +271,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     fn tempdir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "mb-scriptref-{}-{tag}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("mb-scriptref-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("plugins")).unwrap();
         dir
@@ -314,7 +321,10 @@ mod tests {
             format!("{}/outside.lua", dir.display()).as_str(),
         ] {
             assert!(
-                matches!(parse_script_ref(evil, Some(&plugins)), ScriptRef::Rejected(_)),
+                matches!(
+                    parse_script_ref(evil, Some(&plugins)),
+                    ScriptRef::Rejected(_)
+                ),
                 "目录外绝对路径必须被拒绝: {evil}"
             );
         }

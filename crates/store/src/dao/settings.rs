@@ -12,9 +12,11 @@ impl Database {
     pub fn get_setting(&self, key: &str) -> Result<Option<Value>> {
         let conn = self.conn.lock();
         let raw: Option<String> = conn
-            .query_row("SELECT value_json FROM settings WHERE key = ?1", params![key], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT value_json FROM settings WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
             .optional()?;
         Ok(raw.and_then(|s| serde_json::from_str(&s).ok()))
     }

@@ -47,7 +47,10 @@ pub fn text_of(blocks: &[ContentBlock]) -> String {
 }
 
 fn s(v: &Value, key: &str) -> String {
-    v.get(key).and_then(|x| x.as_str()).unwrap_or_default().to_string()
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// `function.arguments` → Core ToolUse.input。规范形态是 JSON 字符串；部分
@@ -79,9 +82,7 @@ fn parse_chat_content(v: Option<&Value>) -> Vec<ContentBlock> {
                 Some("image_url") => {
                     let url = p
                         .get("image_url")
-                        .and_then(|i| {
-                            i.as_str().or_else(|| i.get("url").and_then(|u| u.as_str()))
-                        })
+                        .and_then(|i| i.as_str().or_else(|| i.get("url").and_then(|u| u.as_str())))
                         .unwrap_or_default();
                     // data: URL 必须拆成 base64+真实媒体类型：整串记为 "url" 形态
                     // 后，转 Gemini 会被 url 口径静默丢弃、转 Anthropic 会以
@@ -104,10 +105,7 @@ fn parse_chat_content(v: Option<&Value>) -> Vec<ContentBlock> {
                 // ——此前整块丢弃。file_data 是 data: URL，与 image_url 同口径拆分。
                 Some("file") => {
                     let f = p.get("file")?;
-                    let name = f
-                        .get("filename")
-                        .and_then(|n| n.as_str())
-                        .map(String::from);
+                    let name = f.get("filename").and_then(|n| n.as_str()).map(String::from);
                     if let Some(fid) = f.get("file_id").and_then(|v| v.as_str()) {
                         Some(ContentBlock::Document {
                             source: DocSource::File,
@@ -127,7 +125,9 @@ fn parse_chat_content(v: Option<&Value>) -> Vec<ContentBlock> {
                         let (mt, data) = fd
                             .strip_prefix("data:")
                             .and_then(|r| r.split_once(','))
-                            .map(|(m, d)| (m.split(';').next().unwrap_or("application/octet-stream"), d))
+                            .map(|(m, d)| {
+                                (m.split(';').next().unwrap_or("application/octet-stream"), d)
+                            })
                             .unwrap_or(("application/octet-stream", fd));
                         Some(ContentBlock::Document {
                             source: DocSource::Base64,
@@ -162,9 +162,17 @@ pub fn chat_to_core_messages(msgs: &[Value]) -> Vec<Message> {
                 let fn_obj = tc.get("function").cloned().unwrap_or(Value::Null);
                 let args = parse_call_arguments(fn_obj.get("arguments"));
                 content.push(ContentBlock::ToolUse {
-                    id: tc.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    id: tc
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
                     item_id: None,
-                    name: fn_obj.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    name: fn_obj
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
                     namespace: None,
                     input: args,
                     signature: None,
@@ -243,18 +251,40 @@ pub fn core_to_chat_messages(system: &[ContentBlock], messages: &[Message]) -> V
     if !sys_text.is_empty() {
         out.push(json!({ "role": "system", "content": sys_text }));
     }
-    for msg in messages {
+    let mut i = 0;
+    while i < messages.len() {
+        let msg = &messages[i];
+        // 连续 assistant 合并：Responses 等入口把同一轮的 reasoning /
+        // message / function_call 展平成相邻 assistant 消息；thinking
+        // 模式上游要求 reasoning_content 落在携带 tool_calls 的那条
+        // 消息上，合块成单条发出才满足校验。
+        let mut blocks: Vec<&ContentBlock> = msg.content.iter().collect();
+        if msg.role == Role::Assistant {
+            while i + 1 < messages.len() && messages[i + 1].role == Role::Assistant {
+                i += 1;
+                blocks.extend(messages[i].content.iter());
+            }
+        }
+        i += 1;
+
         // 分离文本/图像、工具调用、工具结果
         let mut text_parts: Vec<ContentBlock> = Vec::new();
         let mut tool_calls: Vec<Value> = Vec::new();
         let mut tool_results: Vec<(String, String)> = Vec::new();
-        for b in &msg.content {
+        let mut reasoning_blocks: Vec<&ContentBlock> = Vec::new();
+        for b in blocks {
             match b {
-                ContentBlock::ToolUse { id, name, input, .. } => tool_calls.push(json!({
+                ContentBlock::ToolUse {
+                    id, name, input, ..
+                } => tool_calls.push(json!({
                     "id": id, "type": "function",
                     "function": { "name": name, "arguments": input.to_string() },
                 })),
-                ContentBlock::ToolResult { tool_use_id, content, .. } => {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } => {
                     tool_results.push((tool_use_id.clone(), text_of(content)));
                     // tool 消息只承载文本：内嵌图片/文档按原顺序提升为随后的
                     // user 内容（与客户端「reattach recent images」同形），并附
@@ -263,8 +293,10 @@ pub fn core_to_chat_messages(system: &[ContentBlock], messages: &[Message]) -> V
                     // 把同一批图当新附件反复处理。
                     let mut hoisted = false;
                     for b in content {
-                        if matches!(b, ContentBlock::Image { .. } | ContentBlock::Document { .. })
-                        {
+                        if matches!(
+                            b,
+                            ContentBlock::Image { .. } | ContentBlock::Document { .. }
+                        ) {
                             if !hoisted {
                                 text_parts.push(ContentBlock::text(format!(
                                     "[media content returned by tool call {tool_use_id}]"
@@ -275,18 +307,21 @@ pub fn core_to_chat_messages(system: &[ContentBlock], messages: &[Message]) -> V
                         }
                     }
                 }
-                ContentBlock::Reasoning { .. } => {}
+                r @ ContentBlock::Reasoning { .. } => reasoning_blocks.push(r),
                 other => text_parts.push(other.clone()),
             }
         }
+        let reasoning = reasoning_field(reasoning_blocks.iter().copied());
 
         if !tool_results.is_empty() {
             // 同消息含 ToolUse + ToolResult 时（Core IR 允许的混排）：调用
             // 先落成 assistant 消息，否则 continue 会静默丢弃 tool_calls。
             if !tool_calls.is_empty() {
-                out.push(json!({
+                let mut m = json!({
                     "role": "assistant", "content": "", "tool_calls": tool_calls
-                }));
+                });
+                attach_reasoning(&mut m, &reasoning);
+                out.push(m);
             }
             for (tid, txt) in tool_results {
                 out.push(json!({ "role": "tool", "tool_call_id": tid, "content": txt }));
@@ -311,23 +346,38 @@ pub fn core_to_chat_messages(system: &[ContentBlock], messages: &[Message]) -> V
         };
         // tool_calls 只能挂 assistant 消息——混排（如 user 消息内含 ToolUse）
         // 时强制 assistant，否则上游按非法 schema 整请求 400。
-        let role = if !tool_calls.is_empty() { "assistant" } else { role };
+        let role = if !tool_calls.is_empty() {
+            "assistant"
+        } else {
+            role
+        };
         let content_value = if text_parts.len() == 1 {
             if let ContentBlock::Text { text } = &text_parts[0] {
                 json!(text)
             } else {
-                json!(text_parts.iter().filter_map(content_to_part).collect::<Vec<_>>())
+                json!(text_parts
+                    .iter()
+                    .filter_map(content_to_part)
+                    .collect::<Vec<_>>())
             }
         } else if text_parts.is_empty() {
             // 空 part 数组部分上游不收；tool_calls 消息惯例 content 为 ""/null
             json!("")
         } else {
-            json!(text_parts.iter().filter_map(content_to_part).collect::<Vec<_>>())
+            json!(text_parts
+                .iter()
+                .filter_map(content_to_part)
+                .collect::<Vec<_>>())
         };
 
         let mut m = json!({ "role": role, "content": content_value });
         if !tool_calls.is_empty() {
             m["tool_calls"] = json!(tool_calls);
+        }
+        // assistant 消息的推理回传：thinking 模式上游要求 reasoning_content
+        // 随历史带回，此前 Reasoning 块整体丢弃导致多轮 tool_calls 链 400。
+        if role == "assistant" {
+            attach_reasoning(&mut m, &reasoning);
         }
         out.push(m);
     }
@@ -377,7 +427,10 @@ pub fn chat_tools_to_core(tools: &[Value]) -> Vec<Tool> {
             let f = t.get("function")?;
             Some(Tool {
                 name: f.get("name").and_then(|v| v.as_str())?.to_string(),
-                description: f.get("description").and_then(|v| v.as_str()).map(String::from),
+                description: f
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
                 input_schema: f
                     .get("parameters")
                     .cloned()
@@ -418,7 +471,9 @@ pub fn parse_tool_choice(v: &Value) -> Option<ToolChoice> {
             .get("function")
             .and_then(|f| f.get("name"))
             .and_then(|n| n.as_str())
-            .map(|n| ToolChoice::Tool { name: n.to_string() }),
+            .map(|n| ToolChoice::Tool {
+                name: n.to_string(),
+            }),
         _ => None,
     }
 }
@@ -446,11 +501,22 @@ pub fn chat_choice_to_core(choice: &Value) -> (Vec<ContentBlock>, Option<StopRea
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
     {
-        let (text, signature) = split_mb_cot(raw);
+        let (text, mut signature) = split_mb_cot(raw);
+        // Chat 上游无独立凭据字段：推理明文本体即回传凭据（thinking 模式
+        // 上游要求 reasoning_content 随历史带回，缺失 400）。打 chat:
+        // 自凭据标记——客户端方向据此下发可回传凭据（Responses 的
+        // encrypted_content），异源上游则按外源凭据降级不透传。
+        if signature.is_none() && !text.is_empty() {
+            signature = Some(format!("{}{}", crate::adapters::SIG_CHAT, text));
+        }
         if !text.is_empty() || signature.is_some() {
             content.insert(
                 0,
-                ContentBlock::Reasoning { text, signature, redacted: false },
+                ContentBlock::Reasoning {
+                    text,
+                    signature,
+                    redacted: false,
+                },
             );
         }
     }
@@ -459,9 +525,17 @@ pub fn chat_choice_to_core(choice: &Value) -> (Vec<ContentBlock>, Option<StopRea
             let fn_obj = tc.get("function").cloned().unwrap_or(Value::Null);
             let args = parse_call_arguments(fn_obj.get("arguments"));
             content.push(ContentBlock::ToolUse {
-                id: tc.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                id: tc
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
                 item_id: None,
-                name: fn_obj.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                name: fn_obj
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
                 namespace: None,
                 input: args,
                 signature: None,
@@ -502,6 +576,52 @@ fn split_mb_cot(s: &str) -> (String, Option<String>) {
     (text.trim().to_string(), sig)
 }
 
+/// 组装回传用推理字段值：各 Reasoning 块明文拼接；异源凭据（ant:/oai:/
+/// gem:/无前缀）以 `<mb-cot>…</mb-cot>` 定界搭车，跨协议回程由归属上游
+/// 还原；`chat:` 自凭据的 payload 即推理明文本体——明文缺失时以它还原，
+/// 且不再搭车（再打标记下游会看到双倍文本）。
+fn reasoning_field<'a>(blocks: impl Iterator<Item = &'a ContentBlock>) -> String {
+    let mut text = String::new();
+    let mut credential: Option<&str> = None;
+    let mut chat_payload: Option<&str> = None;
+    for b in blocks {
+        let ContentBlock::Reasoning {
+            text: t, signature, ..
+        } = b
+        else {
+            continue;
+        };
+        text.push_str(t);
+        if let Some(s) = signature.as_deref().filter(|s| !s.is_empty()) {
+            if let Some(p) = s.strip_prefix(crate::adapters::SIG_CHAT) {
+                chat_payload = Some(p);
+            } else {
+                credential = Some(s);
+            }
+        }
+    }
+    if text.is_empty() {
+        if let Some(p) = chat_payload {
+            text.push_str(p);
+        }
+    }
+    if let Some(enc) = credential {
+        text.push_str(MB_COT_OPEN);
+        text.push_str(enc);
+        text.push_str(MB_COT_CLOSE);
+    }
+    text
+}
+
+/// 在 assistant 消息对象上双写推理字段（DeepSeek 系 `reasoning_content` /
+/// OpenRouter 系 `reasoning`）；空值不写。
+fn attach_reasoning(msg: &mut Value, reasoning: &str) {
+    if !reasoning.is_empty() {
+        msg["reasoning_content"] = json!(reasoning);
+        msg["reasoning"] = json!(reasoning);
+    }
+}
+
 /// Core 内容块 → Chat 响应的 assistant message 对象。
 ///
 /// Reasoning 下发：`reasoning_content`/`reasoning`（明文展示，双写两种生态约定）；
@@ -511,36 +631,21 @@ fn split_mb_cot(s: &str) -> (String, Option<String>) {
 pub fn core_to_chat_response_message(content: &[ContentBlock]) -> Value {
     let mut tool_calls = Vec::new();
     let mut text_parts: Vec<ContentBlock> = Vec::new();
-    let mut reasoning_parts: Vec<&str> = Vec::new();
-    let mut credential: Option<&str> = None;
+    let mut reasoning_blocks: Vec<&ContentBlock> = Vec::new();
     for b in content {
         match b {
-            ContentBlock::ToolUse { id, name, input, .. } => tool_calls.push(json!({
+            ContentBlock::ToolUse {
+                id, name, input, ..
+            } => tool_calls.push(json!({
                 "id": id, "type": "function",
                 "function": { "name": name, "arguments": input.to_string() },
             })),
-            ContentBlock::Reasoning { text, signature, .. } => {
-                if !text.is_empty() {
-                    reasoning_parts.push(text);
-                }
-                if signature.as_deref().is_some_and(|s| !s.is_empty()) {
-                    credential = signature.as_deref();
-                }
-            }
+            r @ ContentBlock::Reasoning { .. } => reasoning_blocks.push(r),
             other => text_parts.push(other.clone()),
         }
     }
     let mut msg = json!({ "role": "assistant", "content": text_of(&text_parts) });
-    let mut reasoning = reasoning_parts.concat();
-    if let Some(enc) = credential {
-        reasoning.push_str(MB_COT_OPEN);
-        reasoning.push_str(enc);
-        reasoning.push_str(MB_COT_CLOSE);
-    }
-    if !reasoning.is_empty() {
-        msg["reasoning_content"] = json!(reasoning);
-        msg["reasoning"] = json!(reasoning);
-    }
+    attach_reasoning(&mut msg, &reasoning_field(reasoning_blocks.iter().copied()));
     if !tool_calls.is_empty() {
         msg["tool_calls"] = json!(tool_calls);
     }
@@ -551,7 +656,10 @@ pub fn core_to_chat_response_message(content: &[ContentBlock]) -> Value {
 pub fn usage_from_chat(v: &Value) -> Usage {
     Usage {
         input_tokens: v.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-        output_tokens: v.get("completion_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+        output_tokens: v
+            .get("completion_tokens")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0) as u32,
         cache_read_tokens: v
             .get("prompt_tokens_details")
             .and_then(|d| d.get("cached_tokens"))
@@ -587,7 +695,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// 上游非流式 message.reasoning_content / reasoning → Reasoning 块（置于正文前）。
+    /// 上游非流式 message.reasoning_content / reasoning → Reasoning 块（置于正文前）；
+    /// 无明文凭据时打 chat: 自凭据（payload 为推理原文），供客户端方向可回传。
     #[test]
     fn chat_choice_to_core_carries_reasoning() {
         let choice = json!({
@@ -602,15 +711,41 @@ mod tests {
         assert_eq!(finish, Some(StopReason::EndTurn));
         assert_eq!(content.len(), 2);
         match &content[0] {
-            ContentBlock::Reasoning { text, signature, .. } => {
+            ContentBlock::Reasoning {
+                text, signature, ..
+            } => {
                 assert_eq!(text, "let me think");
-                assert!(signature.is_none());
+                assert_eq!(
+                    signature.as_deref(),
+                    Some("chat:let me think"),
+                    "无凭据推理应打 chat: 自凭据（明文即凭据）"
+                );
             }
             other => panic!("expected reasoning first, got {other:?}"),
         }
         match &content[1] {
             ContentBlock::Text { text } => assert_eq!(text, "pong"),
             other => panic!("expected text, got {other:?}"),
+        }
+
+        // 上游 reasoning_content 自带 <mb-cot> 凭据（嵌套网关）时不重复打标
+        let choice = json!({
+            "message": {
+                "role": "assistant",
+                "content": "pong",
+                "reasoning_content": "thought<mb-cot>ENC</mb-cot>"
+            },
+            "finish_reason": "stop"
+        });
+        let (content, _) = chat_choice_to_core(&choice);
+        match &content[0] {
+            ContentBlock::Reasoning {
+                text, signature, ..
+            } => {
+                assert_eq!(text, "thought");
+                assert_eq!(signature.as_deref(), Some("ENC"), "已有凭据不得被覆盖");
+            }
+            other => panic!("expected reasoning first, got {other:?}"),
         }
     }
 
@@ -631,15 +766,21 @@ mod tests {
     fn reasoning_credential_roundtrips_via_mb_cot_marker() {
         // 下发：凭据（不可读文本）拼在 reasoning_content 尾部
         let msg = core_to_chat_response_message(&[
-            ContentBlock::Reasoning { text: "thought".into(), signature: Some("ENC".into()), redacted: false },
+            ContentBlock::Reasoning {
+                text: "thought".into(),
+                signature: Some("ENC".into()),
+                redacted: false,
+            },
             ContentBlock::text("Hi"),
         ]);
         assert_eq!(msg["reasoning_content"], "thought<mb-cot>ENC</mb-cot>");
         assert_eq!(msg["reasoning"], "thought<mb-cot>ENC</mb-cot>");
         // 无凭据时不带标记
-        let plain = core_to_chat_response_message(&[
-            ContentBlock::Reasoning { text: "pure".into(), signature: None, redacted: false },
-        ]);
+        let plain = core_to_chat_response_message(&[ContentBlock::Reasoning {
+            text: "pure".into(),
+            signature: None,
+            redacted: false,
+        }]);
         assert_eq!(plain["reasoning_content"], "pure");
 
         // 回传：标记解析拆出凭据与明文
@@ -649,7 +790,11 @@ mod tests {
             "reasoning_content": "thought<mb-cot>ENC</mb-cot>"
         })]);
         match &msgs[0].content[0] {
-            ContentBlock::Reasoning { text, signature: Some(enc), .. } => {
+            ContentBlock::Reasoning {
+                text,
+                signature: Some(enc),
+                ..
+            } => {
                 assert_eq!(text, "thought");
                 assert_eq!(enc, "ENC");
             }
@@ -689,7 +834,11 @@ mod tests {
             "reasoning_content": "pre<mb-cot>A<mb-cot>B</mb-cot>C</mb-cot>post"
         })]);
         match &msgs[0].content[0] {
-            ContentBlock::Reasoning { text, signature: Some(enc), .. } => {
+            ContentBlock::Reasoning {
+                text,
+                signature: Some(enc),
+                ..
+            } => {
                 assert_eq!(text, "prepost");
                 assert_eq!(enc, "A<mb-cot>B</mb-cot>C");
             }
@@ -703,7 +852,11 @@ mod tests {
             "reasoning_content": "t1<mb-cot>E1</mb-cot>m<mb-cot>E2</mb-cot>"
         })]);
         match &msgs[0].content[0] {
-            ContentBlock::Reasoning { text, signature: Some(enc), .. } => {
+            ContentBlock::Reasoning {
+                text,
+                signature: Some(enc),
+                ..
+            } => {
                 assert_eq!(text, "t1");
                 assert_eq!(enc, "E1</mb-cot>m<mb-cot>E2");
             }
@@ -717,7 +870,11 @@ mod tests {
             "reasoning_content": "</mb-cot> x <mb-cot>"
         })]);
         match &msgs[0].content[0] {
-            ContentBlock::Reasoning { text, signature: None, .. } => {
+            ContentBlock::Reasoning {
+                text,
+                signature: None,
+                ..
+            } => {
                 assert_eq!(text, "</mb-cot> x <mb-cot>");
             }
             other => panic!("expected plain text, got {other:?}"),
@@ -850,31 +1007,38 @@ mod tests {
         let [d0, d1, d2] = msgs[0].content.as_slice() else {
             panic!("应为三个 Document 块: {:?}", msgs[0].content)
         };
-        assert!(matches!(d0, ContentBlock::Document { source, data, name, .. }
-            if *source == DocSource::File && data == "file-9" && name.as_deref() == Some("a.pdf")));
-        assert!(matches!(d1, ContentBlock::Document { source, media_type, data, .. }
-            if *source == DocSource::Base64 && media_type == "application/pdf" && data == "PDFB"));
+        assert!(
+            matches!(d0, ContentBlock::Document { source, data, name, .. }
+            if *source == DocSource::File && data == "file-9" && name.as_deref() == Some("a.pdf"))
+        );
+        assert!(
+            matches!(d1, ContentBlock::Document { source, media_type, data, .. }
+            if *source == DocSource::Base64 && media_type == "application/pdf" && data == "PDFB")
+        );
         assert!(matches!(d2, ContentBlock::Document { source, data, .. }
             if *source == DocSource::Url && data == "https://x/c.txt"));
 
         // 出站：tool_result 内嵌文档与图片一样 hoist 到随后 user 消息
-        let out = core_to_chat_messages(&[], &[Message {
-            role: Role::User,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: "c1".into(),
-                content: vec![
-                    ContentBlock::text("doc below"),
-                    ContentBlock::Document {
-                        source: DocSource::Base64,
-                        media_type: "application/pdf".into(),
-                        data: "PDF".into(),
-                        name: Some("spec.pdf".into()),
-                    },
-                ],
-                is_error: false,
+        let out = core_to_chat_messages(
+            &[],
+            &[Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "c1".into(),
+                    content: vec![
+                        ContentBlock::text("doc below"),
+                        ContentBlock::Document {
+                            source: DocSource::Base64,
+                            media_type: "application/pdf".into(),
+                            data: "PDF".into(),
+                            name: Some("spec.pdf".into()),
+                        },
+                    ],
+                    is_error: false,
+                }],
+                ext: Default::default(),
             }],
-            ext: Default::default(),
-        }]);
+        );
         assert_eq!(out.len(), 2);
         let parts = out[1]["content"].as_array().unwrap();
         assert_eq!(
@@ -896,8 +1060,12 @@ mod tests {
                   "function": { "name": "g", "arguments": "{\"y\":2}" } }
             ]
         })]);
-        let ContentBlock::ToolUse { input: i0, .. } = &msgs[0].content[0] else { panic!() };
-        let ContentBlock::ToolUse { input: i1, .. } = &msgs[0].content[1] else { panic!() };
+        let ContentBlock::ToolUse { input: i0, .. } = &msgs[0].content[0] else {
+            panic!()
+        };
+        let ContentBlock::ToolUse { input: i1, .. } = &msgs[0].content[1] else {
+            panic!()
+        };
         assert_eq!(i0["x"], 1, "对象形态 arguments 不得丢弃");
         assert_eq!(i1["y"], 2, "字符串形态按 JSON 解析");
     }
@@ -932,6 +1100,171 @@ mod tests {
         assert_eq!(out[1]["tool_call_id"], "c1");
     }
 
+    /// 回归：Reasoning 块必须回传为 assistant 消息的 reasoning_content——
+    /// thinking 模式上游要求随历史带回，此前整块丢弃导致多轮
+    /// tool_calls 链 400（`reasoning_content must be passed back`）。
+    #[test]
+    fn reasoning_blocks_emit_reasoning_content_on_assistant() {
+        let msgs = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Reasoning {
+                    text: "thought".into(),
+                    signature: None,
+                    redacted: false,
+                },
+                ContentBlock::text("answer"),
+                ContentBlock::ToolUse {
+                    id: "c1".into(),
+                    item_id: None,
+                    name: "f".into(),
+                    namespace: None,
+                    input: json!({}),
+                    signature: None,
+                },
+            ],
+            ext: Default::default(),
+        }];
+        let out = core_to_chat_messages(&[], &msgs);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "assistant");
+        assert_eq!(out[0]["content"], "answer");
+        assert_eq!(out[0]["reasoning_content"], "thought");
+        assert_eq!(out[0]["reasoning"], "thought");
+        assert_eq!(out[0]["tool_calls"][0]["id"], "c1");
+
+        // user 消息不挂推理字段
+        let out = core_to_chat_messages(
+            &[],
+            &[Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::Reasoning {
+                        text: "x".into(),
+                        signature: None,
+                        redacted: false,
+                    },
+                    ContentBlock::text("hi"),
+                ],
+                ext: Default::default(),
+            }],
+        );
+        assert_eq!(out[0]["role"], "user");
+        assert!(out[0].get("reasoning_content").is_none());
+    }
+
+    /// 回归：连续 assistant 消息合并成单条——Responses 入口把同一轮的
+    /// reasoning / message / function_call 展平成相邻 assistant 消息，
+    /// tool_calls 消息须携带 reasoning_content 才过 thinking 校验。
+    #[test]
+    fn consecutive_assistant_messages_merge_with_reasoning() {
+        let mk = |content: Vec<ContentBlock>| Message {
+            role: Role::Assistant,
+            content,
+            ext: Default::default(),
+        };
+        let msgs = vec![
+            mk(vec![ContentBlock::Reasoning {
+                text: "thought".into(),
+                signature: None,
+                redacted: false,
+            }]),
+            mk(vec![ContentBlock::text("let me check")]),
+            mk(vec![ContentBlock::ToolUse {
+                id: "c1".into(),
+                item_id: None,
+                name: "Bash".into(),
+                namespace: None,
+                input: json!({"command": "ls"}),
+                signature: None,
+            }]),
+        ];
+        let out = core_to_chat_messages(&[], &msgs);
+        assert_eq!(out.len(), 1, "相邻 assistant 应合为单条: {out:?}");
+        assert_eq!(out[0]["role"], "assistant");
+        assert_eq!(out[0]["content"], "let me check");
+        assert_eq!(out[0]["reasoning_content"], "thought");
+        assert_eq!(out[0]["tool_calls"][0]["id"], "c1");
+
+        // 合并不越过其他 role：assistant 与 user 保持分条
+        let msgs = vec![
+            mk(vec![ContentBlock::text("a1")]),
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::text("u")],
+                ext: Default::default(),
+            },
+            mk(vec![ContentBlock::text("a2")]),
+        ];
+        let out = core_to_chat_messages(&[], &msgs);
+        assert_eq!(out.len(), 3);
+    }
+
+    /// chat: 自凭据（推理明文即凭据）不搭 <mb-cot> 车；明文缺失时以
+    /// 凭据 payload 还原 reasoning_content。异源凭据仍按 mb-cot 搭车。
+    #[test]
+    fn chat_self_credential_restores_and_skips_marker() {
+        // 明文与凭据同体：只发明文
+        let msg = core_to_chat_response_message(&[ContentBlock::Reasoning {
+            text: "thought".into(),
+            signature: Some("chat:thought".into()),
+            redacted: false,
+        }]);
+        assert_eq!(
+            msg["reasoning_content"], "thought",
+            "不得出现 <mb-cot> 双倍文本"
+        );
+
+        // 客户端丢了 summary 只剩 encrypted_content：以 payload 还原
+        let msgs = core_to_chat_messages(
+            &[],
+            &[Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Reasoning {
+                    text: "".into(),
+                    signature: Some("chat:ORIG".into()),
+                    redacted: false,
+                }],
+                ext: Default::default(),
+            }],
+        );
+        assert_eq!(msgs[0]["reasoning_content"], "ORIG");
+
+        // 异源凭据（Anthropic 签名经 chat 通道搭车回 Anthropic 上游）仍走 mb-cot
+        let msgs = core_to_chat_messages(
+            &[],
+            &[Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Reasoning {
+                        text: "thought".into(),
+                        signature: Some("ant:SIG".into()),
+                        redacted: false,
+                    },
+                    ContentBlock::text("hi"),
+                ],
+                ext: Default::default(),
+            }],
+        );
+        assert_eq!(
+            msgs[0]["reasoning_content"],
+            "thought<mb-cot>ant:SIG</mb-cot>"
+        );
+    }
+
+    /// 端到端：客户端回传的 reasoning_content → Core → 上游请求仍带
+    /// reasoning_content（入站/出站两条腿都通才算修复）。
+    #[test]
+    fn reasoning_content_roundtrips_through_core() {
+        let history = chat_to_core_messages(&[json!({
+            "role": "assistant",
+            "content": "hi",
+            "reasoning_content": "thought"
+        })]);
+        let out = core_to_chat_messages(&[], &history);
+        assert_eq!(out[0]["reasoning_content"], "thought", "回传链不得再丢");
+    }
+
     /// 回归：入站 image_url 的 data: URL 拆分与裸字符串形态兼容——
     /// 不拆会让图片在 Gemini/Anthropic 上游静默丢失或被拒。
     #[test]
@@ -943,12 +1276,20 @@ mod tests {
                 { "type": "image_url", "image_url": { "url": "https://example.com/a.png" } }
             ]
         })]);
-        let [ContentBlock::Image { data: d1, media_type: m1 }, ContentBlock::Image { data: d2, media_type: m2 }] =
-            msgs[0].content.as_slice()
+        let [ContentBlock::Image {
+            data: d1,
+            media_type: m1,
+        }, ContentBlock::Image {
+            data: d2,
+            media_type: m2,
+        }] = msgs[0].content.as_slice()
         else {
             panic!("应为两个图片块: {:?}", msgs[0].content)
         };
         assert_eq!((d1.as_str(), m1.as_str()), ("WWW", "image/webp"));
-        assert_eq!((d2.as_str(), m2.as_str()), ("https://example.com/a.png", "url"));
+        assert_eq!(
+            (d2.as_str(), m2.as_str()),
+            ("https://example.com/a.png", "url")
+        );
     }
 }

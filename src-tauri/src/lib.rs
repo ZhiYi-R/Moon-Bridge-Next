@@ -80,7 +80,9 @@ pub fn run() {
                 let s = state.clone();
                 tauri::async_runtime::spawn(async move {
                     match s.start_gateway().await {
-                        Ok(st) => tracing::info!(running = st.running, addr = %st.addr, "网关自启动完成"),
+                        Ok(st) => {
+                            tracing::info!(running = st.running, addr = %st.addr, "网关自启动完成")
+                        }
                         Err(e) => tracing::error!(error = %e, "网关自启动失败"),
                     }
                 });

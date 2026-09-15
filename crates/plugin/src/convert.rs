@@ -101,11 +101,12 @@ fn json_size(v: &Value) -> usize {
         Value::Number(n) => n.to_string().len(),
         Value::String(s) => s.len() + 2,
         Value::Array(a) => a.iter().map(json_size).sum::<usize>() + a.len() + 2,
-        Value::Object(m) => m
-            .iter()
-            .map(|(k, v)| k.len() + 3 + json_size(v))
-            .sum::<usize>()
-            + 2,
+        Value::Object(m) => {
+            m.iter()
+                .map(|(k, v)| k.len() + 3 + json_size(v))
+                .sum::<usize>()
+                + 2
+        }
     }
 }
 

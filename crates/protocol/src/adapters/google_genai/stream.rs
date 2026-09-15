@@ -15,7 +15,9 @@ use serde_json::{json, Value};
 
 use super::dto::{map_finish_reason, unmap_stop_reason, usage_from_gemini, usage_object};
 use super::GoogleGenAiAdapter;
-use crate::adapter::{ClientStreamAdapter, ProviderStreamAdapter, StreamDecodeState, StreamEncodeState};
+use crate::adapter::{
+    ClientStreamAdapter, ProviderStreamAdapter, StreamDecodeState, StreamEncodeState,
+};
 use crate::context::ReqCtx;
 use crate::raw::{ChunkStage, RawBody, RawChunk};
 
@@ -70,7 +72,12 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
 
         // prompt 级拒绝/拦截：无 candidates、以 promptFeedback.blockReason
         // 终止。此前整块被丢弃 → 客户端收到空输出；现映射为内容过滤终止。
-        if data.get("candidates").is_none() || data["candidates"].as_array().map(|a| a.is_empty()).unwrap_or(false) {
+        if data.get("candidates").is_none()
+            || data["candidates"]
+                .as_array()
+                .map(|a| a.is_empty())
+                .unwrap_or(false)
+        {
             if let Some(pf) = data.get("promptFeedback") {
                 if let Some(br) = pf.get("blockReason").and_then(|v| v.as_str()) {
                     let usage = data.get("usageMetadata").map(usage_from_gemini);
@@ -110,7 +117,11 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
 
         for p in &parts {
             if let Some(fc) = p.get("functionCall") {
-                let name = fc.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let name = fc
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 // 无 id 时带块索引后缀合成——同名函数一次响应多次调用时
                 // 纯 `{name}-call` 会重复，跨上游要求 tool_use id 唯一。
                 let id = fc
@@ -143,12 +154,20 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
                         signature: Some(sig.clone()),
                         redacted: false,
                     };
-                    out.push(CoreStreamEvent::BlockStart { index: c_idx, block: carrier.clone() });
+                    out.push(CoreStreamEvent::BlockStart {
+                        index: c_idx,
+                        block: carrier.clone(),
+                    });
                     out.push(CoreStreamEvent::BlockDelta {
                         index: c_idx,
-                        delta: StreamDelta::ReasoningSignature { signature: sig.clone() },
+                        delta: StreamDelta::ReasoningSignature {
+                            signature: sig.clone(),
+                        },
                     });
-                    out.push(CoreStreamEvent::BlockStop { index: c_idx, block: Some(carrier) });
+                    out.push(CoreStreamEvent::BlockStop {
+                        index: c_idx,
+                        block: Some(carrier),
+                    });
                 }
                 let idx = st.next_block_index;
                 st.next_block_index += 1;
@@ -165,7 +184,9 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
                 });
                 out.push(CoreStreamEvent::BlockDelta {
                     index: idx,
-                    delta: StreamDelta::ToolInput { partial_json: args.to_string() },
+                    delta: StreamDelta::ToolInput {
+                        partial_json: args.to_string(),
+                    },
                 });
                 out.push(CoreStreamEvent::BlockStop {
                     index: idx,
@@ -218,9 +239,13 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
                 out.push(CoreStreamEvent::BlockDelta {
                     index: idx,
                     delta: if thought {
-                        StreamDelta::Reasoning { text: text.to_string() }
+                        StreamDelta::Reasoning {
+                            text: text.to_string(),
+                        }
                     } else {
-                        StreamDelta::Text { text: text.to_string() }
+                        StreamDelta::Text {
+                            text: text.to_string(),
+                        }
                     },
                 });
             }
@@ -255,12 +280,18 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
                         signature: Some(sig.clone()),
                         redacted: false,
                     };
-                    out.push(CoreStreamEvent::BlockStart { index: c_idx, block: carrier.clone() });
+                    out.push(CoreStreamEvent::BlockStart {
+                        index: c_idx,
+                        block: carrier.clone(),
+                    });
                     out.push(CoreStreamEvent::BlockDelta {
                         index: c_idx,
                         delta: StreamDelta::ReasoningSignature { signature: sig },
                     });
-                    out.push(CoreStreamEvent::BlockStop { index: c_idx, block: Some(carrier) });
+                    out.push(CoreStreamEvent::BlockStop {
+                        index: c_idx,
+                        block: Some(carrier),
+                    });
                 }
             }
         }
@@ -330,7 +361,13 @@ impl ClientStreamAdapter for GoogleGenAiAdapter {
         match ev {
             CoreStreamEvent::MessageStart { .. } => {}
             CoreStreamEvent::BlockStart { block, .. } => {
-                if let ContentBlock::ToolUse { name, input, signature, .. } = block {
+                if let ContentBlock::ToolUse {
+                    name,
+                    input,
+                    signature,
+                    ..
+                } = block
+                {
                     let mut fc = json!({ "name": name, "args": input });
                     if let Some(sig) = crate::adapters::untag_signature(
                         crate::adapters::SIG_GEMINI,
@@ -438,9 +475,15 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(evs[0], CoreStreamEvent::MessageStart { .. }));
-        assert!(matches!(evs[1], CoreStreamEvent::BlockStart { index: 0, .. }));
+        assert!(matches!(
+            evs[1],
+            CoreStreamEvent::BlockStart { index: 0, .. }
+        ));
         match &evs[2] {
-            CoreStreamEvent::BlockDelta { index: 0, delta: StreamDelta::Text { text } } => {
+            CoreStreamEvent::BlockDelta {
+                index: 0,
+                delta: StreamDelta::Text { text },
+            } => {
                 assert_eq!(text, "Hello")
             }
             other => panic!("expected text delta, got {other:?}"),
@@ -467,8 +510,18 @@ mod tests {
                 &chunk(json!({ "candidates": [{ "content": { "role": "model", "parts": [{ "text": " world" }] }, "index": 0 }] })),
             )
             .unwrap();
-        assert_eq!(evs.len(), 1, "中间块不应合成 MessageStart/BlockStart: {evs:?}");
-        assert!(matches!(evs[0], CoreStreamEvent::BlockDelta { index: 0, delta: StreamDelta::Text { .. } }));
+        assert_eq!(
+            evs.len(),
+            1,
+            "中间块不应合成 MessageStart/BlockStart: {evs:?}"
+        );
+        assert!(matches!(
+            evs[0],
+            CoreStreamEvent::BlockDelta {
+                index: 0,
+                delta: StreamDelta::Text { .. }
+            }
+        ));
     }
 
     /// thought part 必须走独立 reasoning 块——混入 text 块会把 CoT 当正文下发。
@@ -492,14 +545,20 @@ mod tests {
         let r_idx = evs
             .iter()
             .find_map(|e| match e {
-                CoreStreamEvent::BlockDelta { index, delta: StreamDelta::Reasoning { text } } if text == "ponder" => Some(*index),
+                CoreStreamEvent::BlockDelta {
+                    index,
+                    delta: StreamDelta::Reasoning { text },
+                } if text == "ponder" => Some(*index),
                 _ => None,
             })
             .expect("thought part 应为 Reasoning 增量");
         let t_idx = evs
             .iter()
             .find_map(|e| match e {
-                CoreStreamEvent::BlockDelta { index, delta: StreamDelta::Text { text } } if text == "answer" => Some(*index),
+                CoreStreamEvent::BlockDelta {
+                    index,
+                    delta: StreamDelta::Text { text },
+                } if text == "answer" => Some(*index),
                 _ => None,
             })
             .expect("普通 part 应为 Text 增量");
@@ -533,13 +592,20 @@ mod tests {
             let (idx, _) = evs
                 .iter()
                 .find_map(|e| match e {
-                    CoreStreamEvent::BlockStart { index, block: ContentBlock::ToolUse { name, .. } } => Some((*index, name.clone())),
+                    CoreStreamEvent::BlockStart {
+                        index,
+                        block: ContentBlock::ToolUse { name, .. },
+                    } => Some((*index, name.clone())),
                     _ => None,
                 })
                 .expect("应有 ToolUse BlockStart");
             idxs.push(idx);
         }
-        assert_eq!(idxs, vec![1, 2], "跨 chunk 的函数调用须占递增且互不相同的块索引");
+        assert_eq!(
+            idxs,
+            vec![1, 2],
+            "跨 chunk 的函数调用须占递增且互不相同的块索引"
+        );
     }
 
     #[test]
@@ -557,15 +623,28 @@ mod tests {
             )
             .unwrap();
         // text delta, BlockStop(0), MessageDelta, MessageStop
-        assert!(evs.iter().any(|e| matches!(e, CoreStreamEvent::BlockDelta { .. })));
-        assert!(evs.iter().any(|e| matches!(e, CoreStreamEvent::BlockStop { index: 0, .. })));
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, CoreStreamEvent::BlockDelta { .. })));
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, CoreStreamEvent::BlockStop { index: 0, .. })));
         let md = evs.iter().find_map(|e| match e {
             CoreStreamEvent::MessageDelta { stop_reason, usage } => Some((stop_reason, usage)),
             _ => None,
         });
         let (sr, usage) = md.expect("应有 MessageDelta");
         assert_eq!(*sr, Some(StopReason::EndTurn));
-        assert_eq!(usage.unwrap(), Usage { input_tokens: 8, output_tokens: 4, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0 });
+        assert_eq!(
+            usage.unwrap(),
+            Usage {
+                input_tokens: 8,
+                output_tokens: 4,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0
+            }
+        );
         assert!(matches!(evs.last().unwrap(), CoreStreamEvent::MessageStop));
     }
 
@@ -583,13 +662,22 @@ mod tests {
             )
             .unwrap();
         let bs = evs.iter().find_map(|e| match e {
-            CoreStreamEvent::BlockStart { index, block: ContentBlock::ToolUse { name, .. } } => Some((*index, name.clone())),
+            CoreStreamEvent::BlockStart {
+                index,
+                block: ContentBlock::ToolUse { name, .. },
+            } => Some((*index, name.clone())),
             _ => None,
         });
         let (idx, name) = bs.expect("应有 ToolUse BlockStart");
         assert_eq!(idx, 0, "无前置文本块时函数调用从索引 0 起分配");
         assert_eq!(name, "get_time");
-        assert!(evs.iter().any(|e| matches!(e, CoreStreamEvent::BlockDelta { delta: StreamDelta::ToolInput { .. }, .. })));
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            CoreStreamEvent::BlockDelta {
+                delta: StreamDelta::ToolInput { .. },
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -598,17 +686,33 @@ mod tests {
         let ctx = ReqCtx::new("r1", Protocol::GoogleGenai);
 
         let evs = adapter
-            .encode(&ctx, &CoreStreamEvent::BlockDelta { index: 0, delta: StreamDelta::Text { text: "Hi".into() } }, &mut StreamEncodeState::default())
+            .encode(
+                &ctx,
+                &CoreStreamEvent::BlockDelta {
+                    index: 0,
+                    delta: StreamDelta::Text { text: "Hi".into() },
+                },
+                &mut StreamEncodeState::default(),
+            )
             .unwrap();
         assert_eq!(evs.len(), 1);
-        assert_eq!(evs[0].data.as_json().unwrap()["candidates"][0]["content"]["parts"][0]["text"], "Hi");
+        assert_eq!(
+            evs[0].data.as_json().unwrap()["candidates"][0]["content"]["parts"][0]["text"],
+            "Hi"
+        );
 
         let evs = adapter
             .encode(
                 &ctx,
                 &CoreStreamEvent::MessageDelta {
                     stop_reason: Some(StopReason::EndTurn),
-                    usage: Some(Usage { input_tokens: 3, output_tokens: 2, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0 }),
+                    usage: Some(Usage {
+                        input_tokens: 3,
+                        output_tokens: 2,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                        reasoning_tokens: 0,
+                    }),
                 },
                 &mut StreamEncodeState::default(),
             )
@@ -622,7 +726,24 @@ mod tests {
     fn encode_message_start_and_stop_are_silent() {
         let adapter = GoogleGenAiAdapter;
         let ctx = ReqCtx::new("r1", Protocol::GoogleGenai);
-        assert!(adapter.encode(&ctx, &CoreStreamEvent::MessageStart { id: "x".into(), model: "g".into() }, &mut StreamEncodeState::default()).unwrap().is_empty());
-        assert!(adapter.encode(&ctx, &CoreStreamEvent::MessageStop, &mut StreamEncodeState::default()).unwrap().is_empty());
+        assert!(adapter
+            .encode(
+                &ctx,
+                &CoreStreamEvent::MessageStart {
+                    id: "x".into(),
+                    model: "g".into()
+                },
+                &mut StreamEncodeState::default()
+            )
+            .unwrap()
+            .is_empty());
+        assert!(adapter
+            .encode(
+                &ctx,
+                &CoreStreamEvent::MessageStop,
+                &mut StreamEncodeState::default()
+            )
+            .unwrap()
+            .is_empty());
     }
 }

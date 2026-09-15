@@ -65,7 +65,9 @@ fn ctx_for(provider: Option<&str>) -> ReqCtx {
 }
 
 /// 造只含一组 provider 绑定的覆盖表。
-fn provider_overrides(bindings: &[(&str, bool)]) -> std::collections::HashMap<String, ScopeOverrides> {
+fn provider_overrides(
+    bindings: &[(&str, bool)],
+) -> std::collections::HashMap<String, ScopeOverrides> {
     let mut t = ScopeOverrides::default();
     for (key, enabled) in bindings {
         t.insert("provider", key.to_string(), *enabled);
@@ -77,53 +79,73 @@ fn provider_overrides(bindings: &[(&str, bool)]) -> std::collections::HashMap<St
 
 #[tokio::test]
 async fn provider_binding_overrides_global() {
-    let overrides =
-        provider_overrides(&[("off-provider", false), ("on-provider", true)]);
-    let registry = LuaPluginRegistry::new(vec![probe_runtime(true)], overrides, SessionStore::new());
+    let overrides = provider_overrides(&[("off-provider", false), ("on-provider", true)]);
+    let registry =
+        LuaPluginRegistry::new(vec![probe_runtime(true)], overrides, SessionStore::new());
 
     // binding 禁用 → 覆盖全局启用
     let mut req = CoreRequest::new("m");
     req.temperature = Some(1.0);
-    registry.on_request(&ctx_for(Some("off-provider")), &mut req).await.unwrap();
+    registry
+        .on_request(&ctx_for(Some("off-provider")), &mut req)
+        .await
+        .unwrap();
     assert_eq!(req.temperature, Some(1.0), "provider 级禁用应生效");
 
     // binding 启用 → 与全局一致，钩子执行
     let mut req = CoreRequest::new("m");
-    registry.on_request(&ctx_for(Some("on-provider")), &mut req).await.unwrap();
+    registry
+        .on_request(&ctx_for(Some("on-provider")), &mut req)
+        .await
+        .unwrap();
     assert_eq!(req.temperature, Some(0.5));
 }
 
 #[tokio::test]
 async fn no_binding_follows_global() {
-    let registry =
-        LuaPluginRegistry::new(vec![probe_runtime(true)], Default::default(), SessionStore::new());
+    let registry = LuaPluginRegistry::new(
+        vec![probe_runtime(true)],
+        Default::default(),
+        SessionStore::new(),
+    );
 
     // 无 binding：跟随全局启用
     let mut req = CoreRequest::new("m");
-    registry.on_request(&ctx_for(Some("any-provider")), &mut req).await.unwrap();
+    registry
+        .on_request(&ctx_for(Some("any-provider")), &mut req)
+        .await
+        .unwrap();
     assert_eq!(req.temperature, Some(0.5));
 }
 
 #[tokio::test]
 async fn force_enable_disabled_plugin() {
     let overrides = provider_overrides(&[("p", true)]);
-    let registry = LuaPluginRegistry::new(vec![probe_runtime(false)], overrides, SessionStore::new());
+    let registry =
+        LuaPluginRegistry::new(vec![probe_runtime(false)], overrides, SessionStore::new());
 
     // 全局停用 + provider 强制启用 → 执行
     let mut req = CoreRequest::new("m");
-    registry.on_request(&ctx_for(Some("p")), &mut req).await.unwrap();
+    registry
+        .on_request(&ctx_for(Some("p")), &mut req)
+        .await
+        .unwrap();
     assert_eq!(req.temperature, Some(0.5));
 
     // 全局停用 + 其它 provider（无 binding）→ 不执行
     let mut req = CoreRequest::new("m");
-    registry.on_request(&ctx_for(Some("other")), &mut req).await.unwrap();
+    registry
+        .on_request(&ctx_for(Some("other")), &mut req)
+        .await
+        .unwrap();
     assert_eq!(req.temperature, None);
 }
 
 #[tokio::test]
 async fn client_stage_uses_global_only() {
     let overrides = provider_overrides(&[("off-provider", false)]);
-    let registry = LuaPluginRegistry::new(vec![probe_runtime(true)], overrides, SessionStore::new());
+    let registry =
+        LuaPluginRegistry::new(vec![probe_runtime(true)], overrides, SessionStore::new());
 
     // 路由前（provider 未知）按全局开关执行，不受 provider binding 影响
     let mut req = CoreRequest::new("m");
@@ -142,7 +164,8 @@ async fn nearest_scope_wins() {
     t.insert("global", String::new(), true);
     let mut overrides = std::collections::HashMap::new();
     overrides.insert("probe".to_string(), t);
-    let registry = LuaPluginRegistry::new(vec![probe_runtime(true)], overrides, SessionStore::new());
+    let registry =
+        LuaPluginRegistry::new(vec![probe_runtime(true)], overrides, SessionStore::new());
 
     let mut ctx = ctx_for(Some("p"));
     ctx.model_alias = "rt-x".to_string();

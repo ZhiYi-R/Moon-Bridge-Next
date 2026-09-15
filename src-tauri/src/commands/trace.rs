@@ -42,7 +42,10 @@ fn to_ms(t: std::io::Result<std::time::SystemTime>) -> u64 {
 
 /// 列举 trace（按修改时间倒序，最多 `limit` 条，默认 500）。
 #[tauri::command]
-pub fn trace_list(state: State<'_, Arc<ManagedState>>, limit: Option<usize>) -> CmdResult<Vec<TraceEntry>> {
+pub fn trace_list(
+    state: State<'_, Arc<ManagedState>>,
+    limit: Option<usize>,
+) -> CmdResult<Vec<TraceEntry>> {
     let root = state.paths.trace_dir.clone();
     let max = limit.unwrap_or(500);
     let mut out = Vec::new();
@@ -56,7 +59,11 @@ pub fn trace_list(state: State<'_, Arc<ManagedState>>, limit: Option<usize>) -> 
         if !sess_path.is_dir() {
             continue;
         }
-        let session = sess_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let session = sess_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let models = match std::fs::read_dir(&sess_path) {
             Ok(m) => m,
             Err(_) => continue,
@@ -66,7 +73,11 @@ pub fn trace_list(state: State<'_, Arc<ManagedState>>, limit: Option<usize>) -> 
             if !mdl_path.is_dir() {
                 continue;
             }
-            let model = mdl_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let model = mdl_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             let files = match std::fs::read_dir(&mdl_path) {
                 Ok(f) => f,
                 Err(_) => continue,
@@ -80,7 +91,11 @@ pub fn trace_list(state: State<'_, Arc<ManagedState>>, limit: Option<usize>) -> 
                     Ok(m) => m,
                     Err(_) => continue,
                 };
-                let file_name = fp.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let file_name = fp
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 let rel_path = format!("{session}/{model}/{file_name}");
                 out.push(TraceEntry {
                     session: session.clone(),

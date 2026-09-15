@@ -23,7 +23,11 @@ impl ProviderAdapter for OpenAiChatAdapter {
         req: &CoreRequest,
         endpoint: &ProviderEndpoint,
     ) -> Result<UpstreamRequest> {
-        let url = format!("{}{}", endpoint.base_url.trim_end_matches('/'), dto::CHAT_PATH);
+        let url = format!(
+            "{}{}",
+            endpoint.base_url.trim_end_matches('/'),
+            dto::CHAT_PATH
+        );
 
         let mut body = req
             .meta
@@ -47,10 +51,16 @@ impl ProviderAdapter for OpenAiChatAdapter {
         // 流式必须显式请求 usage 终块，否则上游不回传 token 用量，
         // 用量统计/计费对该类请求恒为 0（OpenAI 及兼容实现通用约定）。
         if req.stream {
-            obj.insert("stream_options".to_string(), json!({ "include_usage": true }));
+            obj.insert(
+                "stream_options".to_string(),
+                json!({ "include_usage": true }),
+            );
         }
         if !req.tools.is_empty() {
-            obj.insert("tools".to_string(), json!(dto::core_to_chat_tools(&req.tools)));
+            obj.insert(
+                "tools".to_string(),
+                json!(dto::core_to_chat_tools(&req.tools)),
+            );
         }
         if let Some(tc) = &req.tool_choice {
             obj.insert("tool_choice".to_string(), dto::unparse_tool_choice(tc));
@@ -71,7 +81,10 @@ impl ProviderAdapter for OpenAiChatAdapter {
 
         let mut headers = vec![
             ("content-type".to_string(), "application/json".to_string()),
-            ("authorization".to_string(), format!("Bearer {}", endpoint.api_key)),
+            (
+                "authorization".to_string(),
+                format!("Bearer {}", endpoint.api_key),
+            ),
         ];
         if let Some(ua) = &endpoint.user_agent {
             headers.push(("user-agent".to_string(), ua.clone()));
@@ -87,8 +100,16 @@ impl ProviderAdapter for OpenAiChatAdapter {
     }
 
     async fn to_core_response(&self, _ctx: &ReqCtx, raw: Value) -> Result<CoreResponse> {
-        let id = raw.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        let model = raw.get("model").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let id = raw
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let model = raw
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
         let choice = raw
             .get("choices")
             .and_then(|c| c.as_array())
@@ -96,7 +117,10 @@ impl ProviderAdapter for OpenAiChatAdapter {
             .cloned()
             .unwrap_or(Value::Null);
         let (content, stop_reason) = dto::chat_choice_to_core(&choice);
-        let usage = raw.get("usage").map(dto::usage_from_chat).unwrap_or_default();
+        let usage = raw
+            .get("usage")
+            .map(dto::usage_from_chat)
+            .unwrap_or_default();
 
         Ok(CoreResponse {
             id,
@@ -135,15 +159,24 @@ mod tests {
 
         let adapter = OpenAiChatAdapter;
         let ctx = ReqCtx::new("r1", Protocol::Anthropic);
-        let up = adapter.from_core_request(&ctx, &req, &endpoint()).await.unwrap();
+        let up = adapter
+            .from_core_request(&ctx, &req, &endpoint())
+            .await
+            .unwrap();
 
         assert!(up.url.ends_with("/v1/chat/completions"));
         assert_eq!(up.body["messages"][0]["role"], "system");
         assert_eq!(up.body["messages"][0]["content"], "Be brief");
         assert_eq!(up.body["messages"][1]["role"], "user");
         assert_eq!(up.body["max_completion_tokens"], 128);
-        assert!(up.body.get("max_tokens").is_none(), "现代字段名是 max_completion_tokens");
-        assert!(up.headers.iter().any(|(k, v)| k == "authorization" && v == "Bearer sk-test"));
+        assert!(
+            up.body.get("max_tokens").is_none(),
+            "现代字段名是 max_completion_tokens"
+        );
+        assert!(up
+            .headers
+            .iter()
+            .any(|(k, v)| k == "authorization" && v == "Bearer sk-test"));
     }
 
     /// 回归：`reasoning.effort` 必须传导到上游 `reasoning_effort`。
@@ -159,7 +192,10 @@ mod tests {
         });
         let adapter = OpenAiChatAdapter;
         let ctx = ReqCtx::new("r1", Protocol::OpenAiChat);
-        let up = adapter.from_core_request(&ctx, &req, &endpoint()).await.unwrap();
+        let up = adapter
+            .from_core_request(&ctx, &req, &endpoint())
+            .await
+            .unwrap();
         assert_eq!(up.body["reasoning_effort"], "high");
 
         // 未声明时不得凭空长出该字段
@@ -192,7 +228,9 @@ mod tests {
         assert_eq!(resp.id, "chatcmpl-2");
         assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
         match &resp.content[0] {
-            ContentBlock::ToolUse { id, name, input, .. } => {
+            ContentBlock::ToolUse {
+                id, name, input, ..
+            } => {
                 assert_eq!(id, "c9");
                 assert_eq!(name, "get_time");
                 assert_eq!(input["tz"], "UTC");

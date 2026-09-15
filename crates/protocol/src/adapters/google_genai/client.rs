@@ -16,8 +16,8 @@ use serde_json::{json, Value};
 
 use super::dto;
 use super::GoogleGenAiAdapter;
-use crate::adapters::effort_from_budget;
 use crate::adapter::ClientAdapter;
+use crate::adapters::effort_from_budget;
 use crate::context::ReqCtx;
 
 #[async_trait]
@@ -52,15 +52,28 @@ impl ClientAdapter for GoogleGenAiAdapter {
             req.tools = dto::tools_to_core(tools);
         }
         // tool_choice：toolConfig
-        req.tool_choice = dto::tool_config_to_core(raw.get("toolConfig").or_else(|| raw.get("tool_config")));
+        req.tool_choice =
+            dto::tool_config_to_core(raw.get("toolConfig").or_else(|| raw.get("tool_config")));
 
         // generationConfig
-        if let Some(gc) = raw.get("generationConfig").or_else(|| raw.get("generation_config")) {
-            req.max_tokens = gc.get("maxOutputTokens").and_then(|v| v.as_u64()).map(|v| v as u32);
-            req.temperature = gc.get("temperature").and_then(|v| v.as_f64()).map(|v| v as f32);
+        if let Some(gc) = raw
+            .get("generationConfig")
+            .or_else(|| raw.get("generation_config"))
+        {
+            req.max_tokens = gc
+                .get("maxOutputTokens")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+            req.temperature = gc
+                .get("temperature")
+                .and_then(|v| v.as_f64())
+                .map(|v| v as f32);
             req.top_p = gc.get("topP").and_then(|v| v.as_f64()).map(|v| v as f32);
             if let Some(stops) = gc.get("stopSequences").and_then(|v| v.as_array()) {
-                req.stop = stops.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+                req.stop = stops
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
             }
             // thinkingConfig → req.reasoning：thinkingLevel 直接映射；
             // thinkingBudget 经档位表逆推 effort（与上游出站方向互逆）
@@ -96,9 +109,16 @@ impl ClientAdapter for GoogleGenAiAdapter {
         // thinkingConfig.includeThoughts 等）按子对象同样透传。
         if let Some(obj) = raw.as_object() {
             const KNOWN: &[&str] = &[
-                "model", "systemInstruction", "system_instruction", "contents",
-                "tools", "toolConfig", "tool_config", "generationConfig",
-                "generation_config", "stream",
+                "model",
+                "systemInstruction",
+                "system_instruction",
+                "contents",
+                "tools",
+                "toolConfig",
+                "tool_config",
+                "generationConfig",
+                "generation_config",
+                "stream",
             ];
             let mut extra: serde_json::Map<String, Value> = obj
                 .iter()
@@ -111,7 +131,10 @@ impl ClientAdapter for GoogleGenAiAdapter {
                 .and_then(|v| v.as_object())
             {
                 const GC_KNOWN: &[&str] = &[
-                    "maxOutputTokens", "temperature", "topP", "stopSequences",
+                    "maxOutputTokens",
+                    "temperature",
+                    "topP",
+                    "stopSequences",
                     "thinkingConfig",
                 ];
                 let gc_extra: serde_json::Map<String, Value> = gc
@@ -174,8 +197,14 @@ mod tests {
         assert_eq!(req.model, "gemini-2.0-flash");
         assert_eq!(req.system.len(), 1);
         assert_eq!(req.messages.len(), 3);
-        assert!(matches!(req.messages[1].content[0], ContentBlock::ToolUse { .. }));
-        assert!(matches!(req.messages[2].content[0], ContentBlock::ToolResult { .. }));
+        assert!(matches!(
+            req.messages[1].content[0],
+            ContentBlock::ToolUse { .. }
+        ));
+        assert!(matches!(
+            req.messages[2].content[0],
+            ContentBlock::ToolResult { .. }
+        ));
         assert_eq!(req.tools.len(), 1);
         assert_eq!(req.max_tokens, Some(256));
         assert_eq!(req.temperature, Some(0.7));
@@ -189,7 +218,13 @@ mod tests {
             model: "gemini-2.0-flash".into(),
             content: vec![ContentBlock::text("Hello")],
             stop_reason: Some(StopReason::EndTurn),
-            usage: Usage { input_tokens: 6, output_tokens: 2, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0 },
+            usage: Usage {
+                input_tokens: 6,
+                output_tokens: 2,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+            },
             ext: Default::default(),
         };
         let adapter = GoogleGenAiAdapter;
@@ -207,11 +242,20 @@ mod tests {
     async fn parses_thinking_config_to_reasoning() {
         let adapter = GoogleGenAiAdapter;
         let ctx = ReqCtx::new("r1", Protocol::GoogleGenai);
-        let req = adapter.to_core_request(&ctx, json!({
-            "model": "gemini",
-            "generationConfig": { "thinkingConfig": { "thinkingLevel": "high" } },
-            "contents": [{ "role": "user", "parts": [{ "text": "Hi" }] }]
-        })).await.unwrap();
-        assert_eq!(req.reasoning.as_ref().and_then(|r| r.effort.as_deref()), Some("high"));
+        let req = adapter
+            .to_core_request(
+                &ctx,
+                json!({
+                    "model": "gemini",
+                    "generationConfig": { "thinkingConfig": { "thinkingLevel": "high" } },
+                    "contents": [{ "role": "user", "parts": [{ "text": "Hi" }] }]
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            req.reasoning.as_ref().and_then(|r| r.effort.as_deref()),
+            Some("high")
+        );
     }
 }

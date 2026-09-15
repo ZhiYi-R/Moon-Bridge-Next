@@ -16,7 +16,11 @@ impl ClientAdapter for OpenAiChatAdapter {
     }
 
     async fn to_core_request(&self, _ctx: &ReqCtx, raw: Value) -> Result<CoreRequest> {
-        let model = raw.get("model").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let model = raw
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
         let mut req = CoreRequest::new(model.clone());
         req.model_alias = model;
 
@@ -56,12 +60,18 @@ impl ClientAdapter for OpenAiChatAdapter {
             .and_then(|v| v.as_u64())
             .or_else(|| raw.get("max_completion_tokens").and_then(|v| v.as_u64()))
             .map(|v| v as u32);
-        req.temperature = raw.get("temperature").and_then(|v| v.as_f64()).map(|v| v as f32);
+        req.temperature = raw
+            .get("temperature")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32);
         req.top_p = raw.get("top_p").and_then(|v| v.as_f64()).map(|v| v as f32);
         match raw.get("stop") {
             Some(Value::String(s)) => req.stop = vec![s.clone()],
             Some(Value::Array(arr)) => {
-                req.stop = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+                req.stop = arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
             }
             _ => {}
         }
@@ -72,9 +82,19 @@ impl ClientAdapter for OpenAiChatAdapter {
         // 经 Core 无字段位，整体收进 meta，出站时合并回请求体。
         if let Some(obj) = raw.as_object() {
             const KNOWN: &[&str] = &[
-                "model", "messages", "tools", "tool_choice", "reasoning_effort",
-                "reasoning", "max_tokens", "max_completion_tokens", "temperature",
-                "top_p", "stop", "stream", "stream_options",
+                "model",
+                "messages",
+                "tools",
+                "tool_choice",
+                "reasoning_effort",
+                "reasoning",
+                "max_tokens",
+                "max_completion_tokens",
+                "temperature",
+                "top_p",
+                "stop",
+                "stream",
+                "stream_options",
             ];
             let extra: serde_json::Map<String, Value> = obj
                 .iter()
@@ -82,7 +102,8 @@ impl ClientAdapter for OpenAiChatAdapter {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             if !extra.is_empty() {
-                req.meta.insert("chat.extra".to_string(), Value::Object(extra));
+                req.meta
+                    .insert("chat.extra".to_string(), Value::Object(extra));
             }
         }
 
@@ -137,8 +158,14 @@ mod tests {
         assert_eq!(req.model, "gpt-4o");
         assert_eq!(req.system.len(), 1, "system 应被抽出");
         assert_eq!(req.messages.len(), 3);
-        assert!(matches!(req.messages[1].content[0], ContentBlock::ToolUse { .. }));
-        assert!(matches!(req.messages[2].content[0], ContentBlock::ToolResult { .. }));
+        assert!(matches!(
+            req.messages[1].content[0],
+            ContentBlock::ToolUse { .. }
+        ));
+        assert!(matches!(
+            req.messages[2].content[0],
+            ContentBlock::ToolResult { .. }
+        ));
         assert_eq!(req.tools.len(), 1);
         assert_eq!(req.max_tokens, Some(256));
     }
@@ -149,7 +176,11 @@ mod tests {
             id: "chatcmpl-2".into(),
             model: "m".into(),
             content: vec![
-                ContentBlock::Reasoning { text: "thought".into(), signature: None, redacted: false },
+                ContentBlock::Reasoning {
+                    text: "thought".into(),
+                    signature: None,
+                    redacted: false,
+                },
                 ContentBlock::text("Hi"),
             ],
             stop_reason: Some(StopReason::EndTurn),
@@ -170,11 +201,20 @@ mod tests {
     async fn parses_reasoning_effort() {
         let adapter = OpenAiChatAdapter;
         let ctx = ReqCtx::new("r1", Protocol::OpenAiChat);
-        let req = adapter.to_core_request(&ctx, json!({
-            "model": "m", "reasoning_effort": "high",
-            "messages": [{ "role": "user", "content": "Hi" }]
-        })).await.unwrap();
-        assert_eq!(req.reasoning.as_ref().and_then(|r| r.effort.as_deref()), Some("high"));
+        let req = adapter
+            .to_core_request(
+                &ctx,
+                json!({
+                    "model": "m", "reasoning_effort": "high",
+                    "messages": [{ "role": "user", "content": "Hi" }]
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            req.reasoning.as_ref().and_then(|r| r.effort.as_deref()),
+            Some("high")
+        );
     }
 
     #[tokio::test]
@@ -184,7 +224,13 @@ mod tests {
             model: "gpt-4o".into(),
             content: vec![ContentBlock::text("Hello")],
             stop_reason: Some(StopReason::EndTurn),
-            usage: Usage { input_tokens: 7, output_tokens: 2, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0 },
+            usage: Usage {
+                input_tokens: 7,
+                output_tokens: 2,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+            },
             ext: Default::default(),
         };
         let adapter = OpenAiChatAdapter;

@@ -36,11 +36,7 @@ pub trait PluginHooks: Send + Sync {
     }
 
     /// 处理单个流事件；返回 `true` 表示丢弃该事件（对应 StreamInterceptor）。
-    async fn on_stream_event(
-        &self,
-        _ctx: &ReqCtx,
-        _ev: &mut CoreStreamEvent,
-    ) -> Result<bool> {
+    async fn on_stream_event(&self, _ctx: &ReqCtx, _ev: &mut CoreStreamEvent) -> Result<bool> {
         Ok(false)
     }
 
@@ -102,11 +98,7 @@ pub trait PluginHooks: Send + Sync {
     }
 
     /// 回写客户端的 SSE chunk（流式），写出之前。
-    async fn on_client_chunk_raw(
-        &self,
-        _ctx: &ReqCtx,
-        _c: &mut RawChunk,
-    ) -> Result<ChunkVerdict> {
+    async fn on_client_chunk_raw(&self, _ctx: &ReqCtx, _c: &mut RawChunk) -> Result<ChunkVerdict> {
         Ok(ChunkVerdict::Forward)
     }
 

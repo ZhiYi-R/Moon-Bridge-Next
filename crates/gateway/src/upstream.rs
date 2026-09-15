@@ -41,25 +41,27 @@ pub fn response_to_chunks(
     provider: Option<String>,
 ) -> impl Stream<Item = Result<RawChunk>> {
     use eventsource_stream::Eventsource;
-    resp.bytes_stream()
-        .eventsource()
-        .filter_map(move |ev| {
-            let provider = provider.clone();
-            async move {
-                match ev {
-                    Ok(e) => {
-                        if e.data.is_empty() {
-                            return None; // 跳过心跳/空事件
-                        }
-                        let event = if e.event.is_empty() { None } else { Some(e.event) };
-                        Some(Ok(sse::parse_upstream_event(
-                            event, &e.data, protocol, provider,
-                        )))
+    resp.bytes_stream().eventsource().filter_map(move |ev| {
+        let provider = provider.clone();
+        async move {
+            match ev {
+                Ok(e) => {
+                    if e.data.is_empty() {
+                        return None; // 跳过心跳/空事件
                     }
-                    Err(err) => Some(Err(GatewayError::Other(format!(
-                        "上游 SSE 解析错误: {err}"
-                    )))),
+                    let event = if e.event.is_empty() {
+                        None
+                    } else {
+                        Some(e.event)
+                    };
+                    Some(Ok(sse::parse_upstream_event(
+                        event, &e.data, protocol, provider,
+                    )))
                 }
+                Err(err) => Some(Err(GatewayError::Other(format!(
+                    "上游 SSE 解析错误: {err}"
+                )))),
             }
-        })
+        }
+    })
 }

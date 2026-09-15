@@ -83,13 +83,20 @@ pub(crate) fn clamped_thinking_budget(effort: &str, max_tokens: u32) -> Option<u
 pub(crate) const SIG_ANTHROPIC: &str = "ant:";
 pub(crate) const SIG_OPENAI: &str = "oai:";
 pub(crate) const SIG_GEMINI: &str = "gem:";
+/// Chat 协议（OpenAI Chat Completions）上游没有独立推理凭据字段——
+/// thinking 模式上游（DeepSeek/Kimi 系）要求把 `reasoning_content` 原文
+/// 随历史回传，**推理明文本体即凭据**。decode 侧给无凭据推理打上此前缀
+/// （payload 为推理原文），使 Responses 等客户端方向有可回传的不透明
+/// 凭据（`encrypted_content`）；同时前缀机制让该自凭据在 OpenAI/Anthropic/
+/// Gemini 上游方向按异源凭据降级，不会以假凭据污染真上游。
+pub(crate) const SIG_CHAT: &str = "chat:";
 
 /// 入站：给凭据打上来源标记（空凭据原样返回 `None`）。已带已知前缀的
 /// 凭据视为先前打标的回传，原样保留（幂等）——凭据经客户端转一圈后
 /// 还会回到本 adapter，二次打标会让 `untag_signature` 错位。
 pub(crate) fn tag_signature(prefix: &str, sig: Option<String>) -> Option<String> {
     sig.filter(|s| !s.is_empty()).map(|s| {
-        if [SIG_ANTHROPIC, SIG_OPENAI, SIG_GEMINI]
+        if [SIG_ANTHROPIC, SIG_OPENAI, SIG_GEMINI, SIG_CHAT]
             .iter()
             .any(|p| s.starts_with(p))
         {
@@ -107,7 +114,7 @@ pub(crate) fn untag_signature<'a>(prefix: &str, sig: Option<&'a str>) -> Option<
     if s.is_empty() {
         return None;
     }
-    for p in [SIG_ANTHROPIC, SIG_OPENAI, SIG_GEMINI] {
+    for p in [SIG_ANTHROPIC, SIG_OPENAI, SIG_GEMINI, SIG_CHAT] {
         if let Some(rest) = s.strip_prefix(p) {
             return (p == prefix).then_some(rest);
         }

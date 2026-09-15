@@ -23,8 +23,9 @@ impl Database {
     /// 列出全部路由。
     pub fn list_routes(&self) -> Result<Vec<Route>> {
         let conn = self.conn.lock();
-        let mut stmt =
-            conn.prepare("SELECT alias,model_slug,provider_key,extra_json FROM routes ORDER BY alias")?;
+        let mut stmt = conn.prepare(
+            "SELECT alias,model_slug,provider_key,extra_json FROM routes ORDER BY alias",
+        )?;
         let rows = stmt.query_map([], row_to_route)?;
         let mut out = Vec::new();
         for r in rows {

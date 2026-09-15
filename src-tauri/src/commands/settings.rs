@@ -17,7 +17,11 @@ pub fn settings_get(state: State<'_, Arc<ManagedState>>, key: String) -> CmdResu
 
 /// 写入单个设置项。
 #[tauri::command]
-pub fn settings_set(state: State<'_, Arc<ManagedState>>, key: String, value: Value) -> CmdResult<()> {
+pub fn settings_set(
+    state: State<'_, Arc<ManagedState>>,
+    key: String,
+    value: Value,
+) -> CmdResult<()> {
     Ok(state.db.set_setting(&key, &value)?)
 }
 

@@ -98,7 +98,8 @@ CREATE TABLE IF NOT EXISTS settings (
 "#;
 
 /// V2：usage_records 增加 reasoning_tokens（推理 token，OpenAI reasoning / Gemini thoughts）。
-const V2: &str = "ALTER TABLE usage_records ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0;";
+const V2: &str =
+    "ALTER TABLE usage_records ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0;";
 
 /// V3：Provider 多端点。新增 `provider_endpoints` 表（每端点独立 API Key），
 /// 并把 providers 表的存量单端点（base_url/api_key_enc）迁入首个端点后删除原列。
@@ -154,15 +155,42 @@ const V9: &str = "ALTER TABLE usage_records ADD COLUMN provider_key TEXT;";
 
 /// 全部 migration，按版本升序。
 const MIGRATIONS: &[Migration] = &[
-    Migration { version: 1, sql: V1 },
-    Migration { version: 2, sql: V2 },
-    Migration { version: 3, sql: V3 },
-    Migration { version: 4, sql: V4 },
-    Migration { version: 5, sql: V5 },
-    Migration { version: 6, sql: V6 },
-    Migration { version: 7, sql: V7 },
-    Migration { version: 8, sql: V8 },
-    Migration { version: 9, sql: V9 },
+    Migration {
+        version: 1,
+        sql: V1,
+    },
+    Migration {
+        version: 2,
+        sql: V2,
+    },
+    Migration {
+        version: 3,
+        sql: V3,
+    },
+    Migration {
+        version: 4,
+        sql: V4,
+    },
+    Migration {
+        version: 5,
+        sql: V5,
+    },
+    Migration {
+        version: 6,
+        sql: V6,
+    },
+    Migration {
+        version: 7,
+        sql: V7,
+    },
+    Migration {
+        version: 8,
+        sql: V8,
+    },
+    Migration {
+        version: 9,
+        sql: V9,
+    },
 ];
 
 /// 对连接执行 migration（幂等）。
@@ -174,10 +202,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         );",
     )?;
 
-    let current: i32 =
-        conn.query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| {
-            r.get(0)
-        })?;
+    let current: i32 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |r| r.get(0),
+    )?;
 
     for m in MIGRATIONS {
         if m.version > current {

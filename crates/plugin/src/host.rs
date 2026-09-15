@@ -71,8 +71,7 @@ fn hex(bytes: &[u8]) -> String {
 ///
 /// 已确认 `plugins/**` 与 crate 内测试均不使用这些名字；LSP 桩
 /// （`plugins/moonbridge.lua`）本就声明「沙箱中 os/io/loadfile/dofile 不可用」。
-const DANGEROUS_GLOBALS: [&str; 6] =
-    ["os", "io", "loadfile", "dofile", "require", "package"];
+const DANGEROUS_GLOBALS: [&str; 6] = ["os", "io", "loadfile", "dofile", "require", "package"];
 
 /// 协程钩子补丁：把宿主装的指令计数/超时钩子传导到插件新建的线程。
 ///
@@ -143,12 +142,13 @@ pub fn sandbox(lua: &Lua, limits: &SandboxLimits, budget: &Arc<ExecutionBudget>)
         let b = budget.clone();
         lua.create_function(move |_lua, thread: Thread| {
             let b = b.clone();
-            thread.set_hook(HookTriggers::new().every_nth_instruction(step), move |_, _| {
-                match b.charge(step as u64) {
+            thread.set_hook(
+                HookTriggers::new().every_nth_instruction(step),
+                move |_, _| match b.charge(step as u64) {
                     Ok(()) => Ok(VmState::Continue),
                     Err(msg) => Err(mlua::Error::runtime(msg)),
-                }
-            });
+                },
+            );
             Ok(())
         })?
     };
@@ -227,7 +227,10 @@ pub fn register(
             let host_h = host_h.clone();
             async move {
                 let req: HttpRequest = lua.from_value(arg)?;
-                let resp = host_h.http_request(req).await.map_err(mlua::Error::external)?;
+                let resp = host_h
+                    .http_request(req)
+                    .await
+                    .map_err(mlua::Error::external)?;
                 lua.to_value(&resp)
             }
         })?;

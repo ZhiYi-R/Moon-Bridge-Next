@@ -48,7 +48,10 @@ mod tests {
 
     #[async_trait]
     impl HostBridge for MockBridge {
-        async fn http_request(&self, _req: HttpRequest) -> std::result::Result<HttpResponse, String> {
+        async fn http_request(
+            &self,
+            _req: HttpRequest,
+        ) -> std::result::Result<HttpResponse, String> {
             Ok(HttpResponse {
                 status: 200,
                 headers: vec![],
@@ -129,10 +132,7 @@ mod tests {
         };
         let verdict = rt.on_upstream_request_raw(&ctx, &mut msg).await.unwrap();
         assert!(matches!(verdict, RawVerdict::Pass));
-        assert!(msg
-            .headers
-            .iter()
-            .any(|(k, v)| k == "x-custom" && v == "1"));
+        assert!(msg.headers.iter().any(|(k, v)| k == "x-custom" && v == "1"));
         assert_eq!(msg.body.as_json().unwrap()["model"], "rewritten");
     }
 
@@ -263,8 +263,14 @@ mod tests {
 
         // ── raw_rewrite.lua：raw_request + raw_stream 能力 ──
         let script2 = std::fs::read_to_string(dir.join("raw_rewrite.lua")).unwrap();
-        let rt2 = LuaRuntime::new("raw_rewrite", &script2, &json!({}), bridge(), SessionStore::new())
-            .unwrap();
+        let rt2 = LuaRuntime::new(
+            "raw_rewrite",
+            &script2,
+            &json!({}),
+            bridge(),
+            SessionStore::new(),
+        )
+        .unwrap();
         assert!(rt2.manifest.needs_raw_request());
         assert!(rt2.manifest.needs_raw_stream());
 
@@ -713,7 +719,11 @@ mod tests {
         assert_eq!(model_for(&reg, &none).await, "1", "无会话也自成一桶");
 
         reg.forget_session("S1").await;
-        assert_eq!(model_for(&reg, &s1).await, "1", "被 forget 的会话状态应清零");
+        assert_eq!(
+            model_for(&reg, &s1).await,
+            "1",
+            "被 forget 的会话状态应清零"
+        );
         assert_eq!(model_for(&reg, &s2).await, "2", "其它会话不得被波及");
         assert_eq!(model_for(&reg, &none).await, "2", "None 桶不得被波及");
     }

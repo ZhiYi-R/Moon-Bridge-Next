@@ -61,7 +61,14 @@ impl LuaRuntime {
         host: Arc<dyn HostBridge>,
         sessions: SessionStore,
     ) -> Result<Self> {
-        Self::new_with_limits(name, script, config, host, sessions, SandboxLimits::default())
+        Self::new_with_limits(
+            name,
+            script,
+            config,
+            host,
+            sessions,
+            SandboxLimits::default(),
+        )
     }
 
     /// 以指定沙箱配额加载并初始化一个插件运行时。
@@ -194,7 +201,11 @@ impl LuaRuntime {
         let ctx_v = convert::ctx_to_lua(&lua, ctx)?;
         let req_v = lua.to_value(&*req)?;
         let ret: LuaValue = self.call_hook(&lua, f, (ctx_v, req_v.clone())).await?;
-        let source = if matches!(ret, LuaValue::Table(_)) { ret } else { req_v };
+        let source = if matches!(ret, LuaValue::Table(_)) {
+            ret
+        } else {
+            req_v
+        };
         *req = lua.from_value(source)?;
         Ok(())
     }
@@ -222,7 +233,11 @@ impl LuaRuntime {
         let ctx_v = convert::ctx_to_lua(&lua, ctx)?;
         let resp_v = lua.to_value(&*resp)?;
         let ret: LuaValue = self.call_hook(&lua, f, (ctx_v, resp_v.clone())).await?;
-        let source = if matches!(ret, LuaValue::Table(_)) { ret } else { resp_v };
+        let source = if matches!(ret, LuaValue::Table(_)) {
+            ret
+        } else {
+            resp_v
+        };
         *resp = lua.from_value(source)?;
         Ok(())
     }
@@ -343,7 +358,8 @@ impl LuaRuntime {
         ctx: &ReqCtx,
         msg: &mut RawMessage,
     ) -> Result<RawVerdict> {
-        self.call_raw_message("on_client_request_raw", ctx, msg).await
+        self.call_raw_message("on_client_request_raw", ctx, msg)
+            .await
     }
     /// on_upstream_request_raw。
     pub async fn on_upstream_request_raw(
@@ -351,7 +367,8 @@ impl LuaRuntime {
         ctx: &ReqCtx,
         msg: &mut RawMessage,
     ) -> Result<RawVerdict> {
-        self.call_raw_message("on_upstream_request_raw", ctx, msg).await
+        self.call_raw_message("on_upstream_request_raw", ctx, msg)
+            .await
     }
     /// on_upstream_response_raw。
     pub async fn on_upstream_response_raw(
@@ -359,7 +376,8 @@ impl LuaRuntime {
         ctx: &ReqCtx,
         msg: &mut RawMessage,
     ) -> Result<RawVerdict> {
-        self.call_raw_message("on_upstream_response_raw", ctx, msg).await
+        self.call_raw_message("on_upstream_response_raw", ctx, msg)
+            .await
     }
     /// on_client_response_raw。
     pub async fn on_client_response_raw(
@@ -367,7 +385,8 @@ impl LuaRuntime {
         ctx: &ReqCtx,
         msg: &mut RawMessage,
     ) -> Result<RawVerdict> {
-        self.call_raw_message("on_client_response_raw", ctx, msg).await
+        self.call_raw_message("on_client_response_raw", ctx, msg)
+            .await
     }
     /// on_upstream_chunk_raw。
     pub async fn on_upstream_chunk_raw(
@@ -375,7 +394,8 @@ impl LuaRuntime {
         ctx: &ReqCtx,
         chunk: &mut RawChunk,
     ) -> Result<ChunkVerdict> {
-        self.call_raw_chunk("on_upstream_chunk_raw", ctx, chunk).await
+        self.call_raw_chunk("on_upstream_chunk_raw", ctx, chunk)
+            .await
     }
     /// on_client_chunk_raw。
     pub async fn on_client_chunk_raw(

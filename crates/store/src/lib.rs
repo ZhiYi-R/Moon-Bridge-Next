@@ -239,7 +239,9 @@ mod tests {
         })
         .unwrap();
         // 默认继承插件 enabled
-        assert!(db.plugin_enabled_in_scope("demo", None, None, None).unwrap());
+        assert!(db
+            .plugin_enabled_in_scope("demo", None, None, None)
+            .unwrap());
         // model 级覆盖为关闭
         db.upsert_binding(&PluginBinding {
             plugin_name: "demo".into(),
@@ -257,7 +259,8 @@ mod tests {
     #[test]
     fn settings_roundtrip() {
         let db = Database::open_in_memory().unwrap();
-        db.set_setting("listen_addr", &json!("127.0.0.1:38440")).unwrap();
+        db.set_setting("listen_addr", &json!("127.0.0.1:38440"))
+            .unwrap();
         assert_eq!(
             db.get_setting("listen_addr").unwrap(),
             Some(json!("127.0.0.1:38440"))

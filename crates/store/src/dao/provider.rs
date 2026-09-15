@@ -130,7 +130,10 @@ impl Database {
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM providers WHERE key = ?1", params![key])?;
-        tx.execute("DELETE FROM provider_endpoints WHERE provider_key = ?1", params![key])?;
+        tx.execute(
+            "DELETE FROM provider_endpoints WHERE provider_key = ?1",
+            params![key],
+        )?;
         tx.execute("DELETE FROM offers WHERE provider_key = ?1", params![key])?;
         tx.execute("DELETE FROM routes WHERE provider_key = ?1", params![key])?;
         tx.execute(

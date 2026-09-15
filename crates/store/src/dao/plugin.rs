@@ -91,7 +91,10 @@ impl Database {
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM plugins WHERE name = ?1", params![name])?;
-        tx.execute("DELETE FROM plugin_bindings WHERE plugin_name = ?1", params![name])?;
+        tx.execute(
+            "DELETE FROM plugin_bindings WHERE plugin_name = ?1",
+            params![name],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -113,8 +116,9 @@ impl Database {
     /// 列出全部作用域绑定（供网关装配插件门控表）。
     pub fn list_bindings_all(&self) -> Result<Vec<PluginBinding>> {
         let conn = self.conn.lock();
-        let mut stmt = conn
-            .prepare("SELECT plugin_name,scope,scope_key,enabled,config_json FROM plugin_bindings")?;
+        let mut stmt = conn.prepare(
+            "SELECT plugin_name,scope,scope_key,enabled,config_json FROM plugin_bindings",
+        )?;
         let rows = stmt.query_map([], row_to_binding)?;
         let mut out = Vec::new();
         for r in rows {
@@ -160,7 +164,13 @@ impl Database {
              VALUES (?1,?2,?3,?4,?5)
              ON CONFLICT(plugin_name,scope,scope_key) DO UPDATE SET
                 enabled=excluded.enabled, config_json=excluded.config_json",
-            params![b.plugin_name, b.scope, b.scope_key, b.enabled as i32, config],
+            params![
+                b.plugin_name,
+                b.scope,
+                b.scope_key,
+                b.enabled as i32,
+                config
+            ],
         )?;
         Ok(())
     }

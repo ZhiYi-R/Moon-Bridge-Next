@@ -251,7 +251,11 @@ mod tests {
             .into_iter()
             .find(|o| o.model_slug == "m1")
             .unwrap();
-        assert_eq!(o.pricing, Some(catalog_pricing.clone()), "新行应继承同 slug 定价");
+        assert_eq!(
+            o.pricing,
+            Some(catalog_pricing.clone()),
+            "新行应继承同 slug 定价"
+        );
 
         // 既有行显式传 null = 有意清空，不得回填
         db.upsert_offer(&offer("MyProvider", "m1", None)).unwrap();

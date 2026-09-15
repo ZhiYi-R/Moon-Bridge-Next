@@ -34,7 +34,10 @@ pub fn model_delete(state: State<'_, Arc<ManagedState>>, slug: String) -> CmdRes
 
 /// 列出某 provider 提供的模型报价。
 #[tauri::command]
-pub fn offer_list(state: State<'_, Arc<ManagedState>>, provider_key: String) -> CmdResult<Vec<Offer>> {
+pub fn offer_list(
+    state: State<'_, Arc<ManagedState>>,
+    provider_key: String,
+) -> CmdResult<Vec<Offer>> {
     Ok(state.db.list_offers(&provider_key)?)
 }
 

@@ -73,7 +73,9 @@ fn parse_tool_choice(v: &Value) -> Option<ToolChoice> {
         Some("tool") => v
             .get("name")
             .and_then(|n| n.as_str())
-            .map(|n| ToolChoice::Tool { name: n.to_string() }),
+            .map(|n| ToolChoice::Tool {
+                name: n.to_string(),
+            }),
         _ => None,
     }
 }
@@ -95,7 +97,9 @@ impl ClientAdapter for AnthropicAdapter {
 
         // system：字符串或 block 数组（块的 cache_control 记入 meta 位置表）
         match raw.get("system") {
-            Some(Value::String(s)) if !s.is_empty() => req.system.push(ContentBlock::text(s.clone())),
+            Some(Value::String(s)) if !s.is_empty() => {
+                req.system.push(ContentBlock::text(s.clone()))
+            }
             Some(Value::Array(arr)) => {
                 let mut cache = json!({});
                 for b in arr {
@@ -131,7 +135,8 @@ impl ClientAdapter for AnthropicAdapter {
                     ext: Default::default(),
                 };
                 if let Some(obj) = cache.as_object().filter(|o| !o.is_empty()) {
-                    msg.ext.insert(CACHE_EXT_KEY.to_string(), Value::Object(obj.clone()));
+                    msg.ext
+                        .insert(CACHE_EXT_KEY.to_string(), Value::Object(obj.clone()));
                 }
                 req.messages.push(msg);
             }
@@ -145,7 +150,10 @@ impl ClientAdapter for AnthropicAdapter {
                 };
                 let mut tool = Tool {
                     name: name.to_string(),
-                    description: t.get("description").and_then(|v| v.as_str()).map(String::from),
+                    description: t
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
                     input_schema: t
                         .get("input_schema")
                         .cloned()
@@ -187,8 +195,14 @@ impl ClientAdapter for AnthropicAdapter {
             }
         }
 
-        req.max_tokens = raw.get("max_tokens").and_then(|v| v.as_u64()).map(|v| v as u32);
-        req.temperature = raw.get("temperature").and_then(|v| v.as_f64()).map(|v| v as f32);
+        req.max_tokens = raw
+            .get("max_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        req.temperature = raw
+            .get("temperature")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32);
         req.top_p = raw.get("top_p").and_then(|v| v.as_f64()).map(|v| v as f32);
         if let Some(Value::Array(stops)) = raw.get("stop_sequences") {
             req.stop = stops
@@ -203,9 +217,18 @@ impl ClientAdapter for AnthropicAdapter {
         // 整体收进 meta，出站时合并回请求体（网关已解析字段优先）。
         if let Some(obj) = raw.as_object() {
             const KNOWN: &[&str] = &[
-                "model", "system", "messages", "tools", "tool_choice", "thinking",
-                "output_config", "max_tokens", "temperature", "top_p",
-                "stop_sequences", "stream",
+                "model",
+                "system",
+                "messages",
+                "tools",
+                "tool_choice",
+                "thinking",
+                "output_config",
+                "max_tokens",
+                "temperature",
+                "top_p",
+                "stop_sequences",
+                "stream",
             ];
             let extra: serde_json::Map<String, Value> = obj
                 .iter()
@@ -229,7 +252,10 @@ impl ClientAdapter for AnthropicAdapter {
             .iter()
             .filter_map(block_to_anthropic_client)
             .collect();
-        let stop_reason = resp.stop_reason.map(unmap_stop_reason).unwrap_or("end_turn");
+        let stop_reason = resp
+            .stop_reason
+            .map(unmap_stop_reason)
+            .unwrap_or("end_turn");
         Ok(json!({
             "id": resp.id,
             "type": "message",
@@ -272,7 +298,10 @@ mod tests {
         assert_eq!(req.messages.len(), 3);
         assert_eq!(req.messages[0].role, Role::User);
         assert_eq!(req.messages[1].role, Role::Assistant);
-        assert!(matches!(req.messages[2].content[0], ContentBlock::ToolResult { .. }));
+        assert!(matches!(
+            req.messages[2].content[0],
+            ContentBlock::ToolResult { .. }
+        ));
         assert_eq!(req.tools.len(), 1);
         assert_eq!(req.tools[0].name, "get_time");
         assert!(matches!(req.tool_choice, Some(ToolChoice::Auto)));
@@ -287,21 +316,39 @@ mod tests {
         let ctx = ReqCtx::new("r1", Protocol::Anthropic);
 
         // enabled + budget_tokens → 档位逆推 effort
-        let req = adapter.to_core_request(&ctx, json!({
-            "model": "claude", "max_tokens": 16000,
-            "thinking": { "type": "enabled", "budget_tokens": 16384 },
-            "messages": [{ "role": "user", "content": "Hi" }]
-        })).await.unwrap();
-        assert_eq!(req.reasoning.as_ref().and_then(|r| r.effort.as_deref()), Some("high"));
+        let req = adapter
+            .to_core_request(
+                &ctx,
+                json!({
+                    "model": "claude", "max_tokens": 16000,
+                    "thinking": { "type": "enabled", "budget_tokens": 16384 },
+                    "messages": [{ "role": "user", "content": "Hi" }]
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            req.reasoning.as_ref().and_then(|r| r.effort.as_deref()),
+            Some("high")
+        );
 
         // adaptive → output_config.effort 或默认 high
-        let req = adapter.to_core_request(&ctx, json!({
-            "model": "claude", "max_tokens": 16000,
-            "thinking": { "type": "adaptive" },
-            "output_config": { "effort": "low" },
-            "messages": [{ "role": "user", "content": "Hi" }]
-        })).await.unwrap();
-        assert_eq!(req.reasoning.as_ref().and_then(|r| r.effort.as_deref()), Some("low"));
+        let req = adapter
+            .to_core_request(
+                &ctx,
+                json!({
+                    "model": "claude", "max_tokens": 16000,
+                    "thinking": { "type": "adaptive" },
+                    "output_config": { "effort": "low" },
+                    "messages": [{ "role": "user", "content": "Hi" }]
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            req.reasoning.as_ref().and_then(|r| r.effort.as_deref()),
+            Some("low")
+        );
     }
 
     #[tokio::test]

@@ -13,14 +13,20 @@ use axum::routing::post;
 use axum::{Json, Router};
 use moonbridge_core::Protocol;
 use moonbridge_gateway::{bootstrap, dispatch, server, AppState, GatewayConfig};
-use moonbridge_store::{Database, Endpoint, ModelDef, Offer, PluginRecord, Provider, Route, UsageQuery};
+use moonbridge_store::{
+    Database, Endpoint, ModelDef, Offer, PluginRecord, Provider, Route, UsageQuery,
+};
 use serde_json::{json, Value};
 
 /// 起一个 mock Anthropic 上游（`POST /v1/messages`），按请求 `stream` 返回 JSON 或 SSE。
 /// 返回其 base_url。
 async fn spawn_mock_anthropic() -> String {
     async fn messages(Json(body): Json<Value>) -> Response {
-        if body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if body
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             // 标准 Anthropic Messages SSE 事件序列
             let sse = concat!(
                 "event: message_start\n",
@@ -119,7 +125,9 @@ async fn e2e_non_stream_responses_to_anthropic() {
         .expect("dispatch 应成功");
     assert_eq!(resp.status(), 200);
 
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let out: Value = serde_json::from_slice(&bytes).unwrap();
 
     // 客户端收到的是 OpenAI Responses 对象
@@ -168,7 +176,9 @@ async fn e2e_stream_responses_to_anthropic() {
         .expect("dispatch 应成功");
     assert_eq!(resp.status(), 200);
 
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let text = String::from_utf8_lossy(&bytes);
 
     // 客户端收到 SSE，且上游文本增量完整流转
@@ -195,11 +205,11 @@ async fn e2e_stream_responses_to_anthropic() {
         "正常读尽的流应记 ok，实际 {:?}",
         rows[0].status
     );
-    assert!(
-        rows[0].ttft_ms.is_some(),
-        "流式请求必须记录首字延迟 TTFT"
+    assert!(rows[0].ttft_ms.is_some(), "流式请求必须记录首字延迟 TTFT");
+    assert_eq!(
+        rows[0].input_tokens, 10,
+        "流式 usage 应从 MessageDelta 累积"
     );
-    assert_eq!(rows[0].input_tokens, 10, "流式 usage 应从 MessageDelta 累积");
 }
 
 // ============================================================================
@@ -209,7 +219,11 @@ async fn e2e_stream_responses_to_anthropic() {
 /// 起一个 mock OpenAI Chat 上游（`POST /v1/chat/completions`）。
 async fn spawn_mock_openai_chat() -> String {
     async fn chat(Json(body): Json<Value>) -> Response {
-        if body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if body
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             let sse = concat!(
                 "data: {\"id\":\"c1\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
                 "data: {\"id\":\"c1\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"},\"finish_reason\":null}]}\n\n",
@@ -324,7 +338,9 @@ async fn e2e_non_stream_chat_to_chat() {
         .expect("dispatch 应成功");
     assert_eq!(resp.status(), 200);
 
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let out: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(out["object"], "chat.completion");
     assert_eq!(
@@ -352,12 +368,110 @@ async fn e2e_stream_chat_to_chat() {
     let resp = dispatch::handle_request(state, Protocol::OpenAiChat, body, vec![], None)
         .await
         .expect("dispatch 应成功");
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let text = String::from_utf8_lossy(&bytes);
     assert!(text.contains("Hello"), "SSE 应含首段增量: {text}");
     assert!(text.contains("world"), "SSE 应含次段增量: {text}");
     assert!(text.contains("[DONE]"), "Chat SSE 应以 [DONE] 结束: {text}");
     assert_eq!(db.usage_summary().unwrap().requests, 1);
+}
+
+/// 记录上游请求体、并返回「thinking 模式」流式响应（reasoning_content +
+/// tool_calls）的 mock OpenAI Chat 上游。返回 (base_url, 捕获槽)。
+async fn spawn_mock_chat_thinking_capture() -> (String, Arc<std::sync::Mutex<Vec<Value>>>) {
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let cap = captured.clone();
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |Json(body): Json<Value>| {
+            let cap = cap.clone();
+            async move {
+                cap.lock().unwrap().push(body);
+                let sse = concat!(
+                    "data: {\"id\":\"c1\",\"model\":\"ds\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"think hard\"}}]}\n\n",
+                    "data: {\"id\":\"c1\",\"model\":\"ds\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}]}}]}\n\n",
+                    "data: {\"id\":\"c1\",\"model\":\"ds\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20}}\n\n",
+                    "data: [DONE]\n\n",
+                );
+                Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from(sse))
+                    .unwrap()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), captured)
+}
+
+/// 端到端回归：Responses 入口 → Chat thinking 上游的 reasoning_content
+/// 必须经客户端历史回传到上游——
+///   1. 下发给客户端的 reasoning item 必须带 encrypted_content（Codex 系
+///      客户端只回传带凭据的 reasoning item）；
+///   2. 客户端回传 reasoning item 后，出站 assistant+tool_calls 消息必须
+///      携带 reasoning_content（上游 thinking 校验缺失即 400）。
+#[tokio::test]
+async fn e2e_reasoning_content_roundtrips_responses_to_chat() {
+    let (base_url, captured) = spawn_mock_chat_thinking_capture().await;
+    let (state, _db) = setup_with("openai-chat", base_url, "deepseek-x", "test-model").await;
+
+    // 第 1 轮：客户端只发 user，上游返回 reasoning + tool_calls
+    let body = json!({
+        "model": "test-model",
+        "stream": true,
+        "input": [{ "role": "user", "content": [{ "type": "input_text", "text": "run ls" }] }]
+    });
+    let resp =
+        dispatch::handle_request(state.clone(), Protocol::OpenAiResponse, body, vec![], None)
+            .await
+            .expect("dispatch 应成功");
+    assert_eq!(resp.status(), 200);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let sse = String::from_utf8_lossy(&bytes);
+    assert!(
+        sse.contains("\"type\":\"reasoning\"") && sse.contains("encrypted_content"),
+        "reasoning item 必须带 encrypted_content 客户端才会回传: {sse}"
+    );
+
+    // 第 2 轮：客户端原样回传 reasoning item（含 encrypted_content）+
+    // function_call 链——模拟 Codex 系客户端的历史重放
+    let body = json!({
+        "model": "test-model",
+        "stream": true,
+        "input": [
+            { "role": "user", "content": [{ "type": "input_text", "text": "run ls" }] },
+            { "type": "reasoning", "id": "rs_1",
+              "summary": [{ "type": "summary_text", "text": "think hard" }],
+              "encrypted_content": "chat:think hard" },
+            { "type": "function_call", "call_id": "call_1", "name": "Bash",
+              "arguments": "{\"command\":\"ls\"}" },
+            { "type": "function_call_output", "call_id": "call_1", "output": "a.txt" }
+        ]
+    });
+    let resp = dispatch::handle_request(state, Protocol::OpenAiResponse, body, vec![], None)
+        .await
+        .expect("dispatch 应成功");
+    assert_eq!(resp.status(), 200);
+
+    let reqs = captured.lock().unwrap();
+    assert_eq!(reqs.len(), 2);
+    let msgs = reqs[1]["messages"].as_array().unwrap();
+    let assistant = msgs
+        .iter()
+        .find(|m| m["role"] == "assistant" && m.get("tool_calls").is_some())
+        .expect("应有携带 tool_calls 的 assistant 消息");
+    assert_eq!(
+        assistant["reasoning_content"], "think hard",
+        "tool_calls 消息必须携带 reasoning_content（thinking 校验）: {msgs:?}"
+    );
 }
 
 /// 起一个对任意路径/方法都返回指定状态码的 mock 上游（用于故障转移测试）。
@@ -395,7 +509,9 @@ async fn e2e_non_stream_anthropic_entry() {
     let resp = dispatch::handle_request(state, Protocol::Anthropic, body, vec![], None)
         .await
         .expect("dispatch 应成功");
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let out: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(out["type"], "message");
     assert_eq!(out["role"], "assistant");
@@ -420,7 +536,9 @@ async fn e2e_non_stream_chat_to_gemini() {
     let resp = dispatch::handle_request(state, Protocol::OpenAiChat, body, vec![], None)
         .await
         .expect("dispatch 应成功");
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let out: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(out["object"], "chat.completion");
     assert_eq!(
@@ -445,13 +563,21 @@ async fn e2e_stream_anthropic_entry_to_gemini() {
     let resp = dispatch::handle_request(state, Protocol::Anthropic, body, vec![], None)
         .await
         .expect("dispatch 应成功");
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let text = String::from_utf8_lossy(&bytes);
     // Anthropic 入口 SSE：message_start → content_block_delta(text) → message_stop
-    assert!(text.contains("message_start"), "应含 Anthropic 起始事件: {text}");
+    assert!(
+        text.contains("message_start"),
+        "应含 Anthropic 起始事件: {text}"
+    );
     assert!(text.contains("Hello"), "应含首段增量: {text}");
     assert!(text.contains("world"), "应含次段增量: {text}");
-    assert!(text.contains("message_stop"), "应含 Anthropic 结束事件: {text}");
+    assert!(
+        text.contains("message_stop"),
+        "应含 Anthropic 结束事件: {text}"
+    );
     assert_eq!(db.usage_summary().unwrap().requests, 1);
 }
 
@@ -467,10 +593,26 @@ async fn e2e_failover_to_healthy_endpoint() {
         key: "mock".into(),
         endpoints: vec![
             // 连接拒绝（未监听端口）
-            Endpoint { protocol: "anthropic".into(), base_url: "http://127.0.0.1:9".into(), api_key: "sk-first".into() },
-            Endpoint { protocol: "anthropic".into(), base_url: server_500, api_key: "sk-second".into() },
-            Endpoint { protocol: "anthropic".into(), base_url: server_429, api_key: "".into() }, // 空 Key 沿用上一非空
-            Endpoint { protocol: "anthropic".into(), base_url: good, api_key: "sk-good".into() },
+            Endpoint {
+                protocol: "anthropic".into(),
+                base_url: "http://127.0.0.1:9".into(),
+                api_key: "sk-first".into(),
+            },
+            Endpoint {
+                protocol: "anthropic".into(),
+                base_url: server_500,
+                api_key: "sk-second".into(),
+            },
+            Endpoint {
+                protocol: "anthropic".into(),
+                base_url: server_429,
+                api_key: "".into(),
+            }, // 空 Key 沿用上一非空
+            Endpoint {
+                protocol: "anthropic".into(),
+                base_url: good,
+                api_key: "sk-good".into(),
+            },
         ],
         version: Some("2023-06-01".into()),
         user_agent: None,
@@ -499,7 +641,9 @@ async fn e2e_failover_to_healthy_endpoint() {
     let resp = dispatch::handle_request(state, Protocol::Anthropic, body, vec![], None)
         .await
         .expect("故障转移后应成功");
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let out: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
         untag(out["content"][0]["text"].as_str().unwrap()),
@@ -518,8 +662,16 @@ async fn e2e_no_failover_on_client_error() {
     db.upsert_provider(&Provider {
         key: "mock".into(),
         endpoints: vec![
-            Endpoint { protocol: "anthropic".into(), base_url: bad, api_key: "sk-test".into() },
-            Endpoint { protocol: "anthropic".into(), base_url: good, api_key: "sk-test".into() },
+            Endpoint {
+                protocol: "anthropic".into(),
+                base_url: bad,
+                api_key: "sk-test".into(),
+            },
+            Endpoint {
+                protocol: "anthropic".into(),
+                base_url: good,
+                api_key: "sk-test".into(),
+            },
         ],
         version: Some("2023-06-01".into()),
         user_agent: None,
@@ -548,7 +700,10 @@ async fn e2e_no_failover_on_client_error() {
     let err = dispatch::handle_request(state, Protocol::Anthropic, body, vec![], None)
         .await
         .expect_err("401 应直接失败");
-    assert!(matches!(err, moonbridge_gateway::GatewayError::Upstream { status: 401, .. }));
+    assert!(matches!(
+        err,
+        moonbridge_gateway::GatewayError::Upstream { status: 401, .. }
+    ));
     // 仅首端点被尝试（错误请求也落一条 usage，但未发生转移）
     assert_eq!(db.usage_summary().unwrap().requests, 1);
 }
@@ -564,8 +719,16 @@ async fn e2e_failover_across_protocols() {
     db.upsert_provider(&Provider {
         key: "mock".into(),
         endpoints: vec![
-            Endpoint { protocol: "openai-chat".into(), base_url: chat_500, api_key: "sk-a".into() },
-            Endpoint { protocol: "anthropic".into(), base_url: anthropic, api_key: "sk-b".into() },
+            Endpoint {
+                protocol: "openai-chat".into(),
+                base_url: chat_500,
+                api_key: "sk-a".into(),
+            },
+            Endpoint {
+                protocol: "anthropic".into(),
+                base_url: anthropic,
+                api_key: "sk-b".into(),
+            },
         ],
         version: None,
         user_agent: None,
@@ -595,7 +758,9 @@ async fn e2e_failover_across_protocols() {
     let resp = dispatch::handle_request(state, Protocol::Anthropic, body, vec![], None)
         .await
         .expect("跨协议转移后应成功");
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let out: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
         untag(out["content"][0]["text"].as_str().unwrap()),
@@ -698,21 +863,28 @@ async fn e2e_anthropic_max_tokens_uses_model_output_limit() {
     assert_eq!(resp.status(), 200);
     let reqs = captured.lock().unwrap();
     assert_eq!(reqs.len(), 2);
-    assert_eq!(reqs[1]["max_tokens"], 4096, "无元数据时落常量兜底: {}", reqs[1]);
+    assert_eq!(
+        reqs[1]["max_tokens"], 4096,
+        "无元数据时落常量兜底: {}",
+        reqs[1]
+    );
 }
 
 /// 恒返回同一段 SSE 的 mock Anthropic 上游（流式测试用）。
 async fn spawn_mock_sse(sse: String) -> String {
-    let app = Router::new().route(
-        "/v1/messages",
-        post(|axum::extract::State(b): axum::extract::State<String>| async move {
-            Response::builder()
-                .header("content-type", "text/event-stream")
-                .body(Body::from(b))
-                .unwrap()
-        }),
-    )
-    .with_state(sse);
+    let app = Router::new()
+        .route(
+            "/v1/messages",
+            post(
+                |axum::extract::State(b): axum::extract::State<String>| async move {
+                    Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .body(Body::from(b))
+                        .unwrap()
+                },
+            ),
+        )
+        .with_state(sse);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -816,11 +988,11 @@ fn trace_json_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     out
 }
 
-/// 剥去尾随的会话水印（形如 ` [mb:xxxxxx]`），返回正文。
+/// 剥去尾随的旧式会话水印（形如 ` [mb:xxxxxx]`），返回正文。
 ///
-/// 水印默认开启，会附在所有纯文本响应末尾。既有 e2e 断言关心的是**正文是否完好**，
-/// 若把 marker 写死进断言，等于让每个测试都依赖一个配置默认值；改为剥除后比较，
-/// 水印的存在性与稳定性由专门的 `e2e_session_marker_*` 测试守。
+/// 水印已迁入推理块首部、正文不再有 marker；本函数仅作旧式水印的防御性剥除，
+/// 让断言不依赖「响应一定无文本水印」这一配置细节。水印的存在性与稳定性由
+/// 专门的 `e2e_session_marker_*` 测试守。
 fn untag(text: &str) -> &str {
     match text.rfind(" [mb:") {
         // `" [mb:"` 5 字符 + 6 位 tag + `]` = 12
@@ -874,7 +1046,11 @@ async fn e2e_filter_content_drops_blocks() {
         "tool_use 块应被 filter_content 丢弃: {text}"
     );
     assert_eq!(db.usage_summary().unwrap().requests, 1);
-    assert_eq!(trace_json_files(&trace_dir).len(), 1, "正常请求应留下一份 trace");
+    assert_eq!(
+        trace_json_files(&trace_dir).len(),
+        1,
+        "正常请求应留下一份 trace"
+    );
     let _ = std::fs::remove_dir_all(&trace_dir);
 }
 
@@ -1208,7 +1384,7 @@ async fn e2e_abort_still_records_usage_and_trace() {
 
 // ── 会话水印（session marker）──────────────────────────────────────────
 
-/// 水印测试装配：固定 JSON mock 上游 + trace 落盘 + 可翻 `session_marker`。
+/// 水印测试装配：固定 JSON mock 上游 + trace 落盘 + 可翻 `session_marker`/表深。
 ///
 /// 不复用 `setup_with`：它固定 `GatewayConfig::default()`。这里需要 trace——它是唯一
 /// 能同时看到「客户端送来的报文」(`clientRequest`) 与「转发上游的报文」
@@ -1216,6 +1392,7 @@ async fn e2e_abort_still_records_usage_and_trace() {
 async fn setup_state_marker(
     tag: &str,
     session_marker: bool,
+    session_table_depth: usize,
     mock_body: Value,
 ) -> (Arc<AppState>, Arc<Database>, std::path::PathBuf) {
     let base_url = spawn_mock_returning(mock_body).await;
@@ -1248,10 +1425,24 @@ async fn setup_state_marker(
     let cfg = GatewayConfig {
         trace_dir: Some(trace_dir.to_string_lossy().to_string()),
         session_marker,
+        session_table_depth,
         ..GatewayConfig::default()
     };
     let state = bootstrap(cfg, db.clone()).expect("bootstrap 应成功");
     (state, db, trace_dir)
+}
+
+/// 带 thinking 块的 Anthropic 非流式响应——CoT 水印的载体（无推理块则不打标）。
+fn thinking_mock_body() -> Value {
+    json!({
+        "id": "msg_1", "model": "claude-x", "role": "assistant",
+        "content": [
+            { "type": "thinking", "thinking": "hmm", "signature": "sig_mock" },
+            { "type": "text", "text": "Hello from mock" }
+        ],
+        "stop_reason": "end_turn",
+        "usage": { "input_tokens": 10, "output_tokens": 5 }
+    })
 }
 
 /// 发一次非流式 Anthropic 请求，返回客户端收到的完整响应报文。
@@ -1259,30 +1450,27 @@ async fn post_anthropic(state: Arc<AppState>, body: Value, session_id: Option<St
     let resp = dispatch::handle_request(state, Protocol::Anthropic, body, vec![], session_id)
         .await
         .expect("dispatch 应成功");
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     serde_json::from_slice(&bytes).unwrap()
 }
 
-/// 取文本尾随水印里的 tag（`"… [mb:xxxxxx]"`）；无水印或形态不合法返回 `None`。
-fn tag_of(text: &str) -> Option<String> {
-    let i = text.rfind(" [mb:")?;
-    // `" [mb:"` 5 字符 + 6 位 tag + `]` = 12
-    if !text.ends_with(']') || text.len() - i != 12 {
-        return None;
-    }
-    let t = &text[i + 5..i + 11];
-    t.bytes()
-        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-        .then(|| t.to_string())
+/// 取 thinking 明文首部的水印载荷（`" [mb:<载荷>]…"`）；无水印或形态不合法返回 `None`。
+fn tag_of(thinking: &str) -> Option<String> {
+    let inner = thinking.strip_prefix(' ')?.strip_prefix("[mb:")?;
+    let end = inner.find(']')?;
+    let p = &inner[..end];
+    (p.len() == 36 || p.len() == 6).then(|| p.to_string())
 }
 
-/// 从 SSE 文本里取水印 tag（流式水印独占一个块，增量文本就是 marker 本身、无前置空格）。
+/// 从 SSE 文本里取首个 `[mb:<载荷>]`（marker 以推理明文增量下发、位于 thinking 首部）。
 fn sse_tag(sse: &str) -> Option<String> {
-    let i = sse.rfind("[mb:")?;
-    let t = sse.get(i + 4..i + 10)?;
-    (sse.as_bytes().get(i + 10) == Some(&b']')
-        && t.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
-    .then(|| t.to_string())
+    let i = sse.find("[mb:")?;
+    let rest = &sse[i + 4..];
+    let end = rest.find(']')?;
+    let p = &rest[..end];
+    (p.len() == 36 || p.len() == 6).then(|| p.to_string())
 }
 
 /// 读取目录下全部 trace 文件（顺序不保证，断言须与顺序无关）。
@@ -1293,95 +1481,174 @@ fn traces(dir: &std::path::Path) -> Vec<Value> {
         .collect()
 }
 
+/// thinking + signature_delta + text 的 Anthropic SSE 序列（CoT 水印的流式载体）。
+fn sse_thinking_then_text() -> String {
+    concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_s\",\"model\":\"claude-x\",\"usage\":{\"input_tokens\":4,\"output_tokens\":0}}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"hmm\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_mock\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    )
+    .to_string()
+}
+
+/// thinking + signature_delta + tool_use 的 Anthropic SSE 序列（工具轮的 CoT 水印）。
+fn sse_thinking_then_tool_use() -> String {
+    concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_s\",\"model\":\"claude-x\",\"usage\":{\"input_tokens\":4,\"output_tokens\":0}}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"hmm\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_mock\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tu_1\",\"name\":\"search\",\"input\":{}}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"q\\\":\\\"x\\\"}\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":3}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    )
+    .to_string()
+}
+
+/// 逐帧解析 Anthropic SSE（不依赖 serde 键序）。
+fn anthropic_frames(sse: &str) -> Vec<Value> {
+    sse.lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
+        .collect()
+}
+
+/// 取 index 块的全部 thinking_delta 明文（按出现顺序）。
+fn thinking_deltas(frames: &[Value], index: u64) -> Vec<String> {
+    frames
+        .iter()
+        .filter(|f| {
+            f["type"] == "content_block_delta"
+                && f["index"].as_u64() == Some(index)
+                && f["delta"]["type"] == "thinking_delta"
+        })
+        .map(|f| f["delta"]["thinking"].as_str().unwrap().to_string())
+        .collect()
+}
+
 #[tokio::test]
 async fn e2e_session_marker_round_trips_and_never_reaches_upstream() {
-    let (state, _db, trace_dir) = setup_state_marker(
-        "roundtrip",
-        true,
-        json!({
-            "id": "msg_1", "model": "claude-x", "role": "assistant",
-            "content": [{ "type": "text", "text": "Hello from mock" }],
-            "stop_reason": "end_turn",
-            "usage": { "input_tokens": 10, "output_tokens": 5 }
-        }),
-    )
-    .await;
+    let (state, _db, trace_dir) =
+        setup_state_marker("roundtrip", true, 64, thinking_mock_body()).await;
 
-    // 第 1 轮：请求不带 marker ⇒ 新分配会话，纯文本响应尾随水印
+    // 第 1 轮：请求不带 marker ⇒ 新分配会话；水印嵌进 thinking 明文首部，
+    // 用户可见正文不携带任何 marker。
     let first = json!({
         "model": "test-model", "max_tokens": 64,
         "messages": [{ "role": "user", "content": "Hi" }], "stream": false
     });
     let out1 = post_anthropic(state.clone(), first, None).await;
-    let text1 = out1["content"][0]["text"].as_str().unwrap().to_string();
-    let tag1 = tag_of(&text1).expect("首轮纯文本响应应带水印");
-    assert_eq!(untag(&text1), "Hello from mock", "水印不得损伤正文");
+    assert_eq!(out1["content"][0]["type"], "thinking");
+    let think1 = out1["content"][0]["thinking"].as_str().unwrap().to_string();
+    let tag1 = tag_of(&think1).expect("首轮 thinking 响应应带水印");
+    assert_eq!(tag1.len(), 36, "自分配会话的 marker 载荷是 uuid: {tag1}");
+    assert!(think1.ends_with("hmm"), "水印不得损伤推理原文: {think1}");
+    assert_eq!(out1["content"][1]["text"], "Hello from mock", "正文块完好");
+    assert!(
+        !out1["content"][1].to_string().contains("mb:"),
+        "用户可见正文不得出现 marker: {}",
+        out1["content"][1]
+    );
 
-    // 第 2 轮：客户端把整段历史原样带回（含上一轮的水印）⇒ 应解析回同一会话
+    // 第 2 轮：客户端把整段历史原样带回（thinking 块含水印 + signature）⇒ 同一会话
     let second = json!({
         "model": "test-model", "max_tokens": 64,
         "messages": [
             { "role": "user", "content": "Hi" },
-            { "role": "assistant", "content": [{ "type": "text", "text": text1 }] },
+            { "role": "assistant", "content": out1["content"].clone() },
             { "role": "user", "content": "Again" }
         ],
         "stream": false
     });
     let out2 = post_anthropic(state.clone(), second, None).await;
-    let text2 = out2["content"][0]["text"].as_str().unwrap().to_string();
+    let think2 = out2["content"][0]["thinking"].as_str().unwrap();
     assert_eq!(
-        tag_of(&text2).as_deref(),
+        tag_of(think2).as_deref(),
         Some(tag1.as_str()),
-        "同一会话应复用同一 tag，正文: {text2}"
+        "同一会话应复用同一 marker 载荷: {think2}"
     );
 
-    // 第 3 轮：带回一个合法但不在活跃表里的 tag（模拟被淘汰 / 网关重启）⇒ 另开会话
+    // 第 3 轮：带回一个合法但不在表里的短 tag（陈旧外部 tag / 跨版本历史）⇒
+    // 载荷就地成确定性身份 `mb-{tag}`，且 marker 原样回发、形态恒定
     let third = json!({
         "model": "test-model", "max_tokens": 64,
         "messages": [
             { "role": "user", "content": "Hi" },
-            { "role": "assistant", "content": [{ "type": "text", "text": "old [mb:abcdef]" }] },
+            { "role": "assistant", "content": [
+                { "type": "thinking", "thinking": " [mb:abcdef]stale", "signature": "sig_old" },
+                { "type": "text", "text": "old" }
+            ] },
             { "role": "user", "content": "Fresh" }
         ],
         "stream": false
     });
     let out3 = post_anthropic(state, third, None).await;
-    let text3 = out3["content"][0]["text"].as_str().unwrap().to_string();
-    let tag3 = tag_of(&text3).expect("陈旧 tag 应改派新会话并继续打标");
-    assert_ne!(tag3, tag1, "表里没有的 tag 不该被认作已有会话");
+    let think3 = out3["content"][0]["thinking"].as_str().unwrap();
+    assert_eq!(
+        tag_of(think3).as_deref(),
+        Some("abcdef"),
+        "陈旧短 tag 应原样回发、marker 形态恒定: {think3}"
+    );
 
     let tr = traces(&trace_dir);
     assert_eq!(tr.len(), 3, "三问各留一份 trace");
-    let sids: Vec<&str> = tr
+    // 按各自的水印定位 trace，不依赖落盘顺序
+    let sid_of = |pat: &str| {
+        tr.iter()
+            .find(|t| t["clientRequest"].to_string().contains(pat))
+            .unwrap_or_else(|| panic!("应有含 {pat} 的入站 trace"))
+            .pointer("/sessionId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let sid1 = tr
         .iter()
-        .map(|t| t["sessionId"].as_str().unwrap_or(""))
-        .collect();
-    assert!(!sids.iter().any(|s| s.is_empty()), "水印生效时 session 不得为空");
-    assert!(
-        sids.iter().all(|s| s.len() == 36),
-        "内部 session id 应仍是完整 uuid（marker 只是短键）: {sids:?}"
-    );
-    let mut uniq: Vec<(&&str, usize)> = sids
-        .iter()
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .map(|s| (s, sids.iter().filter(|x| *x == s).count()))
-        .collect();
-    uniq.sort_by_key(|(s, _)| *s);
-    assert_eq!(uniq.len(), 2, "前两问同会话 + 第三问新会话 ⇒ 恰 2 个 session");
-    assert!(
-        uniq.iter().any(|(_, n)| *n == 2) && uniq.iter().any(|(_, n)| *n == 1),
-        "应为 2+1 分布: {uniq:?}"
-    );
+        .find(|t| !t["clientRequest"].to_string().contains("[mb:"))
+        .and_then(|t| t["sessionId"].as_str())
+        .unwrap_or("")
+        .to_string();
+    let sid2 = sid_of(&format!("[mb:{tag1}]"));
+    let sid3 = sid_of("[mb:abcdef]");
+    assert!(!sid1.is_empty(), "水印生效时 session 不得为空");
+    assert_eq!(sid1, sid2, "前两问应同会话（marker 载荷即身份）");
+    assert_eq!(sid2, tag1, "uuid 载荷的 session id 就是载荷本身");
+    assert_eq!(sid3, "mb-abcdef", "陈旧短 tag 合成确定性身份");
 
     // 核心不变量：marker 只活在客户端存档里，转发上游的报文必须干净
     for t in &tr {
         let up = t["upstreamRequest"]["body"].to_string();
         assert!(!up.contains("mb:"), "转发上游的报文不得含水印: {up}");
-        assert!(
-            !up.contains("Hello from mock ["),
-            "历史正文可保留，但不得带上水印: {up}"
-        );
     }
     // 带着 marker 进来的那两问，trace 要如实记录客户端原文
     let with_marker = tr
@@ -1389,17 +1656,24 @@ async fn e2e_session_marker_round_trips_and_never_reaches_upstream() {
         .filter(|t| t["clientRequest"].to_string().contains("[mb:"))
         .count();
     assert_eq!(
-        with_marker,
-        2,
+        with_marker, 2,
         "第 2、3 问的入站报文应照实含 marker（trace 记的是客户端原样）"
     );
 
-    // 逐问确认「正文照送、水印剥净」——按各自的水印定位 trace，不依赖落盘顺序
+    // 逐问确认「推理原文还原、水印剥净」
     let t2 = tr
         .iter()
-        .find(|t| t["clientRequest"].to_string().contains(&format!("[mb:{tag1}]")))
+        .find(|t| {
+            t["clientRequest"]
+                .to_string()
+                .contains(&format!("[mb:{tag1}]"))
+        })
         .expect("第 2 问的入站报文应带首轮水印");
     let up2 = t2["upstreamRequest"]["body"].to_string();
+    assert!(
+        up2.contains("hmm"),
+        "剥水印后 thinking 原文应还原上行: {up2}"
+    );
     assert!(
         up2.contains("Hello from mock"),
         "剥水印不得连带剥掉历史正文: {up2}"
@@ -1411,17 +1685,117 @@ async fn e2e_session_marker_round_trips_and_never_reaches_upstream() {
         .find(|t| t["clientRequest"].to_string().contains("[mb:abcdef]"))
         .expect("第 3 问带回的陈旧水印也要被认出并剥除");
     let up3 = t3["upstreamRequest"]["body"].to_string();
-    assert!(up3.contains("old"), "陈旧 marker 的宿主正文应保留: {up3}");
+    assert!(up3.contains("stale"), "陈旧 marker 的宿主推理应保留: {up3}");
     assert!(!up3.contains("mb:"), "第 3 问转发上游须干净: {up3}");
     let _ = std::fs::remove_dir_all(&trace_dir);
 }
 
-/// 工具调用轮次不打标（用户要求：只标非 tool 调用的输出文本）。
+/// 活跃表淘汰/进程重启不再改判会话身份：uuid 载荷自带身份，带回即还原——
+/// 这正是长对话中 `x-opencode-session` 等下游亲和头不再漂移的保证。
 #[tokio::test]
-async fn e2e_session_marker_absent_on_tool_call_turns() {
+async fn e2e_session_marker_identity_survives_table_eviction() {
+    let (state, _db, trace_dir) = setup_state_marker("evict", true, 1, thinking_mock_body()).await;
+
+    let mk = |who: &str| {
+        json!({
+            "model": "test-model", "max_tokens": 64,
+            "messages": [{ "role": "user", "content": who }], "stream": false
+        })
+    };
+    // 第 1 轮：新会话 u1；第 2 轮：另一新会话 u2 —— 表深 1 把 u1 挤出
+    let out1 = post_anthropic(state.clone(), mk("a"), None).await;
+    let u1 = tag_of(out1["content"][0]["thinking"].as_str().unwrap()).expect("首轮应打标");
+    let out2 = post_anthropic(state.clone(), mk("b"), None).await;
+    let u2 = tag_of(out2["content"][0]["thinking"].as_str().unwrap()).expect("第二轮应打标");
+    assert_ne!(u1, u2, "两次新分配应是不同会话");
+
+    // 第 3 轮：带回 u1 的 marker（u1 已被挤出表）⇒ 仍落 u1，而非另派新会话
+    let third = json!({
+        "model": "test-model", "max_tokens": 64,
+        "messages": [
+            { "role": "user", "content": "a" },
+            { "role": "assistant", "content": out1["content"].clone() },
+            { "role": "user", "content": "back" }
+        ],
+        "stream": false
+    });
+    let out3 = post_anthropic(state, third, None).await;
+    assert_eq!(
+        tag_of(out3["content"][0]["thinking"].as_str().unwrap()).as_deref(),
+        Some(u1.as_str()),
+        "淘汰后带回同一 marker 仍须复用同一载荷"
+    );
+
+    let tr = traces(&trace_dir);
+    let t3 = tr
+        .iter()
+        .find(|t| {
+            t["clientRequest"]
+                .to_string()
+                .contains(&format!("[mb:{u1}]"))
+        })
+        .expect("第 3 问的入站报文应带 u1 水印");
+    assert_eq!(
+        t3["sessionId"].as_str().unwrap(),
+        u1,
+        "淘汰后带回同一 marker 仍须同一会话身份"
+    );
+    let _ = std::fs::remove_dir_all(&trace_dir);
+}
+
+/// 新方案核心：tool_use 轮也能打标——marker 嵌推理块首部，与工具调用共存。
+#[tokio::test]
+async fn e2e_session_marker_tags_tool_call_round_via_reasoning() {
     let (state, _db, trace_dir) = setup_state_marker(
         "toolcall",
         true,
+        64,
+        json!({
+            "id": "msg_t", "model": "claude-x", "role": "assistant",
+            "content": [
+                { "type": "thinking", "thinking": "hmm", "signature": "sig_t" },
+                { "type": "text", "text": "sure" },
+                { "type": "tool_use", "id": "tu_1", "name": "search", "input": { "q": "x" } }
+            ],
+            "stop_reason": "tool_use",
+            "usage": { "input_tokens": 7, "output_tokens": 3 }
+        }),
+    )
+    .await;
+
+    let body = json!({
+        "model": "test-model", "max_tokens": 64,
+        "messages": [{ "role": "user", "content": "Hi" }], "stream": false
+    });
+    let out = post_anthropic(state, body, None).await;
+    let tag = tag_of(out["content"][0]["thinking"].as_str().unwrap())
+        .expect("tool_use 轮的 thinking 也应打标");
+    assert_eq!(tag.len(), 36);
+    assert_eq!(out["content"][1]["text"], "sure", "正文块完好");
+    assert_eq!(out["content"][2]["type"], "tool_use", "工具块完好");
+    assert!(
+        !out["content"][1].to_string().contains("mb:")
+            && !out["content"][2].to_string().contains("mb:"),
+        "正文与工具块不得出现 marker"
+    );
+    let tr = traces(&trace_dir);
+    assert_eq!(tr.len(), 1);
+    assert_eq!(
+        tr[0]["sessionId"].as_str().unwrap(),
+        tag,
+        "会话 id 即 marker 载荷"
+    );
+    let _ = std::fs::remove_dir_all(&trace_dir);
+}
+
+/// 纯 CoT 方案对照：无推理块的轮次不打标——不向正文注水、不凭空造块；
+/// 但会话照常解析（session id 仍在），身份顺延到下一个含推理块的响应。
+#[tokio::test]
+async fn e2e_session_marker_absent_without_reasoning() {
+    let (state, _db, trace_dir) = setup_state_marker(
+        "noreason",
+        true,
+        64,
         json!({
             "id": "msg_t", "model": "claude-x", "role": "assistant",
             "content": [
@@ -1440,25 +1814,28 @@ async fn e2e_session_marker_absent_on_tool_call_turns() {
     });
     let out = post_anthropic(state, body, None).await;
     let raw = out.to_string();
-    assert!(!raw.contains("mb:"), "含 tool_use 的响应不得打标: {raw}");
+    assert!(!raw.contains("mb:"), "无推理块的响应不得打标: {raw}");
     assert_eq!(out["content"][0]["text"], "sure", "正文块应完好");
     assert_eq!(out["content"][1]["type"], "tool_use", "工具块应完好");
-    // 会话仍要解析（只是这一轮不回水印），否则 trace 目录又退回 _no_session
     let tr = traces(&trace_dir);
     assert_eq!(tr.len(), 1);
-    assert_ne!(tr[0]["sessionId"], Value::Null, "工具轮也要有 session id");
+    assert_ne!(tr[0]["sessionId"], Value::Null, "无水印轮也要有 session id");
     let _ = std::fs::remove_dir_all(&trace_dir);
 }
 
-/// 关掉水印：不再打标，但**入站 marker 照剥**——客户端可能带着开启期间留下的历史。
+/// 关掉水印：不再嵌入，但**入站 marker 照剥**——客户端可能带着开启期间留下的历史。
 #[tokio::test]
 async fn e2e_session_marker_off_still_strips_inbound() {
     let (state, _db, trace_dir) = setup_state_marker(
         "off",
         false,
+        64,
         json!({
             "id": "msg_1", "model": "claude-x", "role": "assistant",
-            "content": [{ "type": "text", "text": "Hello from mock" }],
+            "content": [
+                { "type": "thinking", "thinking": "hmm", "signature": "sig_mock" },
+                { "type": "text", "text": "Hello from mock" }
+            ],
             "stop_reason": "end_turn",
             "usage": { "input_tokens": 10, "output_tokens": 5 }
         }),
@@ -1469,21 +1846,30 @@ async fn e2e_session_marker_off_still_strips_inbound() {
         "model": "test-model", "max_tokens": 64,
         "messages": [
             { "role": "user", "content": "Hi" },
-            { "role": "assistant", "content": [{ "type": "text", "text": "Hello from mock [mb:12ab34]" }] },
+            // 旧式正文尾部 marker 与新版 CoT 首部 marker 都要剥
+            { "role": "assistant", "content": [
+                { "type": "thinking", "thinking": " [mb:998877]old think", "signature": "sig_old" },
+                { "type": "text", "text": "Hello from mock [mb:12ab34]" }
+            ] },
             { "role": "user", "content": "Again" }
         ],
         "stream": false
     });
     let out = post_anthropic(state, body, None).await;
-    let text = out["content"][0]["text"].as_str().unwrap();
-    assert_eq!(text, "Hello from mock", "关闭水印时不得追加");
-    assert_eq!(untag(text), text, "确认响应确实没有水印");
+    assert!(
+        !out.to_string().contains("mb:"),
+        "关闭水印时不得嵌入: {out}"
+    );
 
     let tr = traces(&trace_dir);
     assert_eq!(tr.len(), 1);
     let up = tr[0]["upstreamRequest"]["body"].to_string();
-    assert!(!up.contains("mb:"), "即使关闭水印，入站 marker 仍须剥净: {up}");
+    assert!(
+        !up.contains("mb:"),
+        "即使关闭水印，入站 marker 仍须剥净: {up}"
+    );
     assert!(up.contains("Hello from mock"), "剥水印不得剥掉历史正文");
+    assert!(up.contains("old think"), "剥水印不得剥掉推理原文");
     assert!(tr[0]["clientRequest"].to_string().contains("[mb:12ab34]"));
     assert_eq!(
         tr[0]["sessionId"],
@@ -1496,17 +1882,8 @@ async fn e2e_session_marker_off_still_strips_inbound() {
 /// 外部身份（body `session_id` / 头）优先于 marker：同一外部 id 必须稳定落同一会话。
 #[tokio::test]
 async fn e2e_external_session_id_wins_over_marker() {
-    let (state, _db, trace_dir) = setup_state_marker(
-        "external",
-        true,
-        json!({
-            "id": "msg_1", "model": "claude-x", "role": "assistant",
-            "content": [{ "type": "text", "text": "Hello from mock" }],
-            "stop_reason": "end_turn",
-            "usage": { "input_tokens": 10, "output_tokens": 5 }
-        }),
-    )
-    .await;
+    let (state, _db, trace_dir) =
+        setup_state_marker("external", true, 64, thinking_mock_body()).await;
 
     let mk = |who: &str| {
         json!({
@@ -1514,13 +1891,14 @@ async fn e2e_external_session_id_wins_over_marker() {
             "messages": [{ "role": "user", "content": who }], "stream": false
         })
     };
-    // 外部 id 可以不是 uuid：tag 必须是定长合法 hex，否则下一轮剥不掉、逐轮累积
+    // 外部 id 可以不是 uuid：marker 载荷是定长 6-hex 短 tag，经活跃表还原外部 id
     let out1 = post_anthropic(state.clone(), mk("a"), Some("ext-sess-1".into())).await;
-    let text1 = out1["content"][0]["text"].as_str().unwrap().to_string();
-    let tag1 = tag_of(&text1).expect("外部会话也要能回水印");
+    let think1 = out1["content"][0]["thinking"].as_str().unwrap().to_string();
+    let tag1 = tag_of(&think1).expect("外部会话也要能回水印");
+    assert_eq!(tag1.len(), 6, "外部身份的载荷应是短 tag: {tag1}");
     let out2 = post_anthropic(state, mk("b"), Some("ext-sess-1".into())).await;
     assert_eq!(
-        tag_of(out2["content"][0]["text"].as_str().unwrap()).as_deref(),
+        tag_of(out2["content"][0]["thinking"].as_str().unwrap()).as_deref(),
         Some(tag1.as_str()),
         "同一外部 id 应稳定映射同一 tag"
     );
@@ -1541,10 +1919,11 @@ async fn e2e_external_session_id_wins_over_marker() {
     let _ = std::fs::remove_dir_all(&trace_dir);
 }
 
-/// 流式：水印是一段**独立文本块**，排在正文块之后、`message_stop` 之前。
+/// 流式：水印嵌进首个推理块的**明文首部**——首个 thinking_delta 即 marker，
+/// 不新占块、不动块序，signature_delta 照常随行。
 #[tokio::test]
-async fn e2e_session_marker_stream_appends_own_text_block() {
-    let base_url = spawn_mock_anthropic().await; // 其流式响应是纯文本
+async fn e2e_session_marker_stream_embeds_in_thinking_head() {
+    let base_url = spawn_mock_sse(sse_thinking_then_text()).await;
     let (state, _db) = setup_with("anthropic", base_url, "claude-x", "test-model").await;
 
     let body = json!({
@@ -1554,64 +1933,54 @@ async fn e2e_session_marker_stream_appends_own_text_block() {
     let resp = dispatch::handle_request(state, Protocol::Anthropic, body, vec![], None)
         .await
         .expect("dispatch 应成功");
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let sse = String::from_utf8_lossy(&bytes).to_string();
 
-    assert!(sse.contains("Hello") && sse.contains("world"), "正文增量不受影响: {sse}");
-    let tag = sse_tag(&sse).expect("纯文本流应带水印");
+    assert!(sse.contains("Hello"), "正文增量不受影响: {sse}");
+    let tag = sse_tag(&sse).expect("含 thinking 的流应带水印: {sse}");
+    assert_eq!(tag.len(), 36);
 
-    // 逐帧解析后再断言：不依赖 serde 的键序，只依赖字段语义。
-    let frames: Vec<Value> = sse
-        .lines()
-        .filter_map(|l| l.strip_prefix("data:"))
-        .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
-        .collect();
+    let frames = anthropic_frames(&sse);
+    let td = thinking_deltas(&frames, 0);
+    assert_eq!(
+        td.first().map(String::as_str),
+        Some(format!(" [mb:{tag}]").as_str()),
+        "marker 应是 thinking 块的首部增量: {td:?}"
+    );
+    assert_eq!(
+        td.get(1).map(String::as_str),
+        Some("hmm"),
+        "上游推理原文随行其后: {td:?}"
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|f| f["delta"]["type"] == "signature_delta"),
+        "signature_delta 应照常随行: {sse}"
+    );
+    // 不新增独立 marker 块：块序号只有 0（thinking）与 1（text）
     let starts: Vec<u64> = frames
         .iter()
         .filter(|f| f["type"] == "content_block_start")
         .map(|f| f["index"].as_u64().unwrap())
         .collect();
-    assert_eq!(starts, vec![0, 1], "水印应自成一块、排在正文块之后: {sse}");
-    let stops: Vec<u64> = frames
-        .iter()
-        .filter(|f| f["type"] == "content_block_stop")
-        .map(|f| f["index"].as_u64().unwrap())
-        .collect();
-    assert_eq!(
-        stops,
-        vec![0, 1],
-        "marker 块的 start/stop 必须配对，否则客户端块状态机卡死"
-    );
-    assert!(
-        frames.iter().any(|f| {
-            f["type"] == "content_block_start"
-                && f["index"] == 1
-                && f["content_block"]["type"] == "text"
-        }),
-        "marker 块应是 text 块: {sse}"
-    );
-    assert!(
-        frames.iter().any(|f| {
-            f["type"] == "content_block_delta"
-                && f["index"] == 1
-                && f["delta"]["text"] == format!("[mb:{tag}]")
-        }),
-        "marker 增量应只含完整水印: {sse}"
-    );
+    assert_eq!(starts, vec![0, 1], "marker 不得自成一块: {sse}");
     assert_eq!(
         frames.last().and_then(|f| f["type"].as_str()),
         Some("message_stop"),
-        "水印必须插在 message_stop 之前、且不成为末帧: {sse}"
+        "末帧仍是 message_stop: {sse}"
     );
 }
 
-/// 流式跨协议回归：OpenAI Chat 系上游不为正文发 `BlockStart`（content 是裸
-/// BlockDelta）。旧水印判定只认 `BlockStart(Text)` ⇒ 这类流永不打标，客户端
-/// transcript 里没有水印可带回，每轮都被判成新会话（trace 侧 sessionId 逐轮漂移）。
+/// 流式跨协议回归：Chat 上游（reasoning_content 裸增量，无独立 BlockStart
+/// 源自上游协议）× Anthropic 入口——且本轮含 tool_calls。marker 仍落在
+/// thinking 首部：CoT 载体下工具轮照常打标。
 #[tokio::test]
-async fn e2e_session_marker_stream_chat_upstream_no_block_start() {
-    let base_url = spawn_mock_openai_chat().await;
-    let (state, _db) = setup_with("openai-chat", base_url, "gpt-4o", "test-model").await;
+async fn e2e_session_marker_stream_chat_upstream_reasoning_head() {
+    let (base_url, _captured) = spawn_mock_chat_thinking_capture().await;
+    let (state, _db) = setup_with("openai-chat", base_url, "deepseek-x", "test-model").await;
 
     let body = json!({
         "model": "test-model", "max_tokens": 64,
@@ -1620,99 +1989,86 @@ async fn e2e_session_marker_stream_chat_upstream_no_block_start() {
     let resp = dispatch::handle_request(state, Protocol::Anthropic, body, vec![], None)
         .await
         .expect("dispatch 应成功");
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let sse = String::from_utf8_lossy(&bytes).to_string();
 
-    assert!(sse.contains("Hello"), "正文增量不受影响: {sse}");
-    let tag = sse_tag(&sse).expect("chat 上游的纯文本流也应带水印: {sse}");
-
-    // 逐帧解析：正文块 0 有头也有尾（上游 finish 时 decode 统一补收尾），
-    // marker 自成一块且 start/stop 配对
-    let frames: Vec<Value> = sse
-        .lines()
-        .filter_map(|l| l.strip_prefix("data:"))
-        .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
-        .collect();
-    let starts: Vec<u64> = frames
-        .iter()
-        .filter(|f| f["type"] == "content_block_start")
-        .map(|f| f["index"].as_u64().unwrap())
-        .collect();
-    assert_eq!(starts, vec![0, 1], "正文块 0 应有块头、marker 应为块 1: {sse}");
-    let stops: Vec<u64> = frames
-        .iter()
-        .filter(|f| f["type"] == "content_block_stop")
-        .map(|f| f["index"].as_u64().unwrap())
-        .collect();
-    assert_eq!(stops, vec![0, 1], "正文与 marker 块的 start/stop 都应配对: {sse}");
-    assert!(
-        frames.iter().any(|f| {
-            f["type"] == "content_block_delta"
-                && f["index"] == 1
-                && f["delta"]["text"] == format!("[mb:{tag}]")
-        }),
-        "marker 增量应只含完整水印: {sse}"
-    );
+    let tag = sse_tag(&sse).expect("chat 上游的 reasoning 流也应带水印: {sse}");
+    let frames = anthropic_frames(&sse);
+    let td = thinking_deltas(&frames, 0);
     assert_eq!(
-        frames.last().and_then(|f| f["type"].as_str()),
-        Some("message_stop"),
-        "水印必须插在 message_stop 之前: {sse}"
+        td.first().map(String::as_str),
+        Some(format!(" [mb:{tag}]").as_str()),
+        "marker 应是 thinking 首部增量: {td:?}"
+    );
+    assert!(
+        td.iter().any(|t| t == "think hard"),
+        "上游推理原文随行: {td:?}"
+    );
+    assert!(
+        frames.iter().any(|f| f["type"] == "content_block_start"
+            && f["content_block"]["type"] == "tool_use"),
+        "tool_use 块应完整转发: {sse}"
     );
 }
 
-/// 流式跨协议回归：Responses 入口 × chat 上游。正文是纯文本 ⇒ 水印应作为
-/// 独立的 message item 追加在流末（msg_N 序号递增），并出现在
-/// response.completed 的组装 output 里——OpenCode 这类客户端按 output item
-/// 存历史，缺一都会让水印进不了 transcript。
+/// 流式跨协议回归：Responses 入口 × Chat thinking 上游。marker 随
+/// `response.reasoning_summary_text.delta` 下发，且 `output_item.done` 的
+/// reasoning item 摘要同样带 marker——只存完成态的客户端靠它回带；
+/// encrypted_content 仍是覆盖上游原文的干净凭据。
 #[tokio::test]
 async fn e2e_session_marker_stream_responses_client() {
-    let base_url = spawn_mock_openai_chat().await;
-    let (state, _db) = setup_with("openai-chat", base_url, "gpt-4o", "test-model").await;
+    let (base_url, _captured) = spawn_mock_chat_thinking_capture().await;
+    let (state, _db) = setup_with("openai-chat", base_url, "deepseek-x", "test-model").await;
 
     let body = json!({
         "model": "test-model",
-        "input": "Hi",
+        "input": "run ls",
         "stream": true
     });
     let resp = dispatch::handle_request(state, Protocol::OpenAiResponse, body, vec![], None)
         .await
         .expect("dispatch 应成功");
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let sse = String::from_utf8_lossy(&bytes).to_string();
 
-    let tag = sse_tag(&sse).expect("responses 入口的纯文本流也应带水印: {sse}");
+    let tag = sse_tag(&sse).expect("responses 入口的 reasoning 流也应带水印: {sse}");
     let frames: Vec<Value> = sse
         .lines()
         .filter_map(|l| l.strip_prefix("data:"))
         .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
         .collect();
-    // 水印增量应挂在一个独立 message item 上（不与正文 item 混编）
+    // 首个推理摘要增量即 marker 首部
     assert!(
         frames.iter().any(|f| {
-            f["type"] == "response.output_text.delta"
-                && f["delta"].as_str() == Some(&format!("[mb:{tag}]"))
+            f["type"] == "response.reasoning_summary_text.delta"
+                && f["delta"].as_str() == Some(&format!(" [mb:{tag}]"))
         }),
-        "水印应为独立的 output_text delta: {sse}"
+        "marker 应随摘要增量下发: {sse}"
     );
-    // response.completed.output 必须包含水印 item（按 item 存历史的客户端靠它回带）
-    let completed = frames
+    // done item 的 summary 同样带 marker（只存完成态的客户端靠它回带）
+    let item_done = frames
         .iter()
-        .find(|f| f["type"] == "response.completed")
-        .expect("应有 response.completed");
-    let output = completed["response"]["output"].as_array().unwrap();
-    assert!(
-        output.iter().any(|it| {
-            it["content"].as_array().map(|c| {
-                c.iter().any(|p| p["text"].as_str() == Some(&format!("[mb:{tag}]")))
-            }).unwrap_or(false)
-        }),
-        "completed.output 应含水印 item: {completed}"
+        .find(|f| f["type"] == "response.output_item.done" && f["item"]["type"] == "reasoning")
+        .expect("应有 reasoning 的 output_item.done");
+    assert_eq!(
+        item_done["item"]["summary"][0]["text"].as_str().unwrap(),
+        format!(" [mb:{tag}]think hard"),
+        "done item 摘要应带 marker 首部: {item_done}"
+    );
+    assert_eq!(
+        item_done["item"]["encrypted_content"].as_str().unwrap(),
+        "chat:think hard",
+        "凭据仍覆盖上游原文、不含 marker: {item_done}"
     );
 }
 
-/// 流式对照组：整轮出现过 `tool_use` ⇒ 一个 marker 都不该出现。
+/// 流式对照组：整流无推理块（正文 + tool_use）⇒ 不打标，正文与工具块照常。
 #[tokio::test]
-async fn e2e_session_marker_absent_in_stream_with_tool_use() {
+async fn e2e_session_marker_absent_in_stream_without_reasoning() {
     let base_url = spawn_mock_sse(sse_text_then_tool_use()).await;
     let (state, _db) = setup_with("anthropic", base_url, "claude-x", "test-model").await;
 
@@ -1723,9 +2079,45 @@ async fn e2e_session_marker_absent_in_stream_with_tool_use() {
     let resp = dispatch::handle_request(state, Protocol::Anthropic, body, vec![], None)
         .await
         .expect("dispatch 应成功");
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let sse = String::from_utf8_lossy(&bytes).to_string();
-    assert!(!sse.contains("mb:"), "工具轮不得打标: {sse}");
+    assert!(!sse.contains("mb:"), "无推理块的流不得打标: {sse}");
     assert!(sse.contains("Visible"), "正文仍要送达");
     assert!(sse.contains("dropme"), "工具块仍要完整转发");
+}
+
+/// 流式对照组（anthropic 上游）：thinking + tool_use 轮照样打标。
+#[tokio::test]
+async fn e2e_session_marker_present_in_stream_tool_use_round() {
+    let base_url = spawn_mock_sse(sse_thinking_then_tool_use()).await;
+    let (state, _db) = setup_with("anthropic", base_url, "claude-x", "test-model").await;
+
+    let body = json!({
+        "model": "test-model", "max_tokens": 64,
+        "messages": [{ "role": "user", "content": "Hi" }], "stream": true
+    });
+    let resp = dispatch::handle_request(state, Protocol::Anthropic, body, vec![], None)
+        .await
+        .expect("dispatch 应成功");
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let sse = String::from_utf8_lossy(&bytes).to_string();
+
+    let tag = sse_tag(&sse).expect("tool_use 轮的 thinking 流应带水印: {sse}");
+    let frames = anthropic_frames(&sse);
+    let td = thinking_deltas(&frames, 0);
+    assert_eq!(
+        td.first().map(String::as_str),
+        Some(format!(" [mb:{tag}]").as_str()),
+        "marker 应是 thinking 首部增量: {td:?}"
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|f| f["content_block"]["type"] == "tool_use"),
+        "工具块完整转发: {sse}"
+    );
 }

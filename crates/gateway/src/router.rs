@@ -220,7 +220,8 @@ mod tests {
 
     fn db_with_provider() -> Database {
         let db = Database::open_in_memory().unwrap();
-        db.upsert_provider(&provider_with_three_endpoints()).unwrap();
+        db.upsert_provider(&provider_with_three_endpoints())
+            .unwrap();
         db
     }
 
@@ -237,7 +238,8 @@ mod tests {
     #[test]
     fn offer_bound_protocol_selects_only_that_endpoint() {
         let db = db_with_provider();
-        db.upsert_offer(&offer("muse", Some("openai-response"))).unwrap();
+        db.upsert_offer(&offer("muse", Some("openai-response")))
+            .unwrap();
 
         let r = Router::resolve(&db, "muse").expect("应解析成功");
         assert_eq!(r.endpoints.len(), 1, "只应保留绑定协议的端点");
@@ -260,7 +262,8 @@ mod tests {
     #[test]
     fn offer_bound_to_absent_protocol_errors() {
         let db = db_with_provider();
-        db.upsert_offer(&offer("muse", Some("google-genai"))).unwrap();
+        db.upsert_offer(&offer("muse", Some("google-genai")))
+            .unwrap();
 
         let err = Router::resolve(&db, "muse").unwrap_err();
         assert!(
@@ -273,7 +276,8 @@ mod tests {
     #[test]
     fn offer_bound_to_unknown_protocol_name_errors() {
         let db = db_with_provider();
-        db.upsert_offer(&offer("muse", Some("nonsense-proto"))).unwrap();
+        db.upsert_offer(&offer("muse", Some("nonsense-proto")))
+            .unwrap();
 
         let err = Router::resolve(&db, "muse").unwrap_err();
         assert!(

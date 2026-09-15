@@ -274,10 +274,16 @@ mod tests {
         write(Some(dir.to_str().unwrap()), &rec, 0);
 
         let expected = dir.join("sess-1").join("claude-x");
-        let entries: Vec<_> = std::fs::read_dir(&expected).unwrap().map(|e| e.unwrap().path()).collect();
+        let entries: Vec<_> = std::fs::read_dir(&expected)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
         assert_eq!(entries.len(), 1, "应写入一个 trace 文件");
         let content = std::fs::read_to_string(&entries[0]).unwrap();
-        assert!(content.contains("\"requestId\""), "camelCase 序列化: {content}");
+        assert!(
+            content.contains("\"requestId\""),
+            "camelCase 序列化: {content}"
+        );
         assert!(content.contains("abcdef00"), "文件名/内容含短 id");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -322,7 +328,10 @@ mod tests {
             "cache_write_tokens",
             "reasoning_tokens",
         ] {
-            assert!(u.get(snake).is_none(), "不得泄漏 snake_case 键 {snake}: {u}");
+            assert!(
+                u.get(snake).is_none(),
+                "不得泄漏 snake_case 键 {snake}: {u}"
+            );
         }
         // 外层仍须是 camelCase
         assert!(v.get("requestId").is_some());

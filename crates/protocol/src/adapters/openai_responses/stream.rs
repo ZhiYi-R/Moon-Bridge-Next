@@ -12,7 +12,9 @@ use serde_json::{json, Value};
 use super::client::usage_from_value;
 use super::dto::{self, event};
 use super::OpenAiResponsesAdapter;
-use crate::adapter::{ClientStreamAdapter, ProviderStreamAdapter, StreamDecodeState, StreamEncodeState};
+use crate::adapter::{
+    ClientStreamAdapter, ProviderStreamAdapter, StreamDecodeState, StreamEncodeState,
+};
 use crate::context::ReqCtx;
 use crate::raw::{ChunkStage, RawChunk};
 
@@ -34,7 +36,10 @@ fn item_id(index: usize) -> String {
 /// 上游未给（或非 Responses 上游）时由 output_index 稳定派生，
 /// added / arguments.delta / arguments.done / done / completed 共用。
 fn tool_item_id(st: &StreamEncodeState, index: usize) -> String {
-    if let Some(ContentBlock::ToolUse { item_id: Some(id), .. }) = st.blocks.get(&index) {
+    if let Some(ContentBlock::ToolUse {
+        item_id: Some(id), ..
+    }) = st.blocks.get(&index)
+    {
         return id.clone();
     }
     format!("fc_{index}")
@@ -74,22 +79,22 @@ impl ClientStreamAdapter for OpenAiResponsesAdapter {
             CoreStreamEvent::BlockStart { index, block } => {
                 st.note_start(*index, block);
                 match block {
-                ContentBlock::ToolUse { id, name, .. } => {
-                    out.push(sse(
-                        event::OUTPUT_ITEM_ADDED,
-                        json!({
-                            "type": event::OUTPUT_ITEM_ADDED,
-                            "output_index": index,
-                            "item": dto::function_call_item(
-                                &tool_item_id(st, *index), id, name, "", "in_progress"
-                            ),
-                        }),
-                    ));
-                }
-                ContentBlock::Reasoning { .. } => {
-                    // reasoning item：收尾（output_item.done）在 BlockStop 按
-                    // block 类型分派，这里只发 item 起始
-                    out.push(sse(
+                    ContentBlock::ToolUse { id, name, .. } => {
+                        out.push(sse(
+                            event::OUTPUT_ITEM_ADDED,
+                            json!({
+                                "type": event::OUTPUT_ITEM_ADDED,
+                                "output_index": index,
+                                "item": dto::function_call_item(
+                                    &tool_item_id(st, *index), id, name, "", "in_progress"
+                                ),
+                            }),
+                        ));
+                    }
+                    ContentBlock::Reasoning { .. } => {
+                        // reasoning item：收尾（output_item.done）在 BlockStop 按
+                        // block 类型分派，这里只发 item 起始
+                        out.push(sse(
                         event::OUTPUT_ITEM_ADDED,
                         json!({
                             "type": event::OUTPUT_ITEM_ADDED,
@@ -97,27 +102,27 @@ impl ClientStreamAdapter for OpenAiResponsesAdapter {
                             "item": { "type": "reasoning", "id": item_id(*index), "summary": [] },
                         }),
                     ));
-                }
-                _ => {
-                    out.push(sse(
-                        event::OUTPUT_ITEM_ADDED,
-                        json!({
-                            "type": event::OUTPUT_ITEM_ADDED,
-                            "output_index": index,
-                            "item": dto::message_item(&item_id(*index), "", "in_progress"),
-                        }),
-                    ));
-                    out.push(sse(
-                        event::CONTENT_PART_ADDED,
-                        json!({
-                            "type": event::CONTENT_PART_ADDED,
-                            "item_id": item_id(*index),
-                            "output_index": index,
-                            "content_index": 0,
-                            "part": { "type": "output_text", "text": "", "annotations": [] },
-                        }),
-                    ));
-                }
+                    }
+                    _ => {
+                        out.push(sse(
+                            event::OUTPUT_ITEM_ADDED,
+                            json!({
+                                "type": event::OUTPUT_ITEM_ADDED,
+                                "output_index": index,
+                                "item": dto::message_item(&item_id(*index), "", "in_progress"),
+                            }),
+                        ));
+                        out.push(sse(
+                            event::CONTENT_PART_ADDED,
+                            json!({
+                                "type": event::CONTENT_PART_ADDED,
+                                "item_id": item_id(*index),
+                                "output_index": index,
+                                "content_index": 0,
+                                "part": { "type": "output_text", "text": "", "annotations": [] },
+                            }),
+                        ));
+                    }
                 }
             }
             CoreStreamEvent::BlockDelta { index, delta } => match delta {
@@ -176,103 +181,106 @@ impl ClientStreamAdapter for OpenAiResponsesAdapter {
                 // Anthropic 等上游的 BlockStop 不带 block，但工具调用的收尾
                 // 事件必须还原出 function_call 形态（否则客户端拿不到完整
                 // arguments，工具调用静默丢失）。
-                let resolved = block
-                    .clone()
-                    .or_else(|| st.blocks.get(index).cloned());
+                let resolved = block.clone().or_else(|| st.blocks.get(index).cloned());
                 match resolved {
-                Some(ContentBlock::Reasoning { text, signature, .. }) => {
-                    let mut item = json!({
-                        "type": "reasoning",
-                        "id": item_id(*index),
-                        "summary": [{ "type": "summary_text", "text": text }],
-                    });
-                    // 本家凭据还原原文；异源凭据带标记原样下发（opaque，
-                    // 客户端存入历史、回传后回到归属协议再解标）。
-                    if let Some(enc) = signature
-                        .as_deref()
-                        .map(|s| crate::adapters::emit_signature(crate::adapters::SIG_OPENAI, s))
-                    {
-                        if !enc.is_empty() {
-                            item["encrypted_content"] = json!(enc);
-                        }
-                    }
-                    out.push(sse(
-                        event::OUTPUT_ITEM_DONE,
-                        json!({
-                            "type": event::OUTPUT_ITEM_DONE,
-                            "output_index": index,
-                            "item": item,
-                        }),
-                    ));
-                }
-                Some(ContentBlock::ToolUse { id, name, input, .. }) => {
-                    // function_call 收尾序列：arguments.done（完整参数串）+
-                    // output_item.done（function_call item）。缺了它们，
-                    // 客户端（Codex）永远不会派发这个工具调用。
-                    let args = st
-                        .delta_acc
-                        .get(index)
-                        .cloned()
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| {
-                            if input.is_object() && input.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-                                "{}".to_string()
-                            } else {
-                                input.to_string()
-                            }
+                    Some(ContentBlock::Reasoning {
+                        text, signature, ..
+                    }) => {
+                        let mut item = json!({
+                            "type": "reasoning",
+                            "id": item_id(*index),
+                            "summary": [{ "type": "summary_text", "text": text }],
                         });
-                    out.push(sse(
-                        event::FUNC_ARGS_DONE,
-                        json!({
-                            "type": event::FUNC_ARGS_DONE,
-                            "item_id": tool_item_id(st, *index),
-                            "output_index": index,
-                            "name": name,
-                            "arguments": args,
-                        }),
-                    ));
-                    out.push(sse(
-                        event::OUTPUT_ITEM_DONE,
-                        json!({
-                            "type": event::OUTPUT_ITEM_DONE,
-                            "output_index": index,
-                            "item": dto::function_call_item(
-                                &tool_item_id(st, *index), &id, &name, &args, "completed"
-                            ),
-                        }),
-                    ));
-                }
-                _ => {
-                let text = st.delta_acc.get(index).cloned().unwrap_or_default();
-                out.push(sse(
-                    event::TEXT_DONE,
-                    json!({
-                        "type": event::TEXT_DONE,
-                        "item_id": item_id(*index),
-                        "output_index": index,
-                        "content_index": 0,
-                        "text": text,
-                    }),
-                ));
-                out.push(sse(
-                    event::CONTENT_PART_DONE,
-                    json!({
-                        "type": event::CONTENT_PART_DONE,
-                        "item_id": item_id(*index),
-                        "output_index": index,
-                        "content_index": 0,
-                        "part": { "type": "output_text", "text": text, "annotations": [] },
-                    }),
-                ));
-                out.push(sse(
-                    event::OUTPUT_ITEM_DONE,
-                    json!({
-                        "type": event::OUTPUT_ITEM_DONE,
-                        "output_index": index,
-                        "item": dto::message_item(&item_id(*index), &text, "completed"),
-                    }),
-                ));
-                }
+                        // 本家凭据还原原文；异源凭据带标记原样下发（opaque，
+                        // 客户端存入历史、回传后回到归属协议再解标）。
+                        if let Some(enc) = signature.as_deref().map(|s| {
+                            crate::adapters::emit_signature(crate::adapters::SIG_OPENAI, s)
+                        }) {
+                            if !enc.is_empty() {
+                                item["encrypted_content"] = json!(enc);
+                            }
+                        }
+                        out.push(sse(
+                            event::OUTPUT_ITEM_DONE,
+                            json!({
+                                "type": event::OUTPUT_ITEM_DONE,
+                                "output_index": index,
+                                "item": item,
+                            }),
+                        ));
+                    }
+                    Some(ContentBlock::ToolUse {
+                        id, name, input, ..
+                    }) => {
+                        // function_call 收尾序列：arguments.done（完整参数串）+
+                        // output_item.done（function_call item）。缺了它们，
+                        // 客户端（Codex）永远不会派发这个工具调用。
+                        let args = st
+                            .delta_acc
+                            .get(index)
+                            .cloned()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| {
+                                if input.is_object()
+                                    && input.as_object().map(|o| o.is_empty()).unwrap_or(true)
+                                {
+                                    "{}".to_string()
+                                } else {
+                                    input.to_string()
+                                }
+                            });
+                        out.push(sse(
+                            event::FUNC_ARGS_DONE,
+                            json!({
+                                "type": event::FUNC_ARGS_DONE,
+                                "item_id": tool_item_id(st, *index),
+                                "output_index": index,
+                                "name": name,
+                                "arguments": args,
+                            }),
+                        ));
+                        out.push(sse(
+                            event::OUTPUT_ITEM_DONE,
+                            json!({
+                                "type": event::OUTPUT_ITEM_DONE,
+                                "output_index": index,
+                                "item": dto::function_call_item(
+                                    &tool_item_id(st, *index), &id, &name, &args, "completed"
+                                ),
+                            }),
+                        ));
+                    }
+                    _ => {
+                        let text = st.delta_acc.get(index).cloned().unwrap_or_default();
+                        out.push(sse(
+                            event::TEXT_DONE,
+                            json!({
+                                "type": event::TEXT_DONE,
+                                "item_id": item_id(*index),
+                                "output_index": index,
+                                "content_index": 0,
+                                "text": text,
+                            }),
+                        ));
+                        out.push(sse(
+                            event::CONTENT_PART_DONE,
+                            json!({
+                                "type": event::CONTENT_PART_DONE,
+                                "item_id": item_id(*index),
+                                "output_index": index,
+                                "content_index": 0,
+                                "part": { "type": "output_text", "text": text, "annotations": [] },
+                            }),
+                        ));
+                        out.push(sse(
+                            event::OUTPUT_ITEM_DONE,
+                            json!({
+                                "type": event::OUTPUT_ITEM_DONE,
+                                "output_index": index,
+                                "item": dto::message_item(&item_id(*index), &text, "completed"),
+                            }),
+                        ));
+                    }
                 }
             }
             CoreStreamEvent::MessageDelta { stop_reason, usage } => {
@@ -294,16 +302,12 @@ impl ClientStreamAdapter for OpenAiResponsesAdapter {
                 let usage = dto::usage_object(&st.usage_acc);
                 // 截断终止 → response.incomplete（缺省视为 completed）。
                 let (ty, status, detail) = match reason {
-                    StopReason::MaxTokens => (
-                        event::INCOMPLETE,
-                        "incomplete",
-                        Some("max_output_tokens"),
-                    ),
-                    StopReason::ContentFilter => (
-                        event::INCOMPLETE,
-                        "incomplete",
-                        Some("content_filter"),
-                    ),
+                    StopReason::MaxTokens => {
+                        (event::INCOMPLETE, "incomplete", Some("max_output_tokens"))
+                    }
+                    StopReason::ContentFilter => {
+                        (event::INCOMPLETE, "incomplete", Some("content_filter"))
+                    }
                     _ => (event::COMPLETED, "completed", None),
                 };
                 let mut resp = dto::response_skeleton(&st.message_id, &ctx.model_alias, status);
@@ -313,10 +317,7 @@ impl ClientStreamAdapter for OpenAiResponsesAdapter {
                     // 而不逐 delta 累积的客户端，拿它当最终结果。
                     obj.insert("output".to_string(), Value::Array(assembled_output(st)));
                     if let Some(d) = detail {
-                        obj.insert(
-                            "incomplete_details".to_string(),
-                            json!({ "reason": d }),
-                        );
+                        obj.insert("incomplete_details".to_string(), json!({ "reason": d }));
                     }
                 }
                 out.push(sse(ty, json!({ "type": ty, "response": resp })));
@@ -345,7 +346,9 @@ fn chunk_json(chunk: &RawChunk) -> Option<Value> {
 }
 
 fn output_index(data: &Value) -> usize {
-    data.get("output_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize
+    data.get("output_index")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize
 }
 
 /// 由 encode 状态组装终态 `response.output`：按 output_index 顺序，
@@ -356,7 +359,9 @@ fn assembled_output(st: &StreamEncodeState) -> Vec<Value> {
     for (&index, block) in &st.blocks {
         let acc = st.delta_acc.get(&index).cloned().unwrap_or_default();
         let item = match block {
-            ContentBlock::Reasoning { text, signature, .. } => {
+            ContentBlock::Reasoning {
+                text, signature, ..
+            } => {
                 let text = if acc.is_empty() { text.clone() } else { acc };
                 let mut item = json!({
                     "type": "reasoning",
@@ -373,9 +378,12 @@ fn assembled_output(st: &StreamEncodeState) -> Vec<Value> {
                 }
                 item
             }
-            ContentBlock::ToolUse { id, name, input, .. } => {
+            ContentBlock::ToolUse {
+                id, name, input, ..
+            } => {
                 let args = if acc.is_empty() {
-                    if input.is_object() && input.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+                    if input.is_object() && input.as_object().map(|o| o.is_empty()).unwrap_or(true)
+                    {
                         "{}".to_string()
                     } else {
                         input.to_string()
@@ -419,30 +427,57 @@ impl ProviderStreamAdapter for OpenAiResponsesAdapter {
         match ty {
             "response.created" => {
                 let resp = data.get("response").cloned().unwrap_or(Value::Null);
-                let id = resp.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                let model = resp.get("model").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let id = resp
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let model = resp
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 out.push(CoreStreamEvent::MessageStart { id, model });
             }
             "response.output_item.added" => {
                 let item = data.get("item").cloned().unwrap_or(Value::Null);
                 let block = match item.get("type").and_then(|t| t.as_str()) {
                     Some("function_call") => ContentBlock::ToolUse {
-                        id: item.get("call_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                        id: item
+                            .get("call_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
                         item_id: item.get("id").and_then(|v| v.as_str()).map(String::from),
-                        name: item.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                        name: item
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
                         namespace: None,
                         input: json!({}),
                         signature: None,
                     },
                     // reasoning item：后续 summary/reasoning 文本增量挂同一 output_index
-                    Some("reasoning") => ContentBlock::Reasoning { text: String::new(), signature: None, redacted: false },
+                    Some("reasoning") => ContentBlock::Reasoning {
+                        text: String::new(),
+                        signature: None,
+                        redacted: false,
+                    },
                     _ => ContentBlock::text(""),
                 };
-                out.push(CoreStreamEvent::BlockStart { index: output_index(&data), block });
+                out.push(CoreStreamEvent::BlockStart {
+                    index: output_index(&data),
+                    block,
+                });
             }
             // 推理增量：官方摘要（summary_text）与原文（reasoning_text，第三方兼容实现）
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
-                let text = data.get("delta").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let text = data
+                    .get("delta")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 if !text.is_empty() {
                     out.push(CoreStreamEvent::BlockDelta {
                         index: output_index(&data),
@@ -451,17 +486,27 @@ impl ProviderStreamAdapter for OpenAiResponsesAdapter {
                 }
             }
             "response.output_text.delta" => {
-                let text = data.get("delta").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let text = data
+                    .get("delta")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 out.push(CoreStreamEvent::BlockDelta {
                     index: output_index(&data),
                     delta: StreamDelta::Text { text },
                 });
             }
             "response.function_call_arguments.delta" => {
-                let partial = data.get("delta").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let partial = data
+                    .get("delta")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 out.push(CoreStreamEvent::BlockDelta {
                     index: output_index(&data),
-                    delta: StreamDelta::ToolInput { partial_json: partial },
+                    delta: StreamDelta::ToolInput {
+                        partial_json: partial,
+                    },
                 });
             }
             "response.output_item.done" => {
@@ -490,8 +535,11 @@ impl ProviderStreamAdapter for OpenAiResponsesAdapter {
                         );
                         // 无明文且无凭据：不发 reasoning 形态收尾（encode 回退 message 形态）
                         if !text.is_empty() || signature.is_some() {
-                            block =
-                                Some(ContentBlock::Reasoning { text, signature, redacted: false });
+                            block = Some(ContentBlock::Reasoning {
+                                text,
+                                signature,
+                                redacted: false,
+                            });
                         }
                     }
                     // function_call item：done 携带完整 arguments，必须还原成
@@ -537,16 +585,19 @@ impl ProviderStreamAdapter for OpenAiResponsesAdapter {
                 // 凭据以增量先行：anthropic/chat 入口仅消费凭据增量（signature_delta /
                 // <mb-cot> 追加），必须在收尾前到达；responses 入口忽略此增量，
                 // 凭据随下方 BlockStop 的 reasoning item 发出。
-                if let Some(ContentBlock::Reasoning { signature: Some(sig), .. }) = &block {
+                if let Some(ContentBlock::Reasoning {
+                    signature: Some(sig),
+                    ..
+                }) = &block
+                {
                     out.push(CoreStreamEvent::BlockDelta {
                         index,
-                        delta: StreamDelta::ReasoningSignature { signature: sig.clone() },
+                        delta: StreamDelta::ReasoningSignature {
+                            signature: sig.clone(),
+                        },
                     });
                 }
-                out.push(CoreStreamEvent::BlockStop {
-                    index,
-                    block,
-                });
+                out.push(CoreStreamEvent::BlockStop { index, block });
             }
             "response.completed" | "response.incomplete" => {
                 let resp = data.get("response").cloned().unwrap_or(Value::Null);
@@ -603,23 +654,40 @@ mod tests {
 
         // reasoning item 开始：块类型为 Reasoning（而非默认 text 块）
         let evs = adapter
-            .decode(&ctx, &mut StreamDecodeState::default(), &chunk(json!({
-                "type": "response.output_item.added", "output_index": 0,
-                "item": { "type": "reasoning", "summary": [] }
-            })))
+            .decode(
+                &ctx,
+                &mut StreamDecodeState::default(),
+                &chunk(json!({
+                    "type": "response.output_item.added", "output_index": 0,
+                    "item": { "type": "reasoning", "summary": [] }
+                })),
+            )
             .unwrap();
         assert!(matches!(
             &evs[0],
-            CoreStreamEvent::BlockStart { block: ContentBlock::Reasoning { .. }, .. }
+            CoreStreamEvent::BlockStart {
+                block: ContentBlock::Reasoning { .. },
+                ..
+            }
         ));
 
         // 官方摘要与第三方原文两种增量都解析为 Reasoning
-        for ty in ["response.reasoning_summary_text.delta", "response.reasoning_text.delta"] {
+        for ty in [
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_text.delta",
+        ] {
             let evs = adapter
-                .decode(&ctx, &mut StreamDecodeState::default(), &chunk(json!({ "type": ty, "output_index": 0, "delta": "hmm" })))
+                .decode(
+                    &ctx,
+                    &mut StreamDecodeState::default(),
+                    &chunk(json!({ "type": ty, "output_index": 0, "delta": "hmm" })),
+                )
                 .unwrap();
             match &evs[0] {
-                CoreStreamEvent::BlockDelta { delta: StreamDelta::Reasoning { text }, .. } => {
+                CoreStreamEvent::BlockDelta {
+                    delta: StreamDelta::Reasoning { text },
+                    ..
+                } => {
                     assert_eq!(text, "hmm")
                 }
                 other => panic!("expected reasoning delta for {ty}, got {other:?}"),
@@ -633,15 +701,28 @@ mod tests {
         let ctx = ReqCtx::new("r1", Protocol::OpenAiResponse);
 
         let evs = adapter
-            .decode(&ctx, &mut StreamDecodeState::default(), &chunk(json!({"type":"response.created","response":{"id":"resp_1","model":"gpt-x"}})))
+            .decode(
+                &ctx,
+                &mut StreamDecodeState::default(),
+                &chunk(
+                    json!({"type":"response.created","response":{"id":"resp_1","model":"gpt-x"}}),
+                ),
+            )
             .unwrap();
         assert!(matches!(evs[0], CoreStreamEvent::MessageStart { .. }));
 
         let evs = adapter
-            .decode(&ctx, &mut StreamDecodeState::default(), &chunk(json!({"type":"response.output_text.delta","output_index":0,"delta":"Hi"})))
+            .decode(
+                &ctx,
+                &mut StreamDecodeState::default(),
+                &chunk(json!({"type":"response.output_text.delta","output_index":0,"delta":"Hi"})),
+            )
             .unwrap();
         match &evs[0] {
-            CoreStreamEvent::BlockDelta { delta: StreamDelta::Text { text }, .. } => {
+            CoreStreamEvent::BlockDelta {
+                delta: StreamDelta::Text { text },
+                ..
+            } => {
                 assert_eq!(text, "Hi")
             }
             _ => panic!("expected text delta"),
@@ -674,14 +755,22 @@ mod tests {
             .unwrap();
         // 凭据以增量先行（anthropic/chat 入口消费），BlockStop 仍携带完整块
         match &evs[0] {
-            CoreStreamEvent::BlockDelta { delta: StreamDelta::ReasoningSignature { signature }, .. } => {
+            CoreStreamEvent::BlockDelta {
+                delta: StreamDelta::ReasoningSignature { signature },
+                ..
+            } => {
                 assert_eq!(signature, "oai:ENC", "凭据带来源标记");
             }
             other => panic!("expected signature delta, got {other:?}"),
         }
         match &evs[1] {
             CoreStreamEvent::BlockStop {
-                block: Some(ContentBlock::Reasoning { text, signature: Some(enc), .. }),
+                block:
+                    Some(ContentBlock::Reasoning {
+                        text,
+                        signature: Some(enc),
+                        ..
+                    }),
                 ..
             } => {
                 assert!(text.is_empty(), "encrypted 不是展示文本");
@@ -691,7 +780,9 @@ mod tests {
         }
 
         // 入口 encode：凭据随 reasoning item 收尾事件原样下发
-        let cchunks = adapter.encode(&ctx, &evs[1], &mut StreamEncodeState::default()).unwrap();
+        let cchunks = adapter
+            .encode(&ctx, &evs[1], &mut StreamEncodeState::default())
+            .unwrap();
         let raw = serde_json::to_string(
             &cchunks[0]
                 .data
@@ -713,7 +804,10 @@ mod tests {
                 })),
             )
             .unwrap();
-        assert!(matches!(&evs[0], CoreStreamEvent::BlockStop { block: None, .. }));
+        assert!(matches!(
+            &evs[0],
+            CoreStreamEvent::BlockStop { block: None, .. }
+        ));
     }
 
     /// ToolUse 收尾必须是 function_call 形态：arguments.done 先携带完整
@@ -726,17 +820,21 @@ mod tests {
         let mut st = StreamEncodeState::default();
 
         let start = adapter
-            .encode(&ctx, &CoreStreamEvent::BlockStart {
-                index: 1,
-                block: ContentBlock::ToolUse {
-                    id: "call_9".into(),
-                    item_id: Some("fc_up".into()),
-                    name: "get_time".into(),
-                    namespace: None,
-                    input: json!({}),
-                    signature: None,
+            .encode(
+                &ctx,
+                &CoreStreamEvent::BlockStart {
+                    index: 1,
+                    block: ContentBlock::ToolUse {
+                        id: "call_9".into(),
+                        item_id: Some("fc_up".into()),
+                        name: "get_time".into(),
+                        namespace: None,
+                        input: json!({}),
+                        signature: None,
+                    },
                 },
-            }, &mut st)
+                &mut st,
+            )
             .unwrap();
         let item = &start[0].data.as_json().unwrap();
         assert_eq!(item["type"], "response.output_item.added");
@@ -746,23 +844,35 @@ mod tests {
         assert_eq!(item["item"]["id"], "fc_up");
         assert_eq!(item["item"]["call_id"], "call_9");
 
-        adapter.encode(&ctx, &CoreStreamEvent::BlockDelta {
-            index: 1,
-            delta: StreamDelta::ToolInput { partial_json: "{\"tz\":\"UTC\"}".into() },
-        }, &mut st).unwrap();
+        adapter
+            .encode(
+                &ctx,
+                &CoreStreamEvent::BlockDelta {
+                    index: 1,
+                    delta: StreamDelta::ToolInput {
+                        partial_json: "{\"tz\":\"UTC\"}".into(),
+                    },
+                },
+                &mut st,
+            )
+            .unwrap();
 
         let stop = adapter
-            .encode(&ctx, &CoreStreamEvent::BlockStop {
-                index: 1,
-                block: Some(ContentBlock::ToolUse {
-                    id: "call_9".into(),
-                    item_id: Some("fc_up".into()),
-                    name: "get_time".into(),
-                    namespace: None,
-                    input: json!({"tz": "UTC"}),
-                    signature: None,
-                }),
-            }, &mut st)
+            .encode(
+                &ctx,
+                &CoreStreamEvent::BlockStop {
+                    index: 1,
+                    block: Some(ContentBlock::ToolUse {
+                        id: "call_9".into(),
+                        item_id: Some("fc_up".into()),
+                        name: "get_time".into(),
+                        namespace: None,
+                        input: json!({"tz": "UTC"}),
+                        signature: None,
+                    }),
+                },
+                &mut st,
+            )
             .unwrap();
         let types: Vec<&str> = stop
             .iter()
@@ -770,7 +880,10 @@ mod tests {
             .collect();
         assert_eq!(
             types,
-            vec!["response.function_call_arguments.done", "response.output_item.done"],
+            vec![
+                "response.function_call_arguments.done",
+                "response.output_item.done"
+            ],
             "FC 收尾应是 arguments.done + output_item.done"
         );
         // arguments.done / output_item.done 的 item_id 与 item.id 一致
@@ -791,10 +904,14 @@ mod tests {
         let ctx = ReqCtx::new("r1", Protocol::OpenAiResponse);
         let mut st = StreamEncodeState::default();
         let evs = adapter
-            .encode(&ctx, &CoreStreamEvent::BlockDelta {
-                index: 0,
-                delta: StreamDelta::Reasoning { text: "hmm".into() },
-            }, &mut st)
+            .encode(
+                &ctx,
+                &CoreStreamEvent::BlockDelta {
+                    index: 0,
+                    delta: StreamDelta::Reasoning { text: "hmm".into() },
+                },
+                &mut st,
+            )
             .unwrap();
         let d = evs[0].data.as_json().unwrap();
         assert_eq!(d["type"], "response.reasoning_summary_text.delta");
@@ -811,39 +928,74 @@ mod tests {
         let ctx = ReqCtx::new("r1", Protocol::OpenAiResponse);
         let mut st = StreamEncodeState::default();
 
-        let _ = adapter.encode(&ctx, &CoreStreamEvent::MessageStart {
-            id: "resp_x".into(),
-            model: "gpt-x".into(),
-        }, &mut st);
-        let _ = adapter.encode(&ctx, &CoreStreamEvent::BlockStart {
-            index: 0,
-            block: ContentBlock::Reasoning { text: "t".into(), signature: Some("oai:ENC".into()), redacted: false },
-        }, &mut st);
-        let _ = adapter.encode(&ctx, &CoreStreamEvent::BlockStop {
-            index: 0,
-            block: Some(ContentBlock::Reasoning { text: "t".into(), signature: Some("oai:ENC".into()), redacted: false }),
-        }, &mut st);
-        let _ = adapter.encode(&ctx, &CoreStreamEvent::BlockStart {
-            index: 1,
-            block: ContentBlock::text(""),
-        }, &mut st);
-        let _ = adapter.encode(&ctx, &CoreStreamEvent::BlockDelta {
-            index: 1,
-            delta: StreamDelta::Text { text: "Hi".into() },
-        }, &mut st);
-        let _ = adapter.encode(&ctx, &CoreStreamEvent::BlockStop {
-            index: 1,
-            block: Some(ContentBlock::text("Hi")),
-        }, &mut st);
+        let _ = adapter.encode(
+            &ctx,
+            &CoreStreamEvent::MessageStart {
+                id: "resp_x".into(),
+                model: "gpt-x".into(),
+            },
+            &mut st,
+        );
+        let _ = adapter.encode(
+            &ctx,
+            &CoreStreamEvent::BlockStart {
+                index: 0,
+                block: ContentBlock::Reasoning {
+                    text: "t".into(),
+                    signature: Some("oai:ENC".into()),
+                    redacted: false,
+                },
+            },
+            &mut st,
+        );
+        let _ = adapter.encode(
+            &ctx,
+            &CoreStreamEvent::BlockStop {
+                index: 0,
+                block: Some(ContentBlock::Reasoning {
+                    text: "t".into(),
+                    signature: Some("oai:ENC".into()),
+                    redacted: false,
+                }),
+            },
+            &mut st,
+        );
+        let _ = adapter.encode(
+            &ctx,
+            &CoreStreamEvent::BlockStart {
+                index: 1,
+                block: ContentBlock::text(""),
+            },
+            &mut st,
+        );
+        let _ = adapter.encode(
+            &ctx,
+            &CoreStreamEvent::BlockDelta {
+                index: 1,
+                delta: StreamDelta::Text { text: "Hi".into() },
+            },
+            &mut st,
+        );
+        let _ = adapter.encode(
+            &ctx,
+            &CoreStreamEvent::BlockStop {
+                index: 1,
+                block: Some(ContentBlock::text("Hi")),
+            },
+            &mut st,
+        );
 
-        let done = adapter.encode(&ctx, &CoreStreamEvent::MessageDelta {
-            stop_reason: Some(StopReason::EndTurn),
-            usage: None,
-        }, &mut st).unwrap();
-        let completed = done
-            .iter()
-            .find_map(|c| c.data.as_json().cloned())
+        let done = adapter
+            .encode(
+                &ctx,
+                &CoreStreamEvent::MessageDelta {
+                    stop_reason: Some(StopReason::EndTurn),
+                    usage: None,
+                },
+                &mut st,
+            )
             .unwrap();
+        let completed = done.iter().find_map(|c| c.data.as_json().cloned()).unwrap();
         // 上游未上报 usage 时也必须发 usage 对象（必填字段）
         assert_eq!(completed["response"]["usage"]["input_tokens"], 0);
         let output = completed["response"]["output"].as_array().unwrap();

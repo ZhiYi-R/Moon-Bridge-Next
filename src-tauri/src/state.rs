@@ -163,7 +163,8 @@ impl ManagedState {
         // 稍等片刻确认端口成功绑定（task 未立即结束）
         tokio::time::sleep(std::time::Duration::from_millis(120)).await;
         if task.is_finished() {
-            *self.last_error.lock().unwrap() = Some(format!("网关启动失败：地址 {addr} 可能被占用"));
+            *self.last_error.lock().unwrap() =
+                Some(format!("网关启动失败：地址 {addr} 可能被占用"));
             *self.gateway.lock().unwrap() = None;
             return Ok(self.status());
         }
@@ -196,10 +197,8 @@ mod tests {
     use std::time::Duration;
 
     fn temp_paths(tag: &str) -> (AppPaths, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "moonbridge-state-{}-{tag}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("moonbridge-state-{}-{tag}", std::process::id()));
         let paths = AppPaths::resolve(dir.join("config"), dir.join("data"));
         (paths, dir)
     }

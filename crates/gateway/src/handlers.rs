@@ -180,7 +180,12 @@ mod tests {
     }
 
     fn ids(v: &Value) -> Vec<&str> {
-        v["data"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect()
+        v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect()
     }
 
     /// 裸名/别名/限定名三类都应聚合；多 provider 提供同名时裸名去重。
@@ -228,7 +233,11 @@ mod tests {
 
         let out = models_payload(&db).unwrap();
         let got = ids(&out);
-        assert_eq!(got.iter().filter(|i| **i == "fast").count(), 1, "别名占位，裸名跳过");
+        assert_eq!(
+            got.iter().filter(|i| **i == "fast").count(),
+            1,
+            "别名占位，裸名跳过"
+        );
         assert!(!got.contains(&"paused"), "停用 provider 裸名不可达");
         assert!(got.contains(&"paused(off)"), "停用 provider 限定名仍可达");
     }

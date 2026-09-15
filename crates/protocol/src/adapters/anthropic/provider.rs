@@ -78,7 +78,9 @@ fn block_to_anthropic_ex(block: &ContentBlock, for_client: bool) -> Option<Value
             }
             Some(doc)
         }
-        ContentBlock::ToolUse { id, name, input, .. } => Some(json!({
+        ContentBlock::ToolUse {
+            id, name, input, ..
+        } => Some(json!({
             "type": "tool_use",
             "id": id,
             "name": name,
@@ -96,9 +98,7 @@ fn block_to_anthropic_ex(block: &ContentBlock, for_client: bool) -> Option<Value
                 if let ContentBlock::Text { text } = &content[0] {
                     json!(text)
                 } else {
-                    Value::Array(
-                        content.iter().filter_map(block_to_anthropic).collect(),
-                    )
+                    Value::Array(content.iter().filter_map(block_to_anthropic).collect())
                 }
             } else {
                 Value::Array(content.iter().filter_map(block_to_anthropic).collect())
@@ -113,7 +113,11 @@ fn block_to_anthropic_ex(block: &ContentBlock, for_client: bool) -> Option<Value
             }
             Some(obj)
         }
-        ContentBlock::Reasoning { text, signature, redacted } => {
+        ContentBlock::Reasoning {
+            text,
+            signature,
+            redacted,
+        } => {
             // 两种凭据形态必须按原样还原（Anthropic 要求 thinking/redacted_thinking
             // 块不可修改，混转会 400）：
             //   * redacted_thinking：凭据在 data 字段、无可读 thinking；
@@ -214,10 +218,7 @@ pub(super) fn anthropic_to_block(v: &Value) -> Option<ContentBlock> {
         // 内容保留优先于形态保真。
         "document" => {
             let source = v.get("source")?;
-            let name = v
-                .get("title")
-                .and_then(|t| t.as_str())
-                .map(String::from);
+            let name = v.get("title").and_then(|t| t.as_str()).map(String::from);
             let doc = |source, media_type: &str, data: &str| ContentBlock::Document {
                 source,
                 media_type: media_type.to_string(),
@@ -233,7 +234,10 @@ pub(super) fn anthropic_to_block(v: &Value) -> Option<ContentBlock> {
                         .get("media_type")
                         .and_then(|m| m.as_str())
                         .unwrap_or("application/pdf"),
-                    source.get("url").and_then(|u| u.as_str()).unwrap_or_default(),
+                    source
+                        .get("url")
+                        .and_then(|u| u.as_str())
+                        .unwrap_or_default(),
                 )),
                 Some("file") => Some(doc(
                     DocSource::File,
@@ -241,7 +245,10 @@ pub(super) fn anthropic_to_block(v: &Value) -> Option<ContentBlock> {
                         .get("media_type")
                         .and_then(|m| m.as_str())
                         .unwrap_or("application/pdf"),
-                    source.get("file_id").and_then(|f| f.as_str()).unwrap_or_default(),
+                    source
+                        .get("file_id")
+                        .and_then(|f| f.as_str())
+                        .unwrap_or_default(),
                 )),
                 Some("text") => Some(doc(
                     DocSource::Text,
@@ -249,7 +256,10 @@ pub(super) fn anthropic_to_block(v: &Value) -> Option<ContentBlock> {
                         .get("media_type")
                         .and_then(|m| m.as_str())
                         .unwrap_or("text/plain"),
-                    source.get("data").and_then(|d| d.as_str()).unwrap_or_default(),
+                    source
+                        .get("data")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or_default(),
                 )),
                 Some("content") => {
                     let text = source
@@ -274,14 +284,25 @@ pub(super) fn anthropic_to_block(v: &Value) -> Option<ContentBlock> {
                         .get("media_type")
                         .and_then(|m| m.as_str())
                         .unwrap_or("application/pdf"),
-                    source.get("data").and_then(|d| d.as_str()).unwrap_or_default(),
+                    source
+                        .get("data")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or_default(),
                 )),
             }
         }
         "tool_use" => Some(ContentBlock::ToolUse {
-            id: v.get("id").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+            id: v
+                .get("id")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string(),
             item_id: None,
-            name: v.get("name").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+            name: v
+                .get("name")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string(),
             namespace: None,
             input: v.get("input").cloned().unwrap_or_else(|| json!({})),
             signature: None,
@@ -303,10 +324,16 @@ pub(super) fn anthropic_to_block(v: &Value) -> Option<ContentBlock> {
             })
         }
         "thinking" => Some(ContentBlock::Reasoning {
-            text: v.get("thinking").and_then(|t| t.as_str()).unwrap_or_default().to_string(),
+            text: v
+                .get("thinking")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_string(),
             signature: crate::adapters::tag_signature(
                 crate::adapters::SIG_ANTHROPIC,
-                v.get("signature").and_then(|s| s.as_str()).map(|s| s.to_string()),
+                v.get("signature")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string()),
             ),
             redacted: false,
         }),
@@ -316,7 +343,9 @@ pub(super) fn anthropic_to_block(v: &Value) -> Option<ContentBlock> {
             text: String::new(),
             signature: crate::adapters::tag_signature(
                 crate::adapters::SIG_ANTHROPIC,
-                v.get("data").and_then(|s| s.as_str()).map(|s| s.to_string()),
+                v.get("data")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string()),
             ),
             redacted: true,
         }),
@@ -379,9 +408,7 @@ fn apply_cache_control(blocks: &mut [Value], positions: Option<&Value>) {
                 if let Some(text) = b["content"].as_str().map(str::to_string) {
                     b["content"] = json!([{ "type": "text", "text": text }]);
                 }
-                if let Some(sub_b) =
-                    b["content"].as_array_mut().and_then(|arr| arr.get_mut(j))
-                {
+                if let Some(sub_b) = b["content"].as_array_mut().and_then(|arr| arr.get_mut(j)) {
                     sub_b["cache_control"] = cc.clone();
                 }
             }
@@ -401,14 +428,11 @@ fn build_messages(req: &CoreRequest) -> Vec<Value> {
             Role::Assistant => "assistant",
             _ => "user",
         };
-        let mut blocks: Vec<Value> = msg
-            .content
-            .iter()
-            .filter_map(block_to_anthropic)
-            .collect();
+        let mut blocks: Vec<Value> = msg.content.iter().filter_map(block_to_anthropic).collect();
         apply_cache_control(
             &mut blocks,
-            msg.ext.get(crate::adapters::anthropic::client::CACHE_EXT_KEY),
+            msg.ext
+                .get(crate::adapters::anthropic::client::CACHE_EXT_KEY),
         );
         if blocks.is_empty() {
             continue;
@@ -568,10 +592,7 @@ impl ProviderAdapter for AnthropicAdapter {
                     e @ ("low" | "medium" | "high" | "xhigh" | "max") => e,
                     _ => "medium",
                 };
-                obj.insert(
-                    "output_config".to_string(),
-                    json!({ "effort": e }),
-                );
+                obj.insert("output_config".to_string(), json!({ "effort": e }));
             }
         }
 
@@ -665,7 +686,8 @@ impl ProviderAdapter for AnthropicAdapter {
                         as u32)
                         .saturating_add(cache_read)
                         .saturating_add(cache_write),
-                    output_tokens: u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                    output_tokens: u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0)
+                        as u32,
                     cache_read_tokens: cache_read,
                     cache_write_tokens: cache_write,
                     // Anthropic 协议无独立 reasoning token 字段（含在 output 内）。
@@ -703,7 +725,11 @@ mod tests {
         let block = json!({ "type": "thinking", "thinking": "", "signature": "SIG" });
         let core = anthropic_to_block(&block).unwrap();
         match &core {
-            ContentBlock::Reasoning { text, signature: Some(sig), redacted } => {
+            ContentBlock::Reasoning {
+                text,
+                signature: Some(sig),
+                redacted,
+            } => {
                 assert_eq!(text, "");
                 assert_eq!(sig, "ant:SIG", "凭据带来源标记，出站时还原");
                 assert!(!redacted);
@@ -723,7 +749,11 @@ mod tests {
         let block = json!({ "type": "redacted_thinking", "data": "ENC" });
         let core = anthropic_to_block(&block).unwrap();
         match &core {
-            ContentBlock::Reasoning { text, signature: Some(enc), redacted: true } => {
+            ContentBlock::Reasoning {
+                text,
+                signature: Some(enc),
+                redacted: true,
+            } => {
                 assert_eq!(text, "");
                 assert_eq!(enc, "ant:ENC");
             }
@@ -733,7 +763,6 @@ mod tests {
         assert_eq!(back["type"], "redacted_thinking");
         assert_eq!(back["data"], "ENC");
     }
-
 
     fn endpoint() -> ProviderEndpoint {
         ProviderEndpoint {
@@ -751,8 +780,7 @@ mod tests {
     async fn builds_anthropic_request() {
         let mut req = CoreRequest::new("claude-sonnet-4");
         req.system.push(ContentBlock::text("You are helpful"));
-        req.messages
-            .push(Message::text(Role::User, "Hello"));
+        req.messages.push(Message::text(Role::User, "Hello"));
         req.max_tokens = Some(1024);
 
         let adapter = AnthropicAdapter;
@@ -887,10 +915,7 @@ mod tests {
         // 旧模型端点：enabled + budget_tokens（按档位换算并夹紧）
         let mut ep = endpoint();
         ep.extra.insert("thinking_mode".into(), json!("enabled"));
-        let up = adapter
-            .from_core_request(&ctx, &req, &ep)
-            .await
-            .unwrap();
+        let up = adapter.from_core_request(&ctx, &req, &ep).await.unwrap();
         assert_eq!(up.body["thinking"]["type"], "enabled");
         assert_eq!(up.body["thinking"]["budget_tokens"], 16384);
         assert!(up.body.get("output_config").is_none());
@@ -898,19 +923,13 @@ mod tests {
         // 预算必须严格小于 max_tokens：小 max_tokens 时被夹紧
         let mut tight = req.clone();
         tight.max_tokens = Some(3000);
-        let up2 = adapter
-            .from_core_request(&ctx, &tight, &ep)
-            .await
-            .unwrap();
+        let up2 = adapter.from_core_request(&ctx, &tight, &ep).await.unwrap();
         assert_eq!(up2.body["thinking"]["budget_tokens"], 2999);
 
         // max_tokens 小到无法容纳合法预算时，宁可不发也不构造必被拒的请求
         let mut tiny = req.clone();
         tiny.max_tokens = Some(500);
-        let up3 = adapter
-            .from_core_request(&ctx, &tiny, &ep)
-            .await
-            .unwrap();
+        let up3 = adapter.from_core_request(&ctx, &tiny, &ep).await.unwrap();
         assert!(up3.body.get("thinking").is_none(), "不应发出非法 thinking");
 
         // 未声明 reasoning 时不得凭空长出 thinking
@@ -942,7 +961,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(up.body["thinking"]["type"], "adaptive");
-        assert!(up.body.get("temperature").is_none(), "thinking 下不得发 temperature");
+        assert!(
+            up.body.get("temperature").is_none(),
+            "thinking 下不得发 temperature"
+        );
         assert!(up.body.get("top_p").is_none(), "thinking 下不得发 top_p");
 
         // 无 thinking 时正常透传
@@ -961,10 +983,7 @@ mod tests {
         // strip_sampling 端点：即使无 thinking 也剥离
         let mut ep = endpoint();
         ep.extra.insert("strip_sampling".into(), json!(true));
-        let up = adapter
-            .from_core_request(&ctx, &plain, &ep)
-            .await
-            .unwrap();
+        let up = adapter.from_core_request(&ctx, &plain, &ep).await.unwrap();
         assert!(up.body.get("temperature").is_none());
     }
 

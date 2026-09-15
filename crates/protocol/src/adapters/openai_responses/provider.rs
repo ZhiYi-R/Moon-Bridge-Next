@@ -120,7 +120,11 @@ fn build_input(req: &CoreRequest) -> Vec<Value> {
                 // 文本 part 类型按角色区分：user 用 input_text，assistant 用
                 // output_text（Responses 协议强制，assistant 带 input_text 会 400）
                 ContentBlock::Text { text } => {
-                    let ty = if msg.role == Role::Assistant { "output_text" } else { "input_text" };
+                    let ty = if msg.role == Role::Assistant {
+                        "output_text"
+                    } else {
+                        "input_text"
+                    };
                     parts.push(json!({ "type": ty, "text": text }));
                 }
                 ContentBlock::Image { data, media_type } => {
@@ -145,12 +149,7 @@ fn build_input(req: &CoreRequest) -> Vec<Value> {
                         };
                         parts.push(json!({ "type": ty, "text": data }));
                     }
-                    _ => parts.push(doc_to_input_file(
-                        source,
-                        media_type,
-                        data,
-                        name.as_deref(),
-                    )),
+                    _ => parts.push(doc_to_input_file(source, media_type, data, name.as_deref())),
                 },
                 ContentBlock::ToolUse {
                     id,
@@ -188,8 +187,10 @@ fn build_input(req: &CoreRequest) -> Vec<Value> {
                             item["call_id"] = json!(id);
                             item["action"] = tool_input.clone();
                         }
-                        "web_search_call" | "file_search_call"
-                        | "image_generation_call" | "code_interpreter_call" => {
+                        "web_search_call"
+                        | "file_search_call"
+                        | "image_generation_call"
+                        | "code_interpreter_call" => {
                             item["id"] = json!(id);
                         }
                         _ => {
@@ -209,9 +210,12 @@ fn build_input(req: &CoreRequest) -> Vec<Value> {
                     // *_call_output.output 原生支持 part 数组
                     // （input_text/input_image/input_file）：含图片/文档时改用
                     // 数组形态把内嵌媒体留在结果内部，不再经 text_of 静默丢弃。
-                    let has_media = content
-                        .iter()
-                        .any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::Document { .. }));
+                    let has_media = content.iter().any(|b| {
+                        matches!(
+                            b,
+                            ContentBlock::Image { .. } | ContentBlock::Document { .. }
+                        )
+                    });
                     let output = if !has_media {
                         json!(text_of(content))
                     } else {
@@ -236,9 +240,9 @@ fn build_input(req: &CoreRequest) -> Vec<Value> {
                                         data,
                                         name,
                                     } => match source {
-                                        DocSource::Text => Some(
-                                            json!({ "type": "input_text", "text": data }),
-                                        ),
+                                        DocSource::Text => {
+                                            Some(json!({ "type": "input_text", "text": data }))
+                                        }
                                         _ => Some(doc_to_input_file(
                                             source,
                                             media_type,
@@ -292,7 +296,8 @@ fn build_tools(req: &CoreRequest) -> Vec<Value> {
     req.tools
         .iter()
         .map(|t| {
-            let mut tool = json!({ "type": "function", "name": t.name, "parameters": t.input_schema });
+            let mut tool =
+                json!({ "type": "function", "name": t.name, "parameters": t.input_schema });
             if let Some(d) = &t.description {
                 tool["description"] = json!(d);
             }
@@ -344,7 +349,10 @@ impl ProviderAdapter for OpenAiResponsesAdapter {
                 .get("include")
                 .and_then(|v| v.as_array().cloned())
                 .unwrap_or_default();
-            if !inc.iter().any(|v| v.as_str() == Some("reasoning.encrypted_content")) {
+            if !inc
+                .iter()
+                .any(|v| v.as_str() == Some("reasoning.encrypted_content"))
+            {
                 inc.push(json!("reasoning.encrypted_content"));
             }
             obj.insert("include".to_string(), Value::Array(inc));
@@ -384,7 +392,10 @@ impl ProviderAdapter for OpenAiResponsesAdapter {
 
         let mut headers = vec![
             ("content-type".to_string(), "application/json".to_string()),
-            ("authorization".to_string(), format!("Bearer {}", endpoint.api_key)),
+            (
+                "authorization".to_string(),
+                format!("Bearer {}", endpoint.api_key),
+            ),
         ];
         if let Some(ua) = &endpoint.user_agent {
             headers.push(("user-agent".to_string(), ua.clone()));
@@ -400,8 +411,16 @@ impl ProviderAdapter for OpenAiResponsesAdapter {
     }
 
     async fn to_core_response(&self, _ctx: &ReqCtx, raw: Value) -> Result<CoreResponse> {
-        let id = raw.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        let model = raw.get("model").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let id = raw
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let model = raw
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
 
         let mut content: Vec<ContentBlock> = Vec::new();
         if let Some(output) = raw.get("output").and_then(|v| v.as_array()) {
@@ -423,9 +442,17 @@ impl ProviderAdapter for OpenAiResponsesAdapter {
                             .and_then(|s| serde_json::from_str::<Value>(s).ok())
                             .unwrap_or_else(|| json!({}));
                         content.push(ContentBlock::ToolUse {
-                            id: item.get("call_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                            id: item
+                                .get("call_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
                             item_id: item.get("id").and_then(|v| v.as_str()).map(String::from),
-                            name: item.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                            name: item
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
                             namespace: None,
                             input: args,
                             signature: None,
@@ -462,7 +489,11 @@ impl ProviderAdapter for OpenAiResponsesAdapter {
                                 .map(String::from),
                         );
                         if !text.is_empty() || signature.is_some() {
-                            content.push(ContentBlock::Reasoning { text, signature, redacted: false });
+                            content.push(ContentBlock::Reasoning {
+                                text,
+                                signature,
+                                redacted: false,
+                            });
                         }
                     }
                     _ => {}
@@ -471,7 +502,10 @@ impl ProviderAdapter for OpenAiResponsesAdapter {
         }
 
         let usage = raw.get("usage").map(usage_from_value).unwrap_or_default();
-        let stop_reason = if content.iter().any(|b| matches!(b, ContentBlock::ToolUse { .. })) {
+        let stop_reason = if content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+        {
             Some(StopReason::ToolUse)
         } else {
             Some(StopReason::EndTurn)
@@ -533,7 +567,11 @@ mod tests {
         });
         let resp3 = adapter.to_core_response(&ctx, raw3).await.unwrap();
         match &resp3.content[0] {
-            ContentBlock::Reasoning { text, signature: Some(enc), .. } => {
+            ContentBlock::Reasoning {
+                text,
+                signature: Some(enc),
+                ..
+            } => {
                 assert_eq!(text, "", "encrypted 不是展示文本");
                 assert_eq!(enc, "oai:ENC", "凭据带来源标记，出站时还原");
             }
@@ -558,20 +596,28 @@ mod tests {
         });
         let req = adapter.to_core_request(&ctx, raw).await.unwrap();
         assert!(
-            req.messages.iter().any(|m| m.content.iter().any(|b| matches!(
-                b, ContentBlock::Reasoning { signature: Some(enc), .. } if enc == "oai:ENC"
-            ))),
+            req.messages
+                .iter()
+                .any(|m| m.content.iter().any(|b| matches!(
+                    b, ContentBlock::Reasoning { signature: Some(enc), .. } if enc == "oai:ENC"
+                ))),
             "入口侧应保留 encrypted_content 凭据"
         );
 
-        let up = adapter.from_core_request(&ctx, &req, &endpoint()).await.unwrap();
+        let up = adapter
+            .from_core_request(&ctx, &req, &endpoint())
+            .await
+            .unwrap();
         let items = up.body["input"].as_array().unwrap();
         let back = items
             .iter()
             .find(|i| i["type"] == "reasoning")
             .expect("reasoning item 应回传上游");
         assert_eq!(back["encrypted_content"], "ENC");
-        assert!(back.get("content").is_none(), "明文 summary 是展示产物，不回传");
+        assert!(
+            back.get("content").is_none(),
+            "明文 summary 是展示产物，不回传"
+        );
     }
 
     /// 无凭据的明文块（如来自其他上游的历史）不回传 reasoning item。
@@ -582,11 +628,18 @@ mod tests {
         let mut req = CoreRequest::new("m");
         req.messages.push(Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::Reasoning { text: "thought".into(), signature: None, redacted: false }],
+            content: vec![ContentBlock::Reasoning {
+                text: "thought".into(),
+                signature: None,
+                redacted: false,
+            }],
             ext: Default::default(),
         });
         req.messages.push(Message::text(Role::User, "go"));
-        let up = adapter.from_core_request(&ctx, &req, &endpoint()).await.unwrap();
+        let up = adapter
+            .from_core_request(&ctx, &req, &endpoint())
+            .await
+            .unwrap();
         let items = up.body["input"].as_array().unwrap();
         assert!(
             !items.iter().any(|i| i["type"] == "reasoning"),
@@ -621,7 +674,10 @@ mod tests {
 
         let adapter = OpenAiResponsesAdapter;
         let ctx = ReqCtx::new("r1", Protocol::Anthropic);
-        let up = adapter.from_core_request(&ctx, &req, &endpoint()).await.unwrap();
+        let up = adapter
+            .from_core_request(&ctx, &req, &endpoint())
+            .await
+            .unwrap();
 
         assert!(up.url.ends_with("/v1/responses"));
         assert_eq!(up.body["instructions"], "Be helpful");
@@ -629,7 +685,10 @@ mod tests {
         assert_eq!(up.body["input"][0]["content"][0]["text"], "Hi");
         assert_eq!(up.body["tools"][0]["name"], "get_time");
         assert_eq!(up.body["max_output_tokens"], 512);
-        assert!(up.headers.iter().any(|(k, v)| k == "authorization" && v == "Bearer sk-test"));
+        assert!(up
+            .headers
+            .iter()
+            .any(|(k, v)| k == "authorization" && v == "Bearer sk-test"));
     }
 
     /// 回归：客户端未设上限时不得凭空注入 max_output_tokens——该字段在
@@ -639,7 +698,10 @@ mod tests {
         let adapter = OpenAiResponsesAdapter;
         let ctx = ReqCtx::new("r1", Protocol::Anthropic);
         let req = CoreRequest::new("gpt-x");
-        let up = adapter.from_core_request(&ctx, &req, &endpoint()).await.unwrap();
+        let up = adapter
+            .from_core_request(&ctx, &req, &endpoint())
+            .await
+            .unwrap();
         assert!(
             up.body.get("max_output_tokens").is_none(),
             "客户端未设上限时不应出现 max_output_tokens: {}",
@@ -658,7 +720,10 @@ mod tests {
 
         let adapter = OpenAiResponsesAdapter;
         let ctx = ReqCtx::new("r1", Protocol::Anthropic);
-        let up = adapter.from_core_request(&ctx, &req, &endpoint()).await.unwrap();
+        let up = adapter
+            .from_core_request(&ctx, &req, &endpoint())
+            .await
+            .unwrap();
 
         let input = up.body["input"].as_array().unwrap();
         let assistant = input
@@ -695,7 +760,9 @@ mod tests {
         assert_eq!(resp.content.len(), 2);
         assert!(matches!(resp.content[0], ContentBlock::Text { .. }));
         match &resp.content[1] {
-            ContentBlock::ToolUse { id, name, input, .. } => {
+            ContentBlock::ToolUse {
+                id, name, input, ..
+            } => {
                 assert_eq!(id, "c1");
                 assert_eq!(name, "get_time");
                 assert_eq!(input["tz"], "UTC");
@@ -703,7 +770,16 @@ mod tests {
             other => panic!("expected tool_use, got {other:?}"),
         }
         assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
-        assert_eq!(resp.usage, Usage { input_tokens: 8, output_tokens: 4, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0 });
+        assert_eq!(
+            resp.usage,
+            Usage {
+                input_tokens: 8,
+                output_tokens: 4,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0
+            }
+        );
     }
 
     /// 回归：`reasoning.{effort,summary}` 必须传导到 Responses 上游。
@@ -866,7 +942,8 @@ mod tests {
             json!({ "type": "input_file", "file_id": "file-1", "filename": "a.pdf" })
         );
         assert_eq!(
-            msg["content"][1]["file_data"], "data:application/pdf;base64,PP"
+            msg["content"][1]["file_data"],
+            "data:application/pdf;base64,PP"
         );
 
         // custom_tool_call 还原（input 字符串形态）

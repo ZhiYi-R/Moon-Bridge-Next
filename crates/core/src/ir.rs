@@ -190,7 +190,9 @@ pub enum ToolChoice {
     None,
     Required,
     /// 强制调用指定工具。
-    Tool { name: String },
+    Tool {
+        name: String,
+    },
 }
 
 // ============================================================================

@@ -36,18 +36,10 @@ impl Protocol {
     /// 从字符串解析协议；接受 serde 标识及若干常见别名（含下划线变体）。
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "openai-response"
-            | "openai-responses"
-            | "openai_response"
-            | "openai_responses"
-            | "responses"
-            | "response" => Some(Protocol::OpenAiResponse),
+            "openai-response" | "openai-responses" | "openai_response" | "openai_responses"
+            | "responses" | "response" => Some(Protocol::OpenAiResponse),
             "anthropic" | "anthropic-messages" | "messages" | "claude" => Some(Protocol::Anthropic),
-            "openai-chat"
-            | "openai_chat"
-            | "chat"
-            | "chat-completions"
-            | "chat_completions"
+            "openai-chat" | "openai_chat" | "chat" | "chat-completions" | "chat_completions"
             | "openai" => Some(Protocol::OpenAiChat),
             "google-genai" | "google_genai" | "gemini" | "google" | "genai" => {
                 Some(Protocol::GoogleGenai)
@@ -83,7 +75,10 @@ mod tests {
         assert_eq!(Protocol::parse("Claude"), Some(Protocol::Anthropic));
         assert_eq!(Protocol::parse("openai-chat"), Some(Protocol::OpenAiChat));
         assert_eq!(Protocol::parse("openai_chat"), Some(Protocol::OpenAiChat));
-        assert_eq!(Protocol::parse("openai_response"), Some(Protocol::OpenAiResponse));
+        assert_eq!(
+            Protocol::parse("openai_response"),
+            Some(Protocol::OpenAiResponse)
+        );
         assert_eq!(Protocol::parse("google-genai"), Some(Protocol::GoogleGenai));
         assert_eq!(Protocol::parse("gemini"), Some(Protocol::GoogleGenai));
         assert_eq!(Protocol::parse("bogus"), None);

@@ -15,7 +15,9 @@ use serde_json::{json, Value};
 
 use super::dto::{map_finish_reason, unmap_stop_reason, usage_from_chat, usage_object};
 use super::OpenAiChatAdapter;
-use crate::adapter::{ClientStreamAdapter, ProviderStreamAdapter, StreamDecodeState, StreamEncodeState};
+use crate::adapter::{
+    ClientStreamAdapter, ProviderStreamAdapter, StreamDecodeState, StreamEncodeState,
+};
 use crate::context::ReqCtx;
 use crate::raw::{ChunkStage, RawBody, RawChunk};
 
@@ -61,7 +63,9 @@ fn done_chunk() -> RawChunk {
         protocol: Protocol::OpenAiChat,
         provider: None,
         event: None,
-        data: RawBody::Text { text: "[DONE]".to_string() },
+        data: RawBody::Text {
+            text: "[DONE]".to_string(),
+        },
         raw: String::new(),
     }
 }
@@ -82,7 +86,12 @@ impl ClientStreamAdapter for OpenAiChatAdapter {
         match ev {
             CoreStreamEvent::MessageStart { id, .. } => {
                 st.message_id = id.clone();
-                out.push(chat_chunk(st, ctx, json!({ "role": "assistant", "content": "" }), Value::Null));
+                out.push(chat_chunk(
+                    st,
+                    ctx,
+                    json!({ "role": "assistant", "content": "" }),
+                    Value::Null,
+                ));
             }
             CoreStreamEvent::BlockStart { index, block } => {
                 st.note_start(*index, block);
@@ -185,6 +194,19 @@ fn close_open_blocks(st: &mut StreamDecodeState) -> Vec<CoreStreamEvent> {
         if let Some(args) = st.args_acc.remove(&index) {
             if let Some(ContentBlock::ToolUse { input, .. }) = st.blocks.get_mut(&index) {
                 *input = serde_json::from_str(&args).unwrap_or_else(|_| json!({"_raw": args}));
+            }
+        }
+        // Chat 上游无独立凭据字段：推理明文本体即回传凭据（thinking 模式
+        // 上游要求 reasoning_content 随历史带回，缺失 400）。收尾时给
+        // 无凭据推理打 chat: 自凭据标记——客户端方向据此下发可回传凭据，
+        // 异源上游按外源凭据降级。流式增量不含 <mb-cot> 解析（delta 已
+        // 下发不可回改），故整条 reasoning_content 打标而非拆凭据。
+        if let Some(ContentBlock::Reasoning {
+            text, signature, ..
+        }) = st.blocks.get_mut(&index)
+        {
+            if signature.is_none() && !text.is_empty() {
+                *signature = Some(format!("{}{}", crate::adapters::SIG_CHAT, text));
             }
         }
         out.push(CoreStreamEvent::BlockStop {
@@ -315,17 +337,13 @@ impl ProviderStreamAdapter for OpenAiChatAdapter {
                         .iter()
                         .copied()
                         .filter(|&i| {
-                            matches!(
-                                st.blocks.get(&i),
-                                Some(ContentBlock::ToolUse { .. })
-                            )
+                            matches!(st.blocks.get(&i), Some(ContentBlock::ToolUse { .. }))
                         })
                         .collect();
                     for i in pending {
                         st.close_block(i);
                         if let Some(args) = st.args_acc.remove(&i) {
-                            if let Some(ContentBlock::ToolUse { input, .. }) =
-                                st.blocks.get_mut(&i)
+                            if let Some(ContentBlock::ToolUse { input, .. }) = st.blocks.get_mut(&i)
                             {
                                 *input = serde_json::from_str(&args)
                                     .unwrap_or_else(|_| json!({"_raw": args}));
@@ -340,10 +358,7 @@ impl ProviderStreamAdapter for OpenAiChatAdapter {
                 // 块尚未起步（首个 tc chunk，或此前只收到过参数增量）→
                 // 建 ToolUse 并 BlockStart。上游缺 id 时同样开块——否则该
                 // 调用的参数增量没有归属块。
-                let started = matches!(
-                    st.blocks.get(&index),
-                    Some(ContentBlock::ToolUse { .. })
-                );
+                let started = matches!(st.blocks.get(&index), Some(ContentBlock::ToolUse { .. }));
                 if !started {
                     let block = ContentBlock::ToolUse {
                         id: tc
@@ -415,12 +430,28 @@ mod tests {
         ctx.model_alias = "gpt-4o".to_string();
 
         let evs = adapter
-            .encode(&ctx, &CoreStreamEvent::BlockDelta { index: 0, delta: StreamDelta::Text { text: "Hi".into() } }, &mut StreamEncodeState::default())
+            .encode(
+                &ctx,
+                &CoreStreamEvent::BlockDelta {
+                    index: 0,
+                    delta: StreamDelta::Text { text: "Hi".into() },
+                },
+                &mut StreamEncodeState::default(),
+            )
             .unwrap();
         assert_eq!(evs.len(), 1);
-        assert_eq!(evs[0].data.as_json().unwrap()["choices"][0]["delta"]["content"], "Hi");
+        assert_eq!(
+            evs[0].data.as_json().unwrap()["choices"][0]["delta"]["content"],
+            "Hi"
+        );
 
-        let evs = adapter.encode(&ctx, &CoreStreamEvent::MessageStop, &mut StreamEncodeState::default()).unwrap();
+        let evs = adapter
+            .encode(
+                &ctx,
+                &CoreStreamEvent::MessageStop,
+                &mut StreamEncodeState::default(),
+            )
+            .unwrap();
         match &evs[0].data {
             RawBody::Text { text } => assert_eq!(text, "[DONE]"),
             other => panic!("expected [DONE] text, got {other:?}"),
@@ -433,7 +464,16 @@ mod tests {
         let mut ctx = ReqCtx::new("r1", Protocol::OpenAiChat);
         ctx.model_alias = "m".to_string();
         let evs = adapter
-            .encode(&ctx, &CoreStreamEvent::BlockDelta { index: 0, delta: StreamDelta::Reasoning { text: "think".into() } }, &mut StreamEncodeState::default())
+            .encode(
+                &ctx,
+                &CoreStreamEvent::BlockDelta {
+                    index: 0,
+                    delta: StreamDelta::Reasoning {
+                        text: "think".into(),
+                    },
+                },
+                &mut StreamEncodeState::default(),
+            )
             .unwrap();
         let d = &evs[0].data.as_json().unwrap()["choices"][0]["delta"];
         assert_eq!(d["reasoning_content"], "think", "DeepSeek 约定");
@@ -466,7 +506,10 @@ mod tests {
                 &mut st,
             )
             .unwrap();
-        assert_eq!(evs[0].data.as_json().unwrap()["choices"][0]["delta"]["tool_calls"][0]["index"], 0);
+        assert_eq!(
+            evs[0].data.as_json().unwrap()["choices"][0]["delta"]["tool_calls"][0]["index"],
+            0
+        );
 
         // 同一块的后续参数增量沿用同一序数
         let evs = adapter
@@ -474,12 +517,17 @@ mod tests {
                 &ctx,
                 &CoreStreamEvent::BlockDelta {
                     index: 2,
-                    delta: StreamDelta::ToolInput { partial_json: "{\"a\":".into() },
+                    delta: StreamDelta::ToolInput {
+                        partial_json: "{\"a\":".into(),
+                    },
                 },
                 &mut st,
             )
             .unwrap();
-        assert_eq!(evs[0].data.as_json().unwrap()["choices"][0]["delta"]["tool_calls"][0]["index"], 0);
+        assert_eq!(
+            evs[0].data.as_json().unwrap()["choices"][0]["delta"]["tool_calls"][0]["index"],
+            0
+        );
 
         // 第二个工具（Core 索引 5）→ 序数 1
         let evs = adapter
@@ -499,7 +547,10 @@ mod tests {
                 &mut st,
             )
             .unwrap();
-        assert_eq!(evs[0].data.as_json().unwrap()["choices"][0]["delta"]["tool_calls"][0]["index"], 1);
+        assert_eq!(
+            evs[0].data.as_json().unwrap()["choices"][0]["delta"]["tool_calls"][0]["index"],
+            1
+        );
     }
 
     #[test]
@@ -508,7 +559,11 @@ mod tests {
         let ctx = ReqCtx::new("r1", Protocol::OpenAiChat);
         for key in ["reasoning_content", "reasoning"] {
             let evs = adapter
-                .decode(&ctx, &mut StreamDecodeState::default(), &chunk(json!({"choices":[{"index":0,"delta":{key: "hmm"}}]})))
+                .decode(
+                    &ctx,
+                    &mut StreamDecodeState::default(),
+                    &chunk(json!({"choices":[{"index":0,"delta":{key: "hmm"}}]})),
+                )
                 .unwrap();
             let has_reasoning = evs.iter().any(|e| {
                 matches!(e, CoreStreamEvent::BlockDelta { delta: StreamDelta::Reasoning { text }, .. } if text == "hmm")
@@ -529,7 +584,10 @@ mod tests {
         // 正文块现在带 BlockStart
         assert!(matches!(evs[1], CoreStreamEvent::BlockStart { .. }));
         match &evs[2] {
-            CoreStreamEvent::BlockDelta { delta: StreamDelta::Text { text }, .. } => assert_eq!(text, "Hello"),
+            CoreStreamEvent::BlockDelta {
+                delta: StreamDelta::Text { text },
+                ..
+            } => assert_eq!(text, "Hello"),
             other => panic!("expected text delta, got {other:?}"),
         }
 
@@ -540,7 +598,9 @@ mod tests {
         let evs = adapter
             .decode(&ctx, &mut st, &chunk(json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}})))
             .unwrap();
-        assert!(evs.iter().any(|e| matches!(e, CoreStreamEvent::MessageDelta { .. })));
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, CoreStreamEvent::MessageDelta { .. })));
 
         // [DONE]
         let done = RawChunk {
@@ -548,11 +608,60 @@ mod tests {
             protocol: Protocol::OpenAiChat,
             provider: None,
             event: None,
-            data: RawBody::Text { text: "[DONE]".into() },
+            data: RawBody::Text {
+                text: "[DONE]".into(),
+            },
             raw: String::new(),
         };
         let evs = adapter.decode(&ctx, &mut st, &done).unwrap();
-        assert!(evs.iter().any(|e| matches!(e, CoreStreamEvent::MessageStop)));
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, CoreStreamEvent::MessageStop)));
+    }
+
+    /// 回归：收尾的 reasoning 块必须打 chat: 自凭据——Responses 等客户端
+    /// 只回传带凭据的 reasoning item，thinking 模式上游缺 reasoning_content
+    /// 会 400；凭据 payload 为推理原文（chat 上游无独立凭据字段）。
+    #[test]
+    fn reasoning_block_close_carries_chat_credential() {
+        let adapter = OpenAiChatAdapter;
+        let ctx = ReqCtx::new("r1", Protocol::OpenAiChat);
+        let mut st = StreamDecodeState::default();
+
+        adapter
+            .decode(&ctx, &mut st, &chunk(json!({"choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"think"}}]})))
+            .unwrap();
+        let evs = adapter
+            .decode(
+                &ctx,
+                &mut st,
+                &chunk(json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]})),
+            )
+            .unwrap();
+        let stop = evs.iter().find(|e| {
+            matches!(
+                e,
+                CoreStreamEvent::BlockStop {
+                    block: Some(ContentBlock::Reasoning { .. }),
+                    ..
+                }
+            )
+        });
+        let Some(CoreStreamEvent::BlockStop {
+            block: Some(ContentBlock::Reasoning {
+                text, signature, ..
+            }),
+            ..
+        }) = stop
+        else {
+            panic!("reasoning BlockStop 应携带完整块: {evs:?}")
+        };
+        assert_eq!(text, "think");
+        assert_eq!(
+            signature.as_deref(),
+            Some("chat:think"),
+            "无凭据推理收尾时应打 chat: 自凭据"
+        );
     }
 
     /// 回归：reasoning_content 与 content 必须落在**不同**块索引——
@@ -569,18 +678,28 @@ mod tests {
         let r_idx = evs
             .iter()
             .find_map(|e| match e {
-                CoreStreamEvent::BlockDelta { index, delta: StreamDelta::Reasoning { .. } } => Some(*index),
+                CoreStreamEvent::BlockDelta {
+                    index,
+                    delta: StreamDelta::Reasoning { .. },
+                } => Some(*index),
                 _ => None,
             })
             .expect("应有推理增量");
 
         let evs = adapter
-            .decode(&ctx, &mut st, &chunk(json!({"choices":[{"index":0,"delta":{"content":"visible"}}]})))
+            .decode(
+                &ctx,
+                &mut st,
+                &chunk(json!({"choices":[{"index":0,"delta":{"content":"visible"}}]})),
+            )
             .unwrap();
         let t_idx = evs
             .iter()
             .find_map(|e| match e {
-                CoreStreamEvent::BlockDelta { index, delta: StreamDelta::Text { .. } } => Some(*index),
+                CoreStreamEvent::BlockDelta {
+                    index,
+                    delta: StreamDelta::Text { .. },
+                } => Some(*index),
                 _ => None,
             })
             .expect("应有文本增量");
@@ -597,7 +716,13 @@ mod tests {
 
         // 正文在块 0
         adapter
-            .decode(&ctx, &mut st, &chunk(json!({"choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"}}]})))
+            .decode(
+                &ctx,
+                &mut st,
+                &chunk(
+                    json!({"choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"}}]}),
+                ),
+            )
             .unwrap();
         // 工具调用 tc.index=0 → 不得落在块 0
         let evs = adapter
@@ -606,7 +731,10 @@ mod tests {
         let tc_idx = evs
             .iter()
             .find_map(|e| match e {
-                CoreStreamEvent::BlockStart { index, block: ContentBlock::ToolUse { .. } } => Some(*index),
+                CoreStreamEvent::BlockStart {
+                    index,
+                    block: ContentBlock::ToolUse { .. },
+                } => Some(*index),
                 _ => None,
             })
             .expect("应有 ToolUse BlockStart");
@@ -614,7 +742,11 @@ mod tests {
 
         // finish_reason → 全部块收尾 + MessageDelta
         let evs = adapter
-            .decode(&ctx, &mut st, &chunk(json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]})))
+            .decode(
+                &ctx,
+                &mut st,
+                &chunk(json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]})),
+            )
             .unwrap();
         let stops: Vec<usize> = evs
             .iter()
@@ -623,16 +755,29 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(stops.contains(&0) && stops.contains(&tc_idx), "两个块都应收尾: {stops:?}");
+        assert!(
+            stops.contains(&0) && stops.contains(&tc_idx),
+            "两个块都应收尾: {stops:?}"
+        );
         // 收尾的 ToolUse 应带回完整参数
-        let tool_stop = evs.iter().find(|e| {
-            matches!(e, CoreStreamEvent::BlockStop { index, .. } if *index == tc_idx)
-        });
-        if let Some(CoreStreamEvent::BlockStop { block: Some(ContentBlock::ToolUse { input, .. }), .. }) = tool_stop {
+        let tool_stop = evs
+            .iter()
+            .find(|e| matches!(e, CoreStreamEvent::BlockStop { index, .. } if *index == tc_idx));
+        if let Some(CoreStreamEvent::BlockStop {
+            block: Some(ContentBlock::ToolUse { input, .. }),
+            ..
+        }) = tool_stop
+        {
             assert_eq!(input["a"], 1, "arguments 应拼合成完整 JSON: {input:?}");
         } else {
             panic!("ToolUse BlockStop 应携带完整块: {tool_stop:?}");
         }
-        assert!(evs.iter().any(|e| matches!(e, CoreStreamEvent::MessageDelta { stop_reason: Some(_), .. })));
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            CoreStreamEvent::MessageDelta {
+                stop_reason: Some(_),
+                ..
+            }
+        )));
     }
 }
