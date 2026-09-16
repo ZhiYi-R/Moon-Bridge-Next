@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Minus, Square, X } from "lucide-vue-next";
+import { Minus, RotateCw, Square, X } from "lucide-vue-next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { computed } from "vue";
 import { useRoute } from "vue-router";
@@ -13,6 +13,12 @@ const route = useRoute();
 const gateway = useGatewayStore();
 
 const title = computed(() => (route.meta.title as string) ?? "");
+
+/** 运行状态文案：web 模式服务重启期间显示「重连中」而不是「已停止」。 */
+const statusText = computed(() => {
+  if (gateway.disconnected) return "重连中";
+  return gateway.running ? "运行中" : "已停止";
+});
 
 // 自绘标题栏：仅在 Tauri 壳内渲染窗口控制按钮（浏览器开发模式隐藏）。
 const appWindow = isTauriRuntime ? getCurrentWindow() : null;
@@ -43,17 +49,33 @@ const controlCls =
       <Badge variant="outline" class="h-7 gap-1.5 font-mono text-xs">
         <span
           class="size-1.5 rounded-full"
-          :class="gateway.running ? 'bg-emerald-500' : 'bg-muted-foreground/40'"
+          :class="
+            gateway.disconnected
+              ? 'animate-pulse bg-amber-500'
+              : gateway.running
+                ? 'bg-emerald-500'
+                : 'bg-muted-foreground/40'
+          "
         />
-        {{ gateway.running ? "运行中" : "已停止" }} · {{ gateway.addr || "—" }}
+        {{ statusText }} · {{ gateway.addr || "—" }}
       </Badge>
-      <!-- 网关开关：开启=运行中 -->
+      <!-- 进程开关：web 模式进程由外部托管，改为仅提供重启 -->
       <Switch
+        v-if="gateway.canControlProcess"
         :checked="gateway.running"
         :disabled="gateway.loading"
         :title="gateway.running ? '停止网关' : '启动网关'"
         @update:checked="(v) => (v ? gateway.start() : gateway.stop())"
       />
+      <button
+        v-else
+        class="flex h-7 w-9 items-center justify-center rounded-md border border-input text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+        title="重启网关（服务进程由外部托管，重启后自动恢复）"
+        :disabled="gateway.loading"
+        @click="gateway.restart()"
+      >
+        <RotateCw class="size-3.5" :class="gateway.loading ? 'animate-spin' : ''" />
+      </button>
 
       <!-- 窗口控制（仅 Tauri 壳内） -->
       <div v-if="appWindow" class="-mr-6 ml-2 flex items-center self-stretch">

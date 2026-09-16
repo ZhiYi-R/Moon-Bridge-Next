@@ -9,6 +9,8 @@ const props = defineProps<{
   width?: string;
   /** 简洁模式：去掉 header/footer 分割线，适合小型确认弹窗。 */
   plain?: boolean;
+  /** 层级类，默认 z-50；需要盖在其它弹窗之上时（如表单守卫确认框）传更高值。 */
+  zClass?: string;
   /** 关闭守卫：遮罩点击 / Esc / X 触发，resolve false 则拦截关闭（用于有未保存修改的表单）。 */
   guard?: () => boolean | Promise<boolean>;
 }>();
@@ -32,7 +34,7 @@ onUnmounted(() => document.removeEventListener("keydown", onKey));
 <template>
   <Teleport to="body">
     <Transition name="modal">
-      <div v-if="open" class="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div v-if="open" class="fixed inset-0 flex items-center justify-center p-4" :class="props.zClass ?? 'z-50'">
         <!-- 遮罩 -->
         <div class="modal-overlay absolute inset-0 bg-black/60" @click="requestClose" />
         <!-- 面板 -->

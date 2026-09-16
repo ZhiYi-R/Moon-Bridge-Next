@@ -54,6 +54,38 @@
 ---流式 chunk 钩子（需声明 "raw_stream"；高频，未声明则完全跳过）。
 ---@field on_upstream_chunk_raw (fun(ctx: MbCtx, chunk: MbRawChunk): MbChunkVerdict|nil)|nil
 ---@field on_client_chunk_raw (fun(ctx: MbCtx, chunk: MbRawChunk): MbChunkVerdict|nil)|nil
+---余额&健康看板：**独立于插件**的一次性脚本入口——由「余额看板」卡片引用并调用，
+---不进插件注册表、不参与上面的能力门控与钩子链路（见 crates/gateway/src/balance.rs）。
+---@field query (fun(ctx: MbBalanceQueryCtx): MbBalanceReturn)|nil 查询一次余额/配额
+
+--------------------------------------------------------------------------------
+-- 余额&健康看板（MB.query）
+--------------------------------------------------------------------------------
+
+---@class MbBalanceQuota
+---@field label string 配额展示名（如「5 小时窗口」）
+---@field used_percent number|nil 已用百分比；与 left_percent 互补，只给一个即可
+---@field left_percent number|nil 剩余百分比
+---@field unit string|nil 金额/数量单位（如 "¥"、"GB"），金额模式使用
+---@field used_amount number|nil 已用金额/数量（金额模式；amount 与 percent 互不推导）
+---@field left_amount number|nil 剩余金额/数量（金额模式）
+---@field reset_at string|integer|nil 重置时间：字符串原样展示；或给 unix 秒数字（引擎归一为字符串，前端按本地时间格式化——沙箱无 os 库，毫秒时间戳请除 1000 取整后给出）
+
+---@class MbBalanceReturn
+---返回 table，经宿主序列化为 JSON 落库。
+---@field status string|nil "ok"|"error"（缺省 = ok）
+---@field message string|nil 失败原因（status = "error" 时展示给用户）
+---@field quotas MbBalanceQuota[]|nil 配额列表
+---@field summary string|nil 一句话摘要
+---额外字段原样保留在结果 payload 中。
+
+---@class MbBalanceQueryCtx
+---@field name string 卡片 key
+---@field key string 本次查询的 API Key（与 keys[1] 相同）
+---@field keys string[] 当前 key 的单元素数组——引擎对卡片解析出的每个 key 各调用一次 MB.query 并拆成多张卡片展示，脚本只需按单 key 编写（引用上游服务时 key 由其端点解析并去重；端点 key 留空回退前一个非空 key）
+---@field base_url string 卡片上可选填写的查询 URL（配额接口基准地址；与 Provider 端点无关，可能为空字符串）
+---@field provider string 服务商标识（Provider key）
+---@field extra table 卡片自定义参数（编辑表单「额外参数 JSON」的解码值）
 
 ---@type MbManifest
 MB = {}

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ArrowLeft, ChevronDown, Pencil, Plus, Power, RotateCw, Trash2, Upload } from "lucide-vue-next";
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onActivated, onMounted, reactive, ref } from "vue";
 
 import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
@@ -12,7 +12,8 @@ import Modal from "@/components/ui/Modal.vue";
 import Switch from "@/components/ui/Switch.vue";
 import { useConfirm } from "@/composables/useConfirm";
 import { useToast } from "@/composables/useToast";
-import { errMsg, isTauriRuntime, pluginApi, type PluginImportOutcome, type PluginRecord } from "@/lib/api";
+import { errMsg, isTauriRuntime, isWebRuntime, pluginApi, type PluginImportOutcome, type PluginRecord } from "@/lib/api";
+import { importPluginFiles } from "@/lib/web";
 import { useGatewayStore } from "@/stores/gateway";
 
 const gateway = useGatewayStore();
@@ -173,7 +174,10 @@ async function save() {
     editing.value = false;
     needsRestart.value = true;
     toast.success(`插件 “${name}” 已保存，重启网关后生效`);
-    await load();
+    // 保存记录即本地已构造的这份数据：原地增改，无需重拉整表
+    plugins.value = plugins.value.some((x) => x.name === name)
+      ? plugins.value.map((x) => (x.name === name ? record : x))
+      : [...plugins.value, record];
   } catch (e) {
     handleSaveError(e);
   } finally {
@@ -199,7 +203,8 @@ async function toggleEnabled(p: PluginRecord) {
   try {
     await pluginApi.save({ ...p, enabled: !p.enabled });
     needsRestart.value = true;
-    await load();
+    // 本地已知的新状态即最终状态：原地替换，避免整表重拉
+    plugins.value = plugins.value.map((x) => (x.name === p.name ? { ...x, enabled: !p.enabled } : x));
   } catch (e) {
     handleSaveError(e);
   }
@@ -211,7 +216,8 @@ async function remove(p: PluginRecord) {
   try {
     await pluginApi.remove(p.name);
     needsRestart.value = true;
-    await load();
+    // 删除只影响这一行：本地移除，无需重拉整表
+    plugins.value = plugins.value.filter((x) => x.name !== p.name);
   } catch (e) {
     error.value = errMsg(e);
   }
@@ -287,6 +293,16 @@ async function onFilesPicked(e: Event) {
   busy.value = true;
   const outcomes: PluginImportOutcome[] = [];
   try {
+    if (isWebRuntime) {
+      // web 模式：无磁盘路径，改由后端按文件内容导入（同名跳过、结果形状一致）
+      const payload = await Promise.all(
+        files.map(async (f) => ({ name: f.name, content: await f.text() })),
+      );
+      outcomes.push(...(await importPluginFiles(payload)));
+      reportImport(outcomes);
+      await load();
+      return;
+    }
     for (const file of files) {
       const name = file.name.replace(/\.lua$/i, "");
       const path = file.name;
@@ -321,6 +337,13 @@ async function onFilesPicked(e: Event) {
 onMounted(() => {
   load();
   gateway.refresh();
+});
+
+// keep-alive 下切回本页：编辑器打开时不动（避免覆盖未保存草稿），否则静默重拉
+let activated = false;
+onActivated(() => {
+  if (activated && !editing.value) void load();
+  activated = true;
 });
 </script>
 

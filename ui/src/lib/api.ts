@@ -3,18 +3,24 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import { mockInvoke } from "./mock";
+import { webInvoke } from "./web";
 
 /** 当前是否运行在 Tauri 壳内（浏览器直接打开 vite dev 时为 false）。 */
 export const isTauriRuntime =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
-/** Mock 开关：非 Tauri 环境（纯浏览器开发）或 VITE_USE_MOCK=1 时启用。 */
+/** Mock 开关：非 Tauri 环境显式指定 VITE_USE_MOCK=1 时启用。 */
 export const usingMock =
-  !isTauriRuntime || import.meta.env.VITE_USE_MOCK === "1";
+  !isTauriRuntime && import.meta.env.VITE_USE_MOCK === "1";
 
-/** command 分发：Tauri 壳内走真实 IPC，浏览器/强制 mock 时走内存 mock。 */
+/** web 模式：浏览器中运行且未强制 mock，command 改走同源 /api/* 管理接口。 */
+export const isWebRuntime = !isTauriRuntime && !usingMock;
+
+/** command 分发：Tauri 壳内走真实 IPC，强制 mock 走内存 mock，其余走 web HTTP。 */
 function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  return usingMock ? mockInvoke<T>(cmd, args ?? {}) : invoke<T>(cmd, args);
+  if (isTauriRuntime) return invoke<T>(cmd, args);
+  if (usingMock) return mockInvoke<T>(cmd, args ?? {});
+  return webInvoke<T>(cmd, args ?? {});
 }
 
 // ───────────────────────── DTO 类型（camelCase，匹配后端 serde 输出）─────────────────────────
@@ -190,6 +196,8 @@ export interface AppInfo {
   dataDir: string;
   pluginsDir: string;
   traceDir: string;
+  /** 运行模式：server（web 服务端）等；Tauri 桌面端不上报。 */
+  mode?: string;
 }
 
 export interface GatewayConfig {
@@ -319,6 +327,91 @@ export const appApi = {
   info: () => call<AppInfo>("app_info"),
   getConfig: () => call<AppConfig>("config_get"),
   setConfig: (config: AppConfig) => call<void>("config_set", { config }),
+};
+
+// ───────────────────────── 余额看板 ─────────────────────────
+
+/** 配额显示样式：`auto` 按数据自动判断，`percent`/`amount` 强制对应口径。 */
+export type DisplayMode = "auto" | "percent" | "amount";
+
+/** 余额卡片：key 即卡片名，scriptRef 为插件目录内的 `.lua` 路径或内联脚本原文。 */
+export interface BalanceCard {
+  key: string;
+  /** 引用的上游服务 key（`Provider.key`）；引擎据此解析端点与有效 API Key。
+   *  `null` = 旧版手填模式，退回 `apiKey`/`baseUrl`（新卡片不再提供手填入口）。 */
+  providerKey: string | null;
+  /** 显示样式；后端落库时非法值归一为 `auto`。 */
+  displayMode: DisplayMode;
+  /** 旧版手填模式的 API Key，引用模式下为空串。 */
+  apiKey: string;
+  /** 查询 URL（可选）：配额接口基准地址，脚本里 `ctx.base_url` 读取；与 Provider 端点无关。 */
+  baseUrl: string;
+  /** 旧卡遗留的展示名；新卡片恒为空串，界面按 `providerKey` 展示并分组。 */
+  providerLabel: string;
+  scriptRef: string;
+  /** 自动查询间隔（秒）；0 = 关闭定时。 */
+  intervalSecs: number;
+  enabled: boolean;
+  extra: Json;
+  position: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** 单条配额进度（used/left 缺一由前端按 100 互补）。 */
+export interface BalanceQuota {
+  label: string;
+  usedPercent?: number | null;
+  leftPercent?: number | null;
+  /** 金额单位（如 `¥`、`$`、`GB`），仅金额模式使用。 */
+  unit?: string | null;
+  /** 已用金额；存在即走金额模式，不再展示百分比。 */
+  usedAmount?: number | null;
+  /** 剩余金额；缺失时金额模式只展示已用。 */
+  leftAmount?: number | null;
+  resetAt?: string | null;
+}
+
+/** 脚本返回的余额载荷（宽松结构：约定字段 + 任意附加键）。 */
+export interface BalancePayload {
+  status?: string;
+  message?: string;
+  quotas?: BalanceQuota[];
+  summary?: string;
+  [k: string]: Json;
+}
+
+export interface BalanceResult {
+  status: "ok" | "error";
+  payload?: BalancePayload | null;
+  error?: string | null;
+  /** 查询时刻（unix 秒）。 */
+  queriedAt: number;
+}
+
+/** 单个 key 的查询结果：多 key 卡片按 key 拆行，前端逐 key 渲染一张卡。 */
+export interface BalanceKeyResult extends BalanceResult {
+  /** key 在卡片解析结果中的序号（0 起）。 */
+  keyIndex: number;
+  /** 掩码后的 key 展示标签（如 `sk-kim…LXyw`）；无 key 时为空串。前端只认它，不接触 key 原文。 */
+  keyLabel: string;
+}
+
+export interface BalanceCardView extends BalanceCard {
+  /** 逐 key 的最近一次查询结果（按 keyIndex 升序）；从未查询为空数组。 */
+  results: BalanceKeyResult[];
+}
+
+export const balanceApi = {
+  list: () => call<BalanceCardView[]>("balance_card_list"),
+  save: (card: BalanceCard) => call<void>("balance_card_save", { card }),
+  remove: (key: string) => call<void>("balance_card_delete", { key }),
+  /** 刷新卡片：传 keyIndex 只重跑该 key，缺省整卡全量重跑。 */
+  refresh: (key: string, keyIndex?: number) =>
+    call<BalanceCardView>("balance_card_refresh", { key, keyIndex: keyIndex ?? null }),
+  refreshAll: () => call<BalanceCardView[]>("balance_refresh_all"),
+  /** dry-run：用表单里的卡片配置试跑一次脚本（逐 key 返回），不写库、不影响线上结果。 */
+  test: (card: BalanceCard) => call<BalanceKeyResult[]>("balance_card_test", { card }),
 };
 
 /** 从 Tauri command 错误中提取可读消息（后端返回 `{ message }`）。 */

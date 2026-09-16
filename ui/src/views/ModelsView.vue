@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { CloudDownload, Pencil, Plus, Search, Trash2 } from "lucide-vue-next";
-import { computed, onMounted, reactive, ref, watch, type Ref } from "vue";
+import { computed, onActivated, onMounted, reactive, ref, watch, type Ref } from "vue";
 
 import Button from "@/components/ui/Button.vue";
 import Card from "@/components/ui/Card.vue";
@@ -196,7 +196,9 @@ async function saveModel() {
     await modelApi.save(rec);
     editing.value = false;
     toast.success(`模型 “${slug}” 已保存`);
-    await loadModels();
+    models.value = models.value.some((m) => m.slug === slug)
+      ? models.value.map((m) => (m.slug === slug ? rec : m))
+      : [...models.value, rec];
   } catch (e) {
     error.value = errMsg(e);
   } finally {
@@ -209,7 +211,7 @@ async function removeModel(slug: string) {
   try {
     await modelApi.remove(slug);
     toast.success(`模型 “${slug}” 已删除`);
-    await loadModels();
+    models.value = models.value.filter((m) => m.slug !== slug);
   } catch (e) {
     error.value = errMsg(e);
   }
@@ -318,6 +320,7 @@ async function confirmImport() {
     const n = await catalogApi.import(chosen);
     importModal.value = false;
     toast.success(`已导入 ${n} 个模型`);
+    // 导入同时更新模型定义与各 provider 报价，服务端改动面超出行级：回退整表重拉
     await loadModels();
   } catch (e) {
     importError.value = errMsg(e);
@@ -439,15 +442,19 @@ async function confirmOffer() {
   }
   offerBusy.value = true;
   try {
-    await modelApi.offerSave({
+    const offer: Offer = {
       providerKey: selectedProvider.value,
       modelSlug: offerForm.modelSlug,
       pricing,
       endpointProtocol: offerForm.endpointProtocol || null,
-    });
+    };
+    await modelApi.offerSave(offer);
     offerModal.value = false;
     toast.success(`报价 “${offerForm.modelSlug}” 已保存`);
-    await loadOffers();
+    // 保存只影响这一行：按 slug 原地增改，避免整表重拉
+    offers.value = offers.value.some((o) => o.modelSlug === offer.modelSlug)
+      ? offers.value.map((o) => (o.modelSlug === offer.modelSlug ? offer : o))
+      : [...offers.value, offer];
   } catch (e) {
     offerError.value = errMsg(e);
   } finally {
@@ -492,7 +499,7 @@ async function removeOffer(modelSlug: string) {
   try {
     await modelApi.offerRemove(selectedProvider.value, modelSlug);
     toast.success(`报价 “${modelSlug}” 已删除`);
-    await loadOffers();
+    offers.value = offers.value.filter((o) => o.modelSlug !== modelSlug);
   } catch (e) {
     error.value = errMsg(e);
   }
@@ -512,7 +519,7 @@ function tierHint(p: unknown): string | null {
   const sizes = tiers
     .map((t) => (t as Record<string, unknown>)?.tier as Record<string, unknown> | undefined)
     .filter((m) => m?.type === "context" && typeof m.size === "number")
-    .map((m) => m.size as number);
+    .map((m) => m?.size as number);
   if (o.context_over_200k != null) sizes.push(200_000);
   if (sizes.length === 0) return null;
   return `>${Math.min(...sizes) / 1000}K 加价`;
@@ -538,8 +545,16 @@ const startSplit = usePointerDrag(
   },
 );
 
+// 首次挂载：模型定义与 provider 列表互相独立，一次并行拉取
 onMounted(async () => {
   await Promise.all([loadModels(), loadProviders()]);
+});
+
+// keep-alive 下切回本页：第二次起并行静默重拉（已有数据不闪 loading）
+let activated = false;
+onActivated(() => {
+  if (activated) void Promise.all([loadModels(), loadProviders(), loadOffers()]);
+  activated = true;
 });
 </script>
 

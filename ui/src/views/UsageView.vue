@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { RefreshCw } from "lucide-vue-next";
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onActivated, onMounted, ref, watch } from "vue";
 
 import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
@@ -22,8 +22,9 @@ function displayName(slug: string | null | undefined): string {
   return modelNames.value.get(slug) ?? slug;
 }
 
-async function load() {
-  loading.value = true;
+/** silent=true 用于 keep-alive 切回时的后台重拉：不点亮 refresh 图标，避免每次进页面都闪一次 loading。 */
+async function load(silent = false) {
+  loading.value = !silent;
   error.value = null;
   try {
     const [recs, sum, models] = await Promise.all([
@@ -36,6 +37,7 @@ async function load() {
     modelNames.value = new Map(
       models.filter((m) => m.displayName).map((m) => [m.slug, m.displayName as string]),
     );
+    recompute();
   } catch (e) {
     error.value = errMsg(e);
   } finally {
@@ -172,14 +174,19 @@ function recompute() {
   mBuckets.value = modelBuckets();
 }
 
-onMounted(async () => {
-  await load();
-  recompute();
+onMounted(() => {
+  void load();
+});
+
+// keep-alive 下切回本页：第二次起静默重拉，不闪 loading、不清空现有列表
+let activated = false;
+onActivated(() => {
+  if (activated) void load(true);
+  activated = true;
 });
 
 async function refresh() {
   await load();
-  recompute();
 }
 
 // ───────────────── 明细分页（页面本身不滚动，列表翻页） ───────────────

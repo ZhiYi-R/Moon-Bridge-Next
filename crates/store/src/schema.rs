@@ -153,6 +153,68 @@ const V8: &str = "ALTER TABLE models ADD COLUMN max_output_tokens INTEGER;";
 /// 的记录该列为 NULL。
 const V9: &str = "ALTER TABLE usage_records ADD COLUMN provider_key TEXT;";
 
+/// V10：余额&健康看板。`balance_cards` 存卡片配置（每张卡一段 Lua 脚本，`script_ref`
+/// 判定同插件：`.lua` 结尾 = plugins_dir 内文件，否则内联源码）；`balance_results`
+/// 存每张卡**最近一次**查询结果（一卡一行，随卡片级联删除）。
+///
+/// `payload_json` 可空：引擎级失败（脚本缺失/抛错/超时）时保留上一次的值。
+/// `interval_secs` 为 0 表示禁用定时查询（只手动刷新）。
+const V10: &str = r#"
+CREATE TABLE IF NOT EXISTS balance_cards (
+    key            TEXT PRIMARY KEY,
+    api_key        TEXT NOT NULL DEFAULT '',
+    base_url       TEXT NOT NULL DEFAULT '',
+    provider_label TEXT NOT NULL DEFAULT '',
+    script_ref     TEXT NOT NULL DEFAULT '',
+    interval_secs  INTEGER NOT NULL DEFAULT 0,
+    enabled        INTEGER NOT NULL DEFAULT 1,
+    extra_json     TEXT NOT NULL DEFAULT '{}',
+    position       INTEGER NOT NULL DEFAULT 0,
+    created_at     INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS balance_results (
+    card_key     TEXT PRIMARY KEY,
+    status       TEXT NOT NULL,
+    payload_json TEXT,
+    error        TEXT,
+    queried_at   INTEGER NOT NULL
+);
+"#;
+
+/// V11：余额卡片改为可引用上游 Provider——`provider_key`（可空；非空时脚本 ctx 的
+/// key/URL 参数由该 Provider 的端点解析、key 去重，空 = 旧版手填 `api_key`/`base_url`
+/// 模式）；`display_mode` 存前端显示样式（`auto`/`percent`/`amount`，默认 `auto`）。
+const V11: &str = r#"
+ALTER TABLE balance_cards ADD COLUMN provider_key TEXT;
+ALTER TABLE balance_cards ADD COLUMN display_mode TEXT NOT NULL DEFAULT 'auto';
+"#;
+
+/// V12：余额结果按 key 拆分——多 key 卡片对每个 key 各执行一次脚本、各占一行，
+/// 前端按 key 拆卡展示、逐 key 保留上次成功值。主键由 `card_key` 改为
+/// `(card_key, key_index)`（SQLite 不支持改主键，整表重建）；旧行迁移为 key_index=0、
+/// 空 key_label（下次刷新即被真实值覆盖）。`key_label` 存掩码后的 key 展示标签，
+/// 原文不落这张表。
+const V12: &str = r#"
+CREATE TABLE IF NOT EXISTS balance_results_new (
+    card_key     TEXT NOT NULL,
+    key_index    INTEGER NOT NULL DEFAULT 0,
+    key_label    TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL,
+    payload_json TEXT,
+    error        TEXT,
+    queried_at   INTEGER NOT NULL,
+    PRIMARY KEY (card_key, key_index)
+);
+
+INSERT INTO balance_results_new (card_key, key_index, key_label, status, payload_json, error, queried_at)
+    SELECT card_key, 0, '', status, payload_json, error, queried_at FROM balance_results;
+
+DROP TABLE balance_results;
+ALTER TABLE balance_results_new RENAME TO balance_results;
+"#;
+
 /// 全部 migration，按版本升序。
 const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -190,6 +252,18 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 9,
         sql: V9,
+    },
+    Migration {
+        version: 10,
+        sql: V10,
+    },
+    Migration {
+        version: 11,
+        sql: V11,
+    },
+    Migration {
+        version: 12,
+        sql: V12,
     },
 ];
 

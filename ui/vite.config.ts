@@ -31,6 +31,10 @@ export default defineConfig({
       // 不监听 Rust 侧目录，避免无关重建
       ignored: ["**/src-tauri/**"],
     },
+    // 纯浏览器 dev 时把管理 API 转发到本地 server 进程（web 模式为同源请求）
+    proxy: {
+      "/api": { target: "http://127.0.0.1:38440", changeOrigin: true },
+    },
   },
   envPrefix: ["VITE_", "TAURI_ENV_", "TAURI_"],
   build: {

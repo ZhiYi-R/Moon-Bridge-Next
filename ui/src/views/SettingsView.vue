@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ChevronDown } from "lucide-vue-next";
-import { onMounted, reactive, ref } from "vue";
+import { onActivated, onMounted, reactive, ref } from "vue";
 
 import Button from "@/components/ui/Button.vue";
 import Card from "@/components/ui/Card.vue";
@@ -58,19 +58,40 @@ const gwOpen = ref(true);
 const infoOpen = ref(false);
 
 onMounted(async () => {
+  await load();
+});
+
+// keep-alive 下切回本页：仅刷新只读的应用信息；配置表单保留未保存编辑，不回读覆盖
+let activated = false;
+onActivated(() => {
+  if (activated) void loadInfo();
+  activated = true;
+});
+
+/** 应用信息展示：只读、失败忽略。 */
+async function loadInfo() {
   try {
-    const c = await appApi.getConfig();
+    info.value = await appApi.info();
+  } catch {
+    // 忽略：仅展示用途
+  }
+}
+
+async function load() {
+  try {
+    // 配置与应用信息互相独立：并行拉取，避免串行两跳
+    const [c, i] = await Promise.all([appApi.getConfig(), appApi.info()]);
     form.gateway = { ...c.gateway };
     form.logLevel = c.logLevel;
     form.autoStart = c.autoStart;
     const bu = bytesToUnit(c.gateway.maxBodyBytes);
     bodyValue.value = bu.v;
     bodyUnit.value = bu.unit;
-    info.value = await appApi.info();
+    info.value = i;
   } catch (e) {
     error.value = errMsg(e);
   }
-});
+}
 
 function payload(): AppConfig {
   const n = Number(bodyValue.value);
@@ -217,6 +238,10 @@ async function save(restart = false) {
         <div class="flex justify-between gap-4">
           <span class="text-muted-foreground">版本</span>
           <span class="font-mono">{{ info?.version ?? "—" }}</span>
+        </div>
+        <div v-if="info?.mode" class="flex justify-between gap-4">
+          <span class="text-muted-foreground">运行模式</span>
+          <span class="font-mono">{{ info.mode }}</span>
         </div>
         <div class="flex justify-between gap-4">
           <span class="text-muted-foreground">数据库</span>

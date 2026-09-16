@@ -1,6 +1,15 @@
 <script setup lang="ts">
-import { ChevronDown, ChevronRight, Pencil, Plus, Search, Trash2 } from "lucide-vue-next";
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { ChevronDown, ChevronRight, Pencil, Plus, Search, Trash2, X } from "lucide-vue-next";
+import {
+  computed,
+  onActivated,
+  onDeactivated,
+  onMounted,
+  onUnmounted,
+  reactive,
+  ref,
+  watch,
+} from "vue";
 
 import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
@@ -114,6 +123,10 @@ const filteredEpModels = computed(() => {
 watch([epModelQuery, expandedEndpoint], () => {
   epModelPage.value = 1;
 });
+// 收起下拉只跟端点面板的展开态绑定：在搜索框里打字不能把下拉关掉
+watch(expandedEndpoint, () => {
+  epDropdownOpen.value = false;
+});
 watch(
   () => filteredEpModels.value.pageCount,
   (c) => {
@@ -129,6 +142,29 @@ const checkedModels = computed(() => {
 
 function boundCount(protocol: string): number {
   return providerOffers.value.filter((o) => o.endpointProtocol === protocol).length;
+}
+
+/** 当前展开端点协议下已勾选的模型 slug（按 slug 排序，供 chip 区展示）。 */
+const checkedModelSlugs = computed(() => [...checkedModels.value].sort((a, b) => a.localeCompare(b)));
+
+/** 下拉浮层：默认收起，仅聚焦/点击搜索框时展开；多选不自动收起。 */
+const epDropdownOpen = ref(false);
+
+function closeEpDropdown() {
+  epDropdownOpen.value = false;
+}
+
+function onEpDocPointerDown(e: MouseEvent) {
+  if (!epDropdownOpen.value) return;
+  const t = e.target as HTMLElement | null;
+  if (!t?.closest("[data-ep-model-panel]")) closeEpDropdown();
+}
+
+/** 下拉期间拦截 Esc：捕获阶段先于 Modal 的关闭守卫，避免一次 Esc 同时收起下拉并弹丢弃确认。 */
+function onEpKey(e: KeyboardEvent) {
+  if (e.key !== "Escape" || !epDropdownOpen.value) return;
+  closeEpDropdown();
+  e.stopPropagation();
 }
 
 function offerFor(slug: string): Offer | undefined {
@@ -275,6 +311,7 @@ async function save() {
     return;
   }
   try {
+    // 服务端会回填 createdAt/updatedAt 并归一化端点顺序，本地拼不出最终记录：回退整表重拉
     await store.save({ ...form });
     // 插件三态 diff：非 inherit 落 binding，inherit 删除已有 binding
     let bindingsChanged = false;
@@ -319,15 +356,45 @@ async function remove(key: string) {
 }
 
 onMounted(() => {
+  document.addEventListener("pointerdown", onEpDocPointerDown);
+  document.addEventListener("keydown", onEpKey, true);
   void store.load();
-  void pluginApi
+  void loadPluginList();
+});
+
+// keep-alive 下切回本页：第二次起静默重拉；弹窗编辑中不动，避免重置三态表
+let activated = false;
+onActivated(() => {
+  document.addEventListener("pointerdown", onEpDocPointerDown);
+  document.addEventListener("keydown", onEpKey, true);
+  if (activated && !editing.value) {
+    void store.load();
+    void loadPluginList();
+  }
+  activated = true;
+});
+
+// 视图被缓存后不再卸载：模型下拉的外部点击 / Esc 监听改在停用时摘除
+onDeactivated(() => {
+  document.removeEventListener("pointerdown", onEpDocPointerDown);
+  document.removeEventListener("keydown", onEpKey, true);
+});
+
+onUnmounted(() => {
+  document.removeEventListener("pointerdown", onEpDocPointerDown);
+  document.removeEventListener("keydown", onEpKey, true);
+});
+
+/** 插件全量列表：与 provider 列表互相独立，一次请求同时供弹窗与轮询复用。 */
+function loadPluginList() {
+  return pluginApi
     .list()
     .then((list) => {
       pluginList.value = list;
       resetPluginStates();
     })
     .catch(() => {});
-});
+}
 </script>
 
 <template>
@@ -402,18 +469,57 @@ onMounted(() => {
               <ChevronRight v-else class="size-3.5" />
               可用模型（{{ boundCount(ep.protocol) }}）
             </button>
-            <div v-if="expandedEndpoint === i" class="mt-2 rounded-md border p-3">
-              <div v-if="allModels.length > 0" class="relative mb-2">
+            <div
+              v-if="expandedEndpoint === i"
+              data-ep-model-panel
+              class="mt-2 rounded-md border p-3"
+            >
+              <!-- 已选模型：chip 上的 × 复用勾选开关（取消该模型的协议绑定） -->
+              <div class="space-y-1.5">
+                <div class="text-xs text-muted-foreground">已选模型</div>
+                <div v-if="checkedModelSlugs.length === 0" class="text-xs text-muted-foreground">
+                  未选择模型
+                </div>
+                <div v-else class="flex flex-wrap gap-1.5">
+                  <span
+                    v-for="slug in checkedModelSlugs"
+                    :key="slug"
+                    class="inline-flex items-center gap-1 rounded-md border bg-muted/40 py-0.5 pl-2 pr-1 font-mono text-xs"
+                  >
+                    {{ slug }}
+                    <button
+                      type="button"
+                      class="text-muted-foreground transition-colors hover:text-destructive"
+                      title="移除"
+                      @click="toggleEndpointModel(ep.protocol, slug)"
+                    >
+                      <X class="size-3" />
+                    </button>
+                  </span>
+                </div>
+              </div>
+
+              <!-- 候选列表默认收起：聚焦/点击搜索框才展开 -->
+              <div v-if="allModels.length > 0" class="relative mt-3">
                 <Search class="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                <Input v-model="epModelQuery" placeholder="搜索模型…" class="pl-8" />
+                <Input
+                  v-model="epModelQuery"
+                  placeholder="搜索模型…"
+                  class="pl-8"
+                  @focus="epDropdownOpen = true"
+                  @click="epDropdownOpen = true"
+                />
               </div>
               <div
                 v-if="allModels.length === 0"
-                class="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground"
+                class="mt-3 rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground"
               >
                 暂无模型定义，请先到「模型」页创建。
               </div>
-              <div v-else class="scrollbar-thin max-h-48 space-y-1 overflow-y-auto">
+              <div
+                v-else-if="epDropdownOpen"
+                class="scrollbar-thin mt-2 max-h-48 space-y-1 overflow-y-auto rounded-md border bg-popover p-2 shadow-md"
+              >
                 <label
                   v-for="m in filteredEpModels.items"
                   :key="m.slug"

@@ -143,15 +143,21 @@ function onDocClick(e: MouseEvent) {
     close();
 }
 
+/** 外部滚动（页面/弹窗）时关闭浮层；浮层自己内部的滚动不关。 */
+function onWinScroll(e: Event) {
+  if (popoverRef.value?.contains(e.target as Node)) return;
+  close();
+}
+
 onMounted(() => {
   document.addEventListener("click", onDocClick, true);
   window.addEventListener("resize", close);
-  window.addEventListener("scroll", close, true);
+  window.addEventListener("scroll", onWinScroll, true);
 });
 onUnmounted(() => {
   document.removeEventListener("click", onDocClick, true);
   window.removeEventListener("resize", close);
-  window.removeEventListener("scroll", close, true);
+  window.removeEventListener("scroll", onWinScroll, true);
 });
 </script>
 
@@ -184,7 +190,7 @@ onUnmounted(() => {
       v-if="open"
       ref="popoverRef"
       class="fixed z-[60] max-h-60 overflow-y-auto rounded-md border bg-popover p-1 shadow-md scrollbar-thin"
-      :style="{ ...floatStyle, minWidth: 'max(100%, 11rem)' }"
+      :style="{ ...floatStyle, minWidth: '11rem' }"
     >
       <div v-if="searchable" class="relative mb-1">
         <Search class="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />

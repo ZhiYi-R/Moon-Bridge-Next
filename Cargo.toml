@@ -6,6 +6,7 @@ members = [
     "crates/plugin",
     "crates/store",
     "crates/gateway",
+    "crates/server",
     "src-tauri",
 ]
 

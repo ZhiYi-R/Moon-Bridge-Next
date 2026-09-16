@@ -1,0 +1,904 @@
+<script setup lang="ts">
+import { Pencil, Plus, RefreshCw, Trash2 } from "lucide-vue-next";
+import { computed, onActivated, onMounted, reactive, ref } from "vue";
+
+import Badge from "@/components/ui/Badge.vue";
+import Button from "@/components/ui/Button.vue";
+import Card from "@/components/ui/Card.vue";
+import CodeEditor from "@/components/ui/CodeEditor.vue";
+import Input from "@/components/ui/Input.vue";
+import Label from "@/components/ui/Label.vue";
+import Modal from "@/components/ui/Modal.vue";
+import Select from "@/components/ui/Select.vue";
+import Switch from "@/components/ui/Switch.vue";
+import { useConfirm } from "@/composables/useConfirm";
+import { useToast } from "@/composables/useToast";
+import { errMsg, balanceApi, providerApi, type BalanceCard, type BalanceCardView, type BalanceKeyResult, type BalanceQuota, type DisplayMode, type Provider } from "@/lib/api";
+import { BALANCE_TEMPLATES, DEFAULT_BALANCE_SCRIPT, type BalanceTemplate } from "@/lib/balanceTemplates";
+import { cn, formatTime } from "@/lib/utils";
+import { useBalanceStore } from "@/stores/balance";
+
+/** 新建卡片与文件脚本站位用的默认内联脚本（模板库的「通用百分比」）。 */
+const DEFAULT_SCRIPT = DEFAULT_BALANCE_SCRIPT;
+
+/** 显示样式选项（卡片快捷切换与编辑表单同源）。 */
+const DISPLAY_MODES: { value: DisplayMode; label: string }[] = [
+  { value: "auto", label: "自动" },
+  { value: "percent", label: "百分比" },
+  { value: "amount", label: "金额" },
+];
+
+const store = useBalanceStore();
+const { confirm } = useConfirm();
+const toast = useToast();
+
+const error = ref<string | null>(null);
+const editing = ref(false);
+const isNew = ref(false);
+const busy = ref(false);
+
+interface Form {
+  key: string;
+  providerKey: string;
+  baseUrl: string;
+  displayMode: DisplayMode;
+  intervalSecs: number;
+  enabled: boolean;
+  scriptRef: string;
+  inlineScript: string;
+  extraText: string;
+}
+
+const form = reactive<Form>({
+  key: "",
+  providerKey: "",
+  baseUrl: "",
+  displayMode: "auto",
+  intervalSecs: 900,
+  enabled: true,
+  scriptRef: "",
+  inlineScript: DEFAULT_SCRIPT,
+  extraText: "{}",
+});
+
+// ── 未保存守卫：进入编辑时拍快照，关闭弹窗时比对 ──
+const snapshot = ref("");
+const dirty = computed(() => JSON.stringify(form) !== snapshot.value);
+
+function takeSnapshot() {
+  snapshot.value = JSON.stringify(form);
+}
+
+async function guardClose(): Promise<boolean> {
+  if (!dirty.value) return true;
+  return await confirm({
+    title: "关闭编辑",
+    message: "有未保存的修改，确认丢弃？",
+    confirmText: "丢弃修改",
+  });
+}
+
+// ── 展示辅助 ──
+
+function quotaUsed(q: BalanceQuota): number {
+  if (typeof q.usedPercent === "number") return q.usedPercent;
+  if (typeof q.leftPercent === "number") return 100 - q.leftPercent;
+  return 0;
+}
+
+function quotaLeft(q: BalanceQuota): number {
+  if (typeof q.leftPercent === "number") return q.leftPercent;
+  if (typeof q.usedPercent === "number") return 100 - q.usedPercent;
+  return 0;
+}
+
+/** 卡片是否有百分比口径的配额数据（强制百分比模式据此决定「—」）。 */
+function hasPercent(q: BalanceQuota): boolean {
+  return typeof q.usedPercent === "number" || typeof q.leftPercent === "number";
+}
+
+/** 该条在该展示样式下是否走金额口径：auto 看有没有 usedAmount，percent/amount 由卡片强制。 */
+function isAmountMode(mode: DisplayMode, q: BalanceQuota): boolean {
+  if (mode === "amount") return true;
+  if (mode === "percent") return false;
+  return typeof q.usedAmount === "number";
+}
+
+/** 金额文案「消耗 x{unit} · 余额 y{unit}」；used/left 都缺时返回 null。
+ *  金额原样渲染（不取整，可能带小数）；单位缺省时只显示数字。 */
+function amountLine(q: BalanceQuota): string | null {
+  const unit = q.unit ?? "";
+  const parts: string[] = [];
+  if (typeof q.usedAmount === "number") parts.push(`消耗 ${q.usedAmount}${unit}`);
+  if (typeof q.leftAmount === "number") parts.push(`余额 ${q.leftAmount}${unit}`);
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+/** 百分比文案「已用 x% · 剩余 y%」；两个百分比都缺时返回 null。 */
+function percentLine(q: BalanceQuota): string | null {
+  return hasPercent(q)
+    ? `${quotaUsed(q).toFixed(0)}% · 剩余 ${quotaLeft(q).toFixed(0)}%`
+    : null;
+}
+
+/** 配额行文案：缺该口径所需字段时显示「—」。 */
+function quotaLine(mode: DisplayMode, q: BalanceQuota): string {
+  return (isAmountMode(mode, q) ? amountLine(q) : percentLine(q)) ?? "—";
+}
+
+/** 进度条比例：缺该口径所需字段时返回 null（不渲染进度条）。 */
+function quotaBarPercent(mode: DisplayMode, q: BalanceQuota): number | null {
+  const clamp = (v: number) => Math.min(100, Math.max(0, v));
+  if (isAmountMode(mode, q)) {
+    if (typeof q.usedAmount !== "number" || typeof q.leftAmount !== "number") return null;
+    const total = q.usedAmount + q.leftAmount;
+    return total > 0 ? clamp((q.usedAmount / total) * 100) : null;
+  }
+  if (typeof q.usedPercent === "number") return clamp(q.usedPercent);
+  if (typeof q.leftPercent === "number") return clamp(100 - q.leftPercent);
+  return null;
+}
+
+/** 间隔文案：0 表示关闭定时。 */
+function intervalText(secs: number): string {
+  if (!secs) return "定时关闭";
+  if (secs < 3600) return `每 ${Math.round(secs / 60)} 分钟`;
+  return `每 ${(secs / 3600).toFixed(secs % 3600 === 0 ? 0 : 1)} 小时`;
+}
+
+/** 重置时间文案：纯数字串视为 unix 秒（契约允许脚本给数字，沙箱无 os 库无法自行
+ *  格式化）转为本地时间；其余字符串原样展示。 */
+function resetText(q: BalanceQuota): string {
+  const v = q.resetAt;
+  if (v === null || v === undefined || v === "") return "";
+  return /^\d{9,11}$/.test(v) ? formatTime(Number(v)) : v;
+}
+
+/** 无 quotas 时的回退展示：载荷去掉空字段后的 pretty JSON。 */
+function payloadJson(payload: Record<string, unknown>): string {
+  const rest: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(payload)) {
+    if (v === null || v === undefined) continue;
+    rest[k] = v;
+  }
+  return JSON.stringify(rest, null, 2);
+}
+
+/** 载荷除空字段外是否还有内容（决定要不要折叠展示 JSON）。 */
+function hasPayloadBody(payload: Record<string, unknown>): boolean {
+  return Object.values(payload).some((v) => v !== null && v !== undefined);
+}
+
+/** 卡片分组键：上游服务 key 优先，旧卡遗留的展示名兜底，再落「未分组」并排最后；
+ *  其余组名按中文排序，组内沿用后端口径（position 升序，再 createdAt）。 */
+const groups = computed(() => {
+  const map = new Map<string, { label: string; ungrouped: boolean; cards: BalanceCardView[] }>();
+  for (const c of store.cards) {
+    const label = (c.providerKey ?? "").trim() || (c.providerLabel ?? "").trim();
+    const g = map.get(label) ?? { label: label || "未分组", ungrouped: !label, cards: [] };
+    g.cards.push(c);
+    map.set(label, g);
+  }
+  return [...map.values()]
+    .map((g) => ({
+      ...g,
+      cards: [...g.cards].sort((a, b) => a.position - b.position || a.createdAt - b.createdAt),
+    }))
+    .sort((a, b) => {
+      if (a.ungrouped !== b.ungrouped) return a.ungrouped ? 1 : -1;
+      return a.label.localeCompare(b.label, "zh");
+    });
+});
+
+// ── 上游服务候选：卡片引用 provider.key，表单下拉即取其列表 ──
+
+const providers = ref<Provider[]>([]);
+
+async function ensureProviders() {
+  if (providers.value.length > 0) return;
+  providers.value = await providerApi.list().catch(() => [] as Provider[]);
+}
+
+const providerOptions = computed(() =>
+  providers.value.map((p) => ({ value: p.key, label: p.key })),
+);
+
+/** 表单当前选中的上游服务（未选中时为 undefined）。 */
+const selectedProvider = computed(() =>
+  providers.value.find((p) => p.key === form.providerKey),
+);
+
+/** 单个 provider 的端点与去重后非空 key 数（仅用于表单提示，不复刻回退规则）。 */
+function providerSummary(p: Provider): string {
+  const keys = new Set(p.endpoints.map((e) => e.apiKey).filter((k) => k));
+  return `${p.endpoints.length} 个端点 · ${keys.size} 个 key（去重后）`;
+}
+
+const selectedProviderSummary = computed(() =>
+  selectedProvider.value ? providerSummary(selectedProvider.value) : "",
+);
+
+/** 卡片副标题：绑定的上游服务 + 可选查询 URL；旧手填卡标出手填模式。 */
+function cardBindingText(c: BalanceCardView): string {
+  const target = c.providerKey ? c.providerKey : "手填模式（旧版）";
+  const url = (c.baseUrl ?? "").trim();
+  return url ? `${target} · ${url}` : target;
+}
+
+/** 一张配置卡展开成逐 key 的渲染行：有结果时每个 key 一行（拆成独立卡片展示），
+ *  从未查询过时补一行 `result: null` 的「未查询」占位卡。 */
+interface CardRow {
+  card: BalanceCardView;
+  result: BalanceKeyResult | null;
+}
+
+function rowsOf(c: BalanceCardView): CardRow[] {
+  if (c.results.length === 0) return [{ card: c, result: null }];
+  return c.results.map((result) => ({ card: c, result }));
+}
+
+/** 单 key 刷新的旋转标记（与 store 的粒度口径一致）。 */
+function refreshMark(c: BalanceCardView, r: BalanceKeyResult | null): string {
+  return r ? `${c.key}#${r.keyIndex}` : c.key;
+}
+
+// ── 加载与查询 ──
+
+onMounted(() => store.list());
+// 路由缓存复用：有数据时静默刷新，不闪整页 loading
+onActivated(() => {
+  if (store.loaded) store.list();
+});
+
+async function refreshAll() {
+  error.value = null;
+  try {
+    await store.refreshAll();
+    toast.success("已刷新全部余额卡片");
+  } catch (e) {
+    error.value = errMsg(e);
+  }
+}
+
+async function refreshOne(key: string, keyIndex?: number) {
+  error.value = null;
+  try {
+    await store.refreshOne(key, keyIndex);
+  } catch (e) {
+    error.value = errMsg(e);
+  }
+}
+
+// ── 编辑 ──
+
+function newCard() {
+  isNew.value = true;
+  Object.assign(form, {
+    key: "",
+    providerKey: "",
+    baseUrl: "",
+    displayMode: "auto",
+    intervalSecs: 900,
+    enabled: true,
+    scriptRef: "",
+    inlineScript: DEFAULT_SCRIPT,
+    extraText: "{}",
+  });
+  error.value = null;
+  testResult.value = null;
+  templateId.value = "";
+  editing.value = true;
+  void ensureProviders();
+  takeSnapshot();
+}
+
+function editCard(key: string) {
+  const c = store.cards.find((x) => x.key === key);
+  if (!c) return;
+  isNew.value = false;
+  // scriptRef 为 .lua 路径时走文件引用；存脚本原文时填入内联编辑器
+  const isPath = c.scriptRef.trim().toLowerCase().endsWith(".lua");
+  Object.assign(form, {
+    key: c.key,
+    providerKey: c.providerKey ?? "",
+    baseUrl: c.baseUrl,
+    displayMode: c.displayMode,
+    intervalSecs: c.intervalSecs,
+    enabled: c.enabled,
+    scriptRef: isPath ? c.scriptRef : "",
+    inlineScript: isPath ? DEFAULT_SCRIPT : c.scriptRef,
+    extraText: JSON.stringify(c.extra ?? {}, null, 2),
+  });
+  error.value = null;
+  testResult.value = null;
+  templateId.value = "";
+  editing.value = true;
+  void ensureProviders();
+  takeSnapshot();
+}
+
+async function closeModal() {
+  if (await guardClose()) editing.value = false;
+}
+
+// ── 新建卡片的模板填充：选中即把脚本与建议默认值（URL/额外参数/间隔）填入表单 ──
+const templateId = ref("");
+
+const templateOptions = BALANCE_TEMPLATES.map((t) => ({ value: t.id, label: t.label }));
+
+const selectedTemplate = computed<BalanceTemplate | undefined>(() =>
+  BALANCE_TEMPLATES.find((t) => t.id === templateId.value),
+);
+
+/** 应用模板：覆盖脚本编辑区，并填入模板自带的建议表单值（未携带的字段不动）。 */
+function applyTemplate(id: string) {
+  templateId.value = id;
+  const t = selectedTemplate.value;
+  if (!t) return;
+  form.inlineScript = t.script;
+  if (t.baseUrl !== undefined) form.baseUrl = t.baseUrl;
+  if (t.extraText !== undefined) form.extraText = t.extraText;
+  if (t.intervalSecs !== undefined) form.intervalSecs = t.intervalSecs;
+}
+
+// ── 测试拉取（dry-run 预览）：用当前表单内容逐 key 试跑一次，不保存、不影响线上结果 ──
+const testing = ref(false);
+const testResult = ref<BalanceKeyResult[] | null>(null);
+
+/** 本地校验失败时直接构造一个 error 结果进预览面板，不发请求。 */
+function testLocalError(message: string) {
+  testResult.value = [
+    { keyIndex: 0, keyLabel: "", status: "error", payload: null, error: message, queriedAt: 0 },
+  ];
+}
+
+async function runTest() {
+  testResult.value = null;
+  const scriptRef = form.scriptRef.trim() || form.inlineScript;
+  if (!scriptRef.trim()) return testLocalError("请先填写脚本路径或内联脚本");
+  if (!form.providerKey.trim()) return testLocalError("请先选择上游服务");
+  let extra: unknown;
+  try {
+    extra = JSON.parse(form.extraText || "{}");
+  } catch {
+    return testLocalError("额外参数不是合法 JSON");
+  }
+  const existing = store.cards.find((c) => c.key === form.key.trim());
+  testing.value = true;
+  try {
+    testResult.value = await balanceApi.test({
+      key: form.key.trim() || "preview",
+      providerKey: form.providerKey,
+      displayMode: form.displayMode,
+      apiKey: "",
+      baseUrl: form.baseUrl.trim(),
+      providerLabel: "",
+      scriptRef,
+      intervalSecs: Number(form.intervalSecs) || 0,
+      enabled: form.enabled,
+      extra,
+      position: existing?.position ?? 0,
+      createdAt: existing?.createdAt ?? 0,
+      updatedAt: 0,
+    });
+  } catch (e) {
+    testLocalError(errMsg(e));
+  } finally {
+    testing.value = false;
+  }
+}
+
+/** 卡片上的快捷切换：乐观改显示样式并落库，失败回滚（不加 toast）。 */
+async function setDisplayMode(c: BalanceCardView, mode: DisplayMode) {
+  if (c.displayMode === mode) return;
+  const prev = c.displayMode;
+  c.displayMode = mode;
+  error.value = null;
+  try {
+    await store.save(toCardInput(c));
+  } catch (e) {
+    c.displayMode = prev;
+    error.value = errMsg(e);
+  }
+}
+
+/** 视图 → 保存入参：只带卡片配置字段，查询结果不进 payload。 */
+function toCardInput(c: BalanceCardView): BalanceCard {
+  return {
+    key: c.key,
+    providerKey: c.providerKey,
+    displayMode: c.displayMode,
+    apiKey: c.apiKey,
+    baseUrl: c.baseUrl,
+    providerLabel: c.providerLabel,
+    scriptRef: c.scriptRef,
+    intervalSecs: c.intervalSecs,
+    enabled: c.enabled,
+    extra: c.extra,
+    position: c.position,
+    createdAt: c.createdAt,
+    updatedAt: c.updatedAt,
+  };
+}
+
+async function save(andQuery: boolean) {
+  error.value = null;
+  const key = form.key.trim();
+  if (!key) {
+    error.value = "卡片名（key）不能为空";
+    return;
+  }
+  if (!form.providerKey.trim()) {
+    error.value = "请选择上游服务";
+    return;
+  }
+  if (!form.scriptRef.trim() && !form.inlineScript.trim()) {
+    error.value = "请填写脚本路径或内联脚本";
+    return;
+  }
+  let extra: unknown;
+  try {
+    extra = JSON.parse(form.extraText || "{}");
+  } catch {
+    error.value = "extra 不是合法 JSON";
+    return;
+  }
+  const existing = store.cards.find((c) => c.key === key);
+  const card: BalanceCard = {
+    key,
+    providerKey: form.providerKey,
+    displayMode: form.displayMode,
+    // 手填 key 已废弃：新卡片不再提供入口，保存时显式回退为空（旧卡数据在此被清空）
+    apiKey: "",
+    baseUrl: form.baseUrl.trim(),
+    // 显示名字段已并入「上游服务」选择：恒为空串，界面按 providerKey 展示与分组
+    providerLabel: "",
+    // 内联脚本与插件记录同一约定：scriptRef 直接存脚本原文
+    scriptRef: form.scriptRef.trim() || form.inlineScript,
+    intervalSecs: Number(form.intervalSecs) || 0,
+    enabled: form.enabled,
+    extra,
+    position: existing?.position ?? store.cards.length,
+    createdAt: existing?.createdAt ?? Math.floor(Date.now() / 1000),
+    updatedAt: Math.floor(Date.now() / 1000),
+  };
+  busy.value = true;
+  try {
+    await store.save(card);
+    editing.value = false;
+    toast.success(isNew.value ? `余额卡片 “${key}” 已创建` : `余额卡片 “${key}” 已更新`);
+    if (andQuery) await refreshOne(key);
+  } catch (e) {
+    error.value = errMsg(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function remove(key: string) {
+  if (!(await confirm({ title: "删除余额卡片", message: `确认删除卡片 “${key}”？` }))) return;
+  error.value = null;
+  try {
+    await store.remove(key);
+    toast.success(`余额卡片 “${key}” 已删除`);
+  } catch (e) {
+    error.value = errMsg(e);
+  }
+}
+</script>
+
+<template>
+  <div class="flex h-full min-h-0 flex-col gap-4">
+    <div
+      v-if="error"
+      class="shrink-0 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive"
+    >
+      {{ error }}
+    </div>
+
+    <!-- 页头操作 -->
+    <div class="flex shrink-0 items-center justify-end gap-2">
+      <Button variant="outline" size="sm" :disabled="store.refreshingAll" @click="refreshAll">
+        <RefreshCw class="size-4" :class="store.refreshingAll ? 'animate-spin' : ''" />
+        一键刷新
+      </Button>
+      <Button size="sm" @click="newCard"><Plus class="size-4" /> 新增卡片</Button>
+    </div>
+
+    <div
+      v-if="store.loading && store.cards.length === 0"
+      class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
+    >
+      加载中…
+    </div>
+
+    <!-- 空态：引导 + 示例脚本 -->
+    <div
+      v-else-if="store.cards.length === 0"
+      class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
+    >
+      <p>还没有余额卡片。每张卡片绑定一个上游服务，用一段 Lua 脚本查询额度并按间隔自动刷新。</p>
+      <Button class="mt-4" size="sm" @click="newCard">
+        <Plus class="size-4" /> 使用示例脚本新建
+      </Button>
+    </div>
+
+    <!-- 卡片：按上游服务 key 分组（旧卡遗留展示名兜底） -->
+    <section v-else class="space-y-5">
+      <div v-for="g in groups" :key="g.label">
+        <div class="mb-2 flex items-baseline gap-2">
+          <h3 class="text-sm font-medium">{{ g.label }}</h3>
+          <span class="text-xs text-muted-foreground">
+            · {{ g.cards.reduce((n, c) => n + Math.max(c.results.length, 1), 0) }}
+          </span>
+        </div>
+        <div class="grid gap-4 grid-cols-[repeat(auto-fill,minmax(21rem,1fr))]">
+          <template v-for="c in g.cards" :key="c.key">
+            <Card
+              v-for="row in rowsOf(c)"
+              :key="`${c.key}#${row.result?.keyIndex ?? -1}`"
+              class="flex min-w-0 flex-col"
+            >
+            <div class="card-header flex-row items-center justify-between space-y-0">
+              <div class="flex min-w-0 items-center gap-2">
+                <span class="shrink-0 text-xs text-muted-foreground">Key</span>
+                <Badge variant="outline" class="max-w-[12rem] truncate font-mono" :title="c.key">
+                  {{ c.key }}
+                </Badge>
+                <Badge
+                  v-if="row.result?.keyLabel"
+                  variant="secondary"
+                  class="max-w-[10rem] truncate font-mono"
+                  :title="`API Key ${row.result.keyLabel}（掩码展示，原文不落库）`"
+                >
+                  {{ row.result.keyLabel }}
+                </Badge>
+              </div>
+              <Badge v-if="!row.result" variant="secondary" class="shrink-0">未查询</Badge>
+              <Badge
+                v-else
+                :variant="row.result.status === 'ok' ? 'success' : 'destructive'"
+                class="shrink-0"
+              >
+                {{ row.result.status === "ok" ? "正常" : "异常" }}
+              </Badge>
+            </div>
+
+            <div class="card-content space-y-2">
+              <div class="truncate text-xs text-muted-foreground" :title="cardBindingText(c)">
+                {{ cardBindingText(c) }}
+              </div>
+
+              <!-- 工具行：显示样式切换 + 该 key 刷新（从标题行挪出，避免拥挤重叠） -->
+              <div class="flex items-center justify-between gap-2">
+                <div class="flex items-center rounded-md border p-0.5">
+                  <button
+                    v-for="m in DISPLAY_MODES"
+                    :key="m.value"
+                    type="button"
+                    :title="`显示样式：${m.label}`"
+                    :class="
+                      cn(
+                        'rounded px-1.5 py-0.5 text-[11px] transition-colors',
+                        c.displayMode === m.value
+                          ? 'bg-accent text-accent-foreground'
+                          : 'text-muted-foreground hover:bg-accent/60',
+                      )
+                    "
+                    @click="setDisplayMode(c, m.value)"
+                  >
+                    {{ m.label }}
+                  </button>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  class="size-7"
+                  title="立即查询该 key"
+                  :disabled="store.refreshingKeys.has(refreshMark(c, row.result))"
+                  @click="refreshOne(c.key, row.result?.keyIndex)"
+                >
+                  <RefreshCw
+                    class="size-3.5"
+                    :class="store.refreshingKeys.has(refreshMark(c, row.result)) ? 'animate-spin' : ''"
+                  />
+                </Button>
+              </div>
+
+              <!-- 配额进度条组 -->
+              <div v-if="row.result?.payload?.quotas?.length" class="space-y-2 pt-1">
+                <div v-for="(q, i) in row.result.payload.quotas" :key="i">
+                  <div class="flex items-center justify-between text-xs">
+                    <span class="truncate">{{ q.label }}</span>
+                    <span class="shrink-0 text-muted-foreground tabular-nums">
+                      {{ quotaLine(c.displayMode, q) }}
+                    </span>
+                  </div>
+                  <div
+                    v-if="quotaBarPercent(c.displayMode, q) !== null"
+                    class="mt-1 h-2 w-full overflow-hidden rounded-full bg-muted"
+                  >
+                    <div
+                      class="h-full rounded-full bg-primary"
+                      :style="{ width: (quotaBarPercent(c.displayMode, q) ?? 0) + '%' }"
+                    ></div>
+                  </div>
+                  <div v-if="resetText(q)" class="mt-0.5 text-[11px] text-muted-foreground">
+                    重置 {{ resetText(q) }}
+                  </div>
+                </div>
+              </div>
+
+              <!-- 无 quotas 但载荷有内容：折叠展示 JSON -->
+              <details
+                v-else-if="row.result?.payload && hasPayloadBody(row.result.payload)"
+                class="pt-1"
+              >
+                <summary class="cursor-pointer text-xs text-muted-foreground">查看返回内容</summary>
+                <pre
+                  class="scrollbar-thin mt-1 max-h-40 overflow-auto rounded border bg-muted/40 p-2 font-mono text-[11px]"
+                >{{ payloadJson(row.result.payload) }}</pre>
+              </details>
+
+              <!-- 异常：显示 error / message，旧 quotas 仍在上方展示 -->
+              <div v-if="row.result?.status === 'error'" class="text-xs text-destructive">
+                {{ row.result.error || row.result.payload?.message || "查询失败" }}
+              </div>
+
+              <div v-if="row.result?.payload?.summary" class="text-xs text-muted-foreground">
+                {{ row.result.payload.summary }}
+              </div>
+            </div>
+
+            <div
+              class="mt-auto flex shrink-0 items-center justify-between gap-2 border-t px-5 py-2 text-[11px] text-muted-foreground"
+            >
+              <span>{{ row.result ? `上次查询 ${formatTime(row.result.queriedAt)}` : "尚未查询" }}</span>
+              <div class="flex items-center gap-2">
+                <span>{{ intervalText(c.intervalSecs) }}</span>
+                <Badge v-if="!c.enabled" variant="secondary">停用</Badge>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  class="size-6"
+                  title="编辑"
+                  @click="editCard(c.key)"
+                >
+                  <Pencil class="size-3" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  class="size-6"
+                  title="删除"
+                  @click="remove(c.key)"
+                >
+                  <Trash2 class="size-3 text-destructive" />
+                </Button>
+              </div>
+            </div>
+            </Card>
+          </template>
+        </div>
+      </div>
+    </section>
+
+    <!-- 新增 / 编辑弹窗：单列纵向布局，只上下滚动 -->
+    <Modal
+      :open="editing"
+      :title="isNew ? '新增余额卡片' : '编辑余额卡片'"
+      width="max-w-3xl"
+      :guard="guardClose"
+      @close="editing = false"
+    >
+      <div class="grid gap-4">
+        <!-- 模板填充（仅新建）：选中即填入脚本与建议的 URL/额外参数/间隔 -->
+        <div v-if="isNew" class="space-y-1.5 rounded-md border border-dashed p-3">
+          <Label>从模板填充（可选）</Label>
+          <Select
+            :model-value="templateId"
+            :options="templateOptions"
+            placeholder="选择常用服务的查询模板，也可直接手写"
+            @update:model-value="applyTemplate"
+          />
+          <p v-if="selectedTemplate" class="text-xs leading-relaxed text-muted-foreground">
+            {{ selectedTemplate.description }}
+          </p>
+        </div>
+
+        <div class="space-y-1.5">
+          <Label for="bc-key">卡片名</Label>
+          <Input
+            id="bc-key"
+            v-model="form.key"
+            placeholder="如 anthropic-official"
+            :disabled="!isNew"
+          />
+          <p class="text-xs text-muted-foreground">卡片的唯一标识，同时作为脚本 ctx.name</p>
+        </div>
+
+        <div class="space-y-1.5">
+          <Label>上游服务</Label>
+          <Select v-model="form.providerKey" :options="providerOptions" placeholder="请选择上游服务" />
+          <p v-if="selectedProviderSummary" class="text-xs text-muted-foreground">
+            {{ selectedProviderSummary }}
+          </p>
+          <p v-else-if="providerOptions.length === 0" class="text-xs text-muted-foreground">
+            还没有上游服务，请先到「上游服务」页创建。
+          </p>
+          <p class="text-xs text-muted-foreground">
+            引擎用该服务端点的 key（去重保序，留空继承前一个非空 key）逐个执行脚本，每个 key 拆成一张卡片
+          </p>
+        </div>
+
+        <div class="space-y-1.5">
+          <Label for="bc-url">查询 URL（可选）</Label>
+          <Input id="bc-url" v-model="form.baseUrl" placeholder="如 https://api.example.com" />
+          <p class="text-xs text-muted-foreground">
+            配额接口的基准地址，脚本里用 ctx.base_url 读取；留空则脚本需自己处理 URL
+          </p>
+        </div>
+
+        <div class="space-y-1.5">
+          <Label>显示样式</Label>
+          <div class="flex items-center rounded-md border p-0.5">
+            <button
+              v-for="m in DISPLAY_MODES"
+              :key="m.value"
+              type="button"
+              :class="
+                cn(
+                  'flex-1 rounded px-2 py-1 text-xs transition-colors',
+                  form.displayMode === m.value
+                    ? 'bg-accent text-accent-foreground'
+                    : 'text-muted-foreground hover:bg-accent/60',
+                )
+              "
+              @click="form.displayMode = m.value"
+            >
+              {{ m.label }}
+            </button>
+          </div>
+          <p class="text-xs text-muted-foreground">自动 = 按脚本返回的字段判断；强制口径缺字段时显示「—」</p>
+        </div>
+
+        <div class="space-y-1.5">
+          <Label for="bc-interval">查询间隔（秒）</Label>
+          <Input id="bc-interval" v-model="form.intervalSecs" type="number" min="0" />
+          <p class="text-xs text-muted-foreground">0 = 关闭定时；小于 60 秒会按 60 秒计</p>
+        </div>
+
+        <div class="space-y-1.5">
+          <Label>启用</Label>
+          <div class="pt-1">
+            <Switch :checked="form.enabled" @update:checked="(v: boolean) => (form.enabled = v)" />
+          </div>
+        </div>
+
+        <div class="space-y-1.5">
+          <Label for="bc-script">脚本引用</Label>
+          <Input id="bc-script" v-model="form.scriptRef" placeholder="如 balance_openai.lua" />
+          <p class="text-xs text-muted-foreground">
+            填 .lua 路径（插件目录内）或留空用下方内联脚本；内联时脚本原文直接存入脚本引用。
+          </p>
+        </div>
+
+        <!-- 脚本编写指南：默认收起，避免弹窗过长 -->
+        <details class="rounded-md border">
+          <summary class="cursor-pointer px-3 py-2 text-sm font-medium">脚本编写指南</summary>
+          <div class="space-y-3 border-t px-3 py-3 text-xs leading-relaxed">
+            <div class="space-y-1">
+              <p class="font-medium">一、输入参数 ctx</p>
+              <ul class="space-y-0.5 text-muted-foreground">
+                <li><code class="font-mono">ctx.name</code>：卡片名（key）</li>
+                <li><code class="font-mono">ctx.key</code>：本次查询的 API Key</li>
+                <li>
+                  <code class="font-mono">ctx.keys</code>：当前 key 的单元素数组（= [ctx.key]）。
+                  <span class="text-foreground">上游服务有多个 key 时，引擎会对每个 key 各跑一次脚本并拆成多张卡片展示，脚本只需按单个 key 编写</span>
+                </li>
+                <li>
+                  <code class="font-mono">ctx.base_url</code>：卡片上填写的查询 URL（可选；
+                  没填时是空字符串，脚本需自己处理 URL）
+                </li>
+                <li><code class="font-mono">ctx.provider</code>：上游服务 key</li>
+                <li>
+                  <code class="font-mono">ctx.extra</code>：卡片「额外参数 JSON」的解码值
+                </li>
+              </ul>
+            </div>
+
+            <div class="space-y-1">
+              <p class="font-medium">二、返回值契约</p>
+              <p class="text-muted-foreground">
+                返回一个 table，宿主序列化为 JSON 落库。常用字段：<code class="font-mono">status</code>（ok/error，缺省 ok）、<code class="font-mono">message</code>（失败原因）、<code class="font-mono">summary</code>（一句话摘要）、<code class="font-mono">quotas</code>（配额条数组，条数与 label 完全自定义）。
+              </p>
+              <p class="text-muted-foreground">
+                每条 quota 两种口径各给一个字段即可（quota 里用 snake_case；前端 camelCase 由引擎转换，自定义额外字段原样保留）：
+              </p>
+              <pre
+                class="scrollbar-thin overflow-auto rounded border bg-muted/40 p-2 font-mono text-[11px]"
+              >{ label = "Weekly", used_percent = 43, reset_at = "2026/9/21 13:02" }
+{ label = "余额", unit = "¥", used_amount = 12.5, left_amount = 37.5 }</pre>
+              <p class="text-muted-foreground">
+                百分比口径的 used_percent / left_percent 互补，给一个即可；金额口径同理给 used_amount / left_amount。
+                reset_at 可给展示字符串，或 unix 秒数字（前端会格式化为本地时间）。
+              </p>
+              <p class="text-muted-foreground">
+                脚本首行必须是 <code class="font-mono">MB = {}</code>，否则宿主取不到入口；HTTP 头写成
+                <code class="font-mono">&#123;&#123; "authorization", "Bearer " .. key &#125;&#125;</code>
+                的数组形式；上游返回 JSON 时 <code class="font-mono">r.body</code> 已是 table，可直接取字段。
+              </p>
+            </div>
+
+            <div class="space-y-1">
+              <p class="font-medium">三、额外参数 JSON</p>
+              <p class="text-muted-foreground">
+                表单下方那段 JSON，脚本用 <code class="font-mono">ctx.extra.字段名</code> 读取。用途是让同一段脚本服务多张卡时按卡差异化（例如不同阈值/币种）；没有需要就留空 <code class="font-mono">{}</code>。
+              </p>
+            </div>
+          </div>
+        </details>
+
+        <div class="flex min-h-0 flex-col space-y-1.5">
+          <Label>内联脚本</Label>
+          <CodeEditor v-model="form.inlineScript" height="14rem" />
+        </div>
+        <div class="flex min-h-0 flex-col space-y-1.5">
+          <Label>额外参数（JSON）</Label>
+          <CodeEditor v-model="form.extraText" lang="json" height="8rem" />
+        </div>
+
+        <!-- 测试拉取：用当前表单内容 dry-run 一次，不写库、不影响线上结果 -->
+        <div class="space-y-2 rounded-md border p-3">
+          <div class="flex items-center gap-2">
+            <Button variant="outline" size="sm" :disabled="testing" @click="runTest">
+              <RefreshCw class="size-3.5" :class="testing ? 'animate-spin' : ''" />
+              {{ testing ? "查询中…" : "测试拉取" }}
+            </Button>
+            <span class="text-xs text-muted-foreground">
+              用当前表单内容试跑一次，不保存、不影响线上结果
+            </span>
+          </div>
+          <div v-if="testResult" class="space-y-3 border-t pt-2">
+            <div
+              v-for="r in testResult"
+              :key="r.keyIndex"
+              class="space-y-1.5"
+            >
+              <div class="flex items-center gap-2">
+                <Badge
+                  v-if="r.keyLabel"
+                  variant="secondary"
+                  class="max-w-[10rem] truncate font-mono"
+                  :title="`API Key ${r.keyLabel}（掩码）`"
+                >
+                  {{ r.keyLabel }}
+                </Badge>
+                <Badge :variant="r.status === 'ok' ? 'success' : 'destructive'">
+                  {{ r.status === "ok" ? "成功" : "失败" }}
+                </Badge>
+                <span v-if="r.queriedAt" class="text-xs text-muted-foreground">
+                  {{ formatTime(r.queriedAt) }}
+                </span>
+              </div>
+              <p v-if="r.error" class="text-xs text-destructive">{{ r.error }}</p>
+              <pre
+                v-if="r.payload"
+                class="scrollbar-thin max-h-48 overflow-auto rounded border bg-muted/40 p-2 font-mono text-[11px]"
+              >{{ JSON.stringify(r.payload, null, 2) }}</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <Button variant="ghost" size="sm" @click="closeModal">取消</Button>
+        <Button variant="outline" size="sm" :disabled="busy" @click="save(true)">
+          保存并立即查询
+        </Button>
+        <Button size="sm" :disabled="busy" @click="save(false)">
+          {{ busy ? "保存中…" : "保存" }}
+        </Button>
+      </template>
+    </Modal>
+  </div>
+</template>

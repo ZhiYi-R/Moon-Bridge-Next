@@ -14,6 +14,7 @@
 //!
 //! 依赖方向：gateway → core, protocol, plugin, store。
 
+pub mod balance;
 pub mod bridge;
 pub mod config;
 pub mod dispatch;
@@ -37,6 +38,9 @@ use moonbridge_plugin::{
 use moonbridge_protocol::{builtin_registry, NoopHooks, PluginHooks, Registry};
 use moonbridge_store::Database;
 
+pub use balance::{
+    list_views, run_balance_loop, spawn_balance_scheduler, view_of, BalanceEngine, SCHEDULE_TICK,
+};
 pub use config::GatewayConfig;
 pub use error::{GatewayError, Result};
 pub use state::AppState;

@@ -24,8 +24,9 @@ crates/protocol   moonbridge-protocol  Adapter traits + PluginHooks(Core+Raw) + 
 crates/plugin     moonbridge-plugin    mlua 运行时 + mb.* 宿主 API + LuaPluginRegistry(impl PluginHooks)
 crates/store      moonbridge-store     rusqlite + migration + DAO(provider/model/route/plugin/usage/settings)
 crates/gateway    moonbridge-gateway   axum server + 路由 + dispatch 编排 + provider 管理 + usage
+crates/server     moonbridge-server    无头服务端：同端口合并 LLM 网关 + /api 管理 REST + SPA 静态托管
 src-tauri         moonbridge-app       Tauri 壳：commands(调 gateway/store) + tray + 引导配置
-ui                —                    Vue3 前端
+ui                —                    Vue3 前端（Tauri IPC / 纯浏览器 REST 双运行时）
 ```
 
 **依赖方向（单向，禁止反向）**：
@@ -36,6 +37,7 @@ protocol  → core
 plugin    → core, protocol (实现 protocol 定义的 PluginHooks trait)
 store     → core
 gateway   → core, protocol, plugin, store
+server    → gateway, store, core
 app       → gateway, store, core
 ```
 
@@ -248,7 +250,7 @@ function MB.on_request(ctx, req) ... end -- 就地修改 req 即生效，亦可 
 
 SQLite（rusqlite, bundled + WAL），手写版本化 migration，每表一个 DAO 模块，统一由 `Database` 暴露。并发模型：单连接 + `parking_lot::Mutex` 串行化（本地网关低并发足够）。
 
-当前 schema 版本 **V9**（`schema.rs` 的 `MIGRATIONS` 按版本升序手写，`schema_version` 表记录已应用版本）。
+当前 schema 版本 **V10**（`schema.rs` 的 `MIGRATIONS` 按版本升序手写，`schema_version` 表记录已应用版本）。
 
 | 表 | 关键列 |
 |----|--------|
@@ -261,6 +263,8 @@ SQLite（rusqlite, bundled + WAL），手写版本化 migration，每表一个 D
 | `plugin_bindings` | plugin_name + scope + scope_key PK, enabled, config_json |
 | `usage_records` | id PK, session_id, model, upstream_model, **provider_key（V9，可空）**, input/output/cache_read/cache_write/**reasoning**_tokens, cost, status, error, latency_ms, **ttft_ms**, created_at |
 | `settings` | key PK, value_json |
+| `balance_cards`（V10） | key PK, api_key, base_url, provider_label, script_ref（规则同插件：`.lua`=plugins_dir 内文件，否则内联脚本）, interval_secs（0=禁用，保存时 1..59 夹到 60）, enabled, extra_json, position, timestamps；V11 加 provider_key/display_mode |
+| `balance_results`（V12 重建） | (card_key, key_index) 联合 PK, key_label（掩码 key 标签，原文不落此表）, status(ok/error), payload_json（该 key 最近一次返回，引擎级失败时保留旧值）, error, queried_at —— 多 key 卡片按 key 拆行，删卡同事务级联 |
 
 - api_key 加密：`EncKey` 抽象（脚手架用 `PlaintextKey`，**当前 API Key 明文落库**，生产可换 aes-gcm/keyring）。列名 `api_key_enc` 是为切换预留的。
 - `status` 取值 `ok` / `error` / `aborted`（流未读尽即结束，如客户端断开）；`ttft_ms` 仅流式请求有值。
@@ -396,23 +400,166 @@ Client → axum: POST /v1/responses | /v1/messages | /v1/chat/completions
 
 ---
 
-## 10. 前端（ui）
+## 10. 无头服务端（crates/server）
+
+`moonbridge-server` 是把桌面端管理能力以 REST API 暴露的无头（headless）形态：**同一端口**
+合并三块——LLM 网关路由（`/v1/*` 等，复用 `gateway::server::router`）、`/api/*` 管理 REST、
+前端 SPA 静态托管。目标场景是服务器/Docker 部署（无 Tauri、无系统依赖），管理界面改由
+纯浏览器访问。
+
+### 启动参数（`args.rs`）
+
+| 参数 | 环境变量 | 语义 |
+|------|----------|------|
+| `--admin-token <T>` | `MOONBRIDGE_ADMIN_TOKEN` | **强制**，缺失拒绝启动；见下方认证模型 |
+| `--addr <A>` | — | 监听地址覆盖（默认取配置文件） |
+| `--config-dir <D>` | — | 配置目录（默认与桌面端同位置） |
+| `--data-dir <D>` | — | 数据目录：数据库、插件、trace（默认与桌面端同位置） |
+| `--web-dir <D>` | `MOONBRIDGE_WEB_DIR` | 前端静态文件目录（默认 `./ui/dist`） |
+
+未知参数与位置参数一律报错；`--key value` 与 `--key=value` 均接受。
+
+### 认证模型（单一 admin token）
+
+- `/api/*` 全部要求 `Authorization: Bearer <admin-token>`，缺失/错误返回 401 JSON。
+- 启动时把 `GatewayConfig.auth_token` **强制设为 admin token**（仅内存注入，永不回写
+  config.toml、日志不打印）——LLM 的 POST 入口与 `/api/*` 因而共用同一枚 token。
+  未设 token 启动只有一种途径：不提供 `--admin-token`，但那会被参数解析直接拒绝。
+- `PUT /api/config`（保存设置页整体配置）在落盘前**强制把 `authToken` 回填为启动 token**：
+  管理 API 的调用者无法借保存配置把网关凭据改写为别的值并持久化。
+- `/health` 与 `GET /v1/models` 保持公开（允许裸奔：模型目录不视为敏感，反代/监控
+  探活可无凭据拉取）；SPA 静态资源公开（页面内的数据请求仍要 token）。
+
+### 进程与生命周期语义
+
+网关随进程运行，没有桌面端的独立启停：
+
+- `GET /api/gateway/status` 恒 `running: true`（进程活着网关就在）。
+- `POST /api/gateway/restart` 返回 202 后延迟 500ms `std::process::exit(0)`——由外部
+  supervisor（docker `restart: unless-stopped` / systemd）拉起新进程完成「重启生效」，
+  前端「保存后重启网关」的交互在容器部署下等价于进程重启。`stop` 在 web 模式下无意义，
+  前端不展示。
+- 插件 `MB.init` / `MB.shutdown` 的成对扇出与桌面端同口径：绑定端口成功后、serve 前
+  init，服务退出后 shutdown（`serve.rs` 复刻 `serve_with_shutdown` 语义，含 SIGTERM）。
+
+### 管理 API（`/api/*`，`admin/`）
+
+与 src-tauri commands **1:1 同语义**（40+ 端点），DTO 直接复用 store/gateway 的
+camelCase 契约，前端 `call()` 分发层据此在 IPC 与 REST 间透明切换：
+
+| 分组 | 端点 |
+|------|------|
+| 网关 | `GET /api/gateway/status` · `POST /api/gateway/restart` |
+| 应用 | `GET /api/app/info`（`mode: "server"`）· `GET/PUT /api/config` |
+| Provider/Offer | `GET/PUT /api/providers` · `GET/DELETE /api/providers/:key` · `GET /api/providers/:key/offers` · `PUT /api/offers` · `DELETE /api/providers/:key/offers/:slug` |
+| 模型/目录 | `GET/PUT /api/models` · `GET/DELETE /api/models/:slug` · `GET /api/catalog` · `POST /api/catalog/import` |
+| 路由 | `GET/PUT /api/routes` · `GET/DELETE /api/routes/:alias` |
+| 插件 | `GET/PUT /api/plugins` · `GET/DELETE /api/plugins/:name` · `POST /api/plugins/import`（multipart 文件）· `GET/PUT /api/plugins/:name/script` · `GET /api/plugins/:name/bindings` |
+| 绑定 | `GET/PUT /api/bindings` · `DELETE /api/bindings/:pluginName/:scope/:scopeKey` |
+| 用量 | `GET /api/usage` · `GET /api/usage/summary` |
+| 余额 | `GET/PUT /api/balance/cards` · `DELETE /api/balance/cards/:key` · `POST /api/balance/cards/:key/refresh`（可加 `?key_index=N` 只刷新单个 key） · `POST /api/balance/refresh` · `POST /api/balance/test`（dry-run） |
+| Trace | `GET /api/traces` · `GET/DELETE /api/trace`（单数，路径经查询参数，含穿越校验） |
+| 设置 | `GET /api/settings` · `GET/PUT/DELETE /api/settings/:key` |
+
+桌面端的约束在服务端全部保留：`plugin_save` 的 `MB.requires` 启用门控（不满足返回
+`REQUIREMENTS` 前缀结构化错误）、脚本读写的路径穿越防护（与 gateway 加载共用
+`parse_script_ref` 规则）、trace 读取的路径校验、catalog 导入的定价回填。
+`/api/*` 下未匹配的路径返回 JSON 404，不会被 SPA fallback 吞掉。
+
+### 余额&健康看板（`gateway::balance` + `/api/balance/*`）
+
+每张余额卡片是一段**一次性 Lua 脚本**（不进插件注册表、不参与请求链路）：宿主加载脚本
+（复用 `LuaRuntime` 沙箱与全部 `mb.*` 宿主 API），调用 `MB.query(ctx)` 并把返回值落库。
+
+- **ctx**（单 key 形状）：`{ name, key, keys, base_url, provider, extra }`（`extra` 为卡片
+  自定义 JSON，同时也作为 `mb.config`）；`keys` 恒为当前 key 的单元素数组。
+  `mb.http.request` 的响应 body 在上游返回 JSON 时已自动解析为 Lua table，脚本可直接
+  `r.body.xxx`。
+- **卡片引用上游 Provider**（`provider_key`，V11 起）：引擎从该 Provider 的端点解析
+  有效 key（端点 key 留空回退前一个非空 key，与路由侧同口径）并**去重保序**；V12 起
+  **对每个 key 各执行一次脚本并拆成多张卡片展示**——一个提供商多个 key 只写一段脚本，
+  脚本始终按单 key 编写（`ctx.key`），不必遍历汇总。引用的 Provider 不存在时报引擎级
+  错误（落单行 `key_index=0` 的错误结果）。`provider_key` 为空是旧版手填模式
+  （`api_key` 退化为单元素列表），仅为兼容保留，UI 已不提供手填入口；手填连 key 都
+  留空时仍执行一次（ctx.key 为空串），卡片不会因此停摆。
+- **结果按 key 拆行落库**（V12）：`(card_key, key_index)` 联合主键，每行带
+  `key_label`（掩码展示标签：长度 ≤4 → `****`，≤10 → 前 2 位 + `…`，更长 →
+  前 6 位 + `…` + 后 4 位；key 原文不进结果表）。整卡执行后 `key_index >= 当前 key 数`
+  的残留行被剪掉（prune）；卡片「上次查询时刻」取各行 `queried_at` 的最大值（到期判定
+  口径）。前端逐 key 渲染一张卡（标题 = 卡片名 + 掩码 key chip），可整卡刷新也可
+  单 key 刷新（REST `?key_index=N` / IPC `keyIndex`）。
+- **查询 URL 是卡片自己的可选输入**（`base_url`，不从 Provider 端点继承）：配额接口
+  基准地址，脚本读 `ctx.base_url`，留空为空字符串。
+- **返回契约**：`{ status = "ok"|"error"（缺省=ok）, message?, quotas = { { label,
+  used_percent?, left_percent?, unit?, used_amount?, left_amount?, reset_at? } },
+  summary?, ... }`。落库前 `quotas` 归一化为 camelCase 并补齐 used/left percent 互补值
+  （amount 字段原样透传，amount 之间及与 percent 之间均不做互补互推；None 字段不序列化）；
+  `reset_at` 接受展示字符串或 unix 秒数字（归一为字符串，前端对纯数字按本地时间格式化——
+  沙箱无 os 库，脚本拿到毫秒时间戳只能除 1000 后给数字）；脚本自定义字段原样保留在 payload。
+- **内置脚本模板**（`ui/src/lib/balanceTemplates.ts`）：新建卡片时可从模板填充脚本与建议
+  默认值（查询 URL/额外参数/间隔）。模板按各服务真实接口编写：通用百分比/金额骨架 +
+  new-api 系中转（`/api/usage/token/`，key 维度额度）、DeepSeek、Moonshot/Kimi 开放平台、
+  SiliconFlow、OpenRouter（credits + key 限额双接口）、智谱 GLM Coding Plan（裸 key 鉴权 +
+  Bearer 回退）、Kimi Coding Plan（月度 credits + 5h/weekly 窗口）、Claude Code 订阅
+  （OAuth usage 接口）。OpenAI 官方与 one-api/Veloera/done-hub 无 key 维度余额接口，
+  不提供模板。
+- **两种配额模式与显示切换**：百分比模式给 percent 字段，显示「{used}% · 剩余 {left}%」；
+  金额模式给 `unit` + `used_amount`（可再带 `left_amount`），显示
+  「消耗 {used}{unit} · 余额 {left}{unit}」。进度条比例：优先 percent，否则双 amount 时
+  `used/(used+left)*100`，都没有则不渲染。卡片 `display_mode`（`auto`/`percent`/`amount`，
+  保存时非法值归一为 auto）让用户在卡片上与编辑表单里切换显示样式：auto 按数据自动，
+  强制模式缺对应字段时显示「—」不渲染进度条。前端按 `providerKey || providerLabel(旧卡)`
+  分组展示卡片。
+- **dry-run 预览**：`POST /api/balance/test`（Tauri `balance_card_test`）以请求体里的
+  卡片配置逐 key 试跑脚本（卡片无需已保存），返回结果数组，**不写库、不读历史
+  结果**——编辑表单的「测试拉取」据此实现预览，引擎级失败时该 key 的 payload 为 None。
+- **失败分层（按 key 独立）**：引擎级失败（脚本读不到 / 无 `MB.query` / 抛错 / 45s
+  超时）→ 该 key `status=error` 且 **payload 保留该 key 上次成功值**；脚本返回 table
+  （含业务 error）一律更新该 key 的 payload。宿主桥是极简的 `BalanceBridge`（只实现
+  `http_request`，30s 兜底超时；`provider_invoke` 直接拒绝），刻意不复用网关
+  `AppState` 的 bridge——余额查询与网关启停无耦合。一次性入口为
+  `LuaRuntime::call_mb_once`（沙箱/配额全复用）。
+- **定时调度**：`spawn_balance_scheduler`（server 与 app 启动时各 spawn 一次）每 30s
+  扫描 `enabled && interval_secs>0 && 已到期` 的卡片串行执行；单卡失败/panic 不影响
+  循环。`interval_secs` 保存时夹逼：≤0 禁用，1..59 抬到 60。
+- **script_ref** 与插件同一套 `parse_script_ref` 规则（`.lua` 收敛到 `plugins_dir` 内）。
+- IPC 侧 commands `balance_card_* / balance_refresh_all` 与 REST 1:1（`balance_card_refresh`
+  带可选 `keyIndex`）；卡片与逐 key 结果以 `BalanceCardView`（卡片 flatten +
+  `results: BalanceKeyResult[]`）成对返回，前端一次拿全。
+
+### SPA 静态托管
+
+`tower_http::ServeDir` + fallback 到 `index.html`（前端 hash/history 路由接管深链）；
+`web_dir` 不存在时只告警跳过，网关与管理 API 照常可用。
+
+### 前端 web 运行时（`ui/src/lib/web.ts`）
+
+`api.ts` 的 `call()` 三分发：Tauri 环境走 IPC → `VITE_USE_MOCK=1` 走内存 mock → 其余
+（纯浏览器）走 REST。REST 客户端把 token 存 `localStorage["mb.adminToken"]`，401 时
+清除并派发 `mb:unauthorized` 事件，`App.vue` 据此弹出 `LoginCard` 重新填 token。
+web 模式下前端隐藏进程启停按钮（无本地进程可控）、保留「重启网关」，插件导入改用
+`<input type=file>` 走 multipart。
+
+---
+
+## 11. 前端（ui）
 
 Vue 3.5 + Vite 7 + TS 5 + Pinia + Vue Router + TailwindCSS 3 + shadcn-vue 风格组件（radix-vue + cva）。
 
 - `src/lib/api.ts`：前后端契约层（DTO 类型 + command 封装，按领域分组）。
 - `src/stores/`：Pinia（gateway 状态、provider 列表）。
 - `src/router`：hash 路由（Tauri 自定义协议友好）。
-- `src/views/`：Dashboard（网关状态 + 用量 + Provider 概览）、Providers（完整 CRUD）、Models（模型 CRUD + 从 models.dev 搜索勾选批量导入 + provider 维度 Offer 管理，Offer 可绑定端点协议；两区可拖拽分栏）、Routes（别名 CRUD + 必填校验 + 可搜索模型下拉）、Plugins（在线脚本编辑 + 启停/增删 + 一键重启网关生效）、Usage（汇总卡片 + token 时序堆叠柱图 + 模型分布 Top 3 + 其他聚合 + 明细表，纯CSS/SVG 无额外依赖）、Traces（主从布局 + 可拖宽列表 + ↑↓ 键盘导航 + 各阶段报文只读高亮，超 256KB 回退纯文本 + 删除）、Settings（网关分区默认展开）。
+- `src/views/`：Dashboard（网关状态 + 用量 + Provider 概览）、Providers（完整 CRUD；可用模型选择器先列已选 chips，候选列表在搜索框聚焦时才展开下拉）、Models（模型 CRUD + 从 models.dev 搜索勾选批量导入 + provider 维度 Offer 管理，Offer 可绑定端点协议；两区可拖拽分栏）、Routes（别名 CRUD + 必填校验 + 可搜索模型下拉）、Plugins（在线脚本编辑 + 启停/增删 + 一键重启网关生效）、Usage（汇总卡片 + token 时序堆叠柱图 + 模型分布 Top 3 + 其他聚合 + 明细表，纯CSS/SVG 无额外依赖）、Balance（余额&健康看板：卡片引用上游 Provider + 可选查询 URL + 新建时可从内置模板库填充脚本（new-api 中转/DeepSeek/Moonshot/SiliconFlow/OpenRouter/智谱/Kimi Coding Plan/Claude Code 等真实接口模板）+ 多 key 逐 key 拆卡（掩码 key chip + 单 key 刷新）+ 按提供商分组 + 百分比/金额两种模式与卡片级显示切换 + 状态徽章 + 一键刷新 + 单列弹窗内测试拉取预览（逐 key 结果）+ 带编写指南的 Lua 脚本编辑）、Traces（主从布局 + 可拖宽列表 + ↑↓ 键盘导航 + 各阶段报文只读高亮，超 256KB 回退纯文本 + 删除）、Settings（网关分区默认展开）。
 - `src/components/ui`：Button / Badge / Card / Input / Label / Modal（动画 + dirty 守卫）/ Select / Switch / Pagination / ToastHost / CodeEditor（CodeMirror 6）等，精简 shadcn 风格。
 - `src/composables/`：`useConfirm`（Promise 化确认弹窗）、`useToast`（全局通知）、`useAutoPageSize`（实测行高分页 + 页首行锚定防漂移）、`usePointerDrag`（拖宽/分栏共用）。
 - 反馈与自适应：保存/删除统一走 toast；网关状态 4s 轮询；列表区分加载态与空态；表单网格 `auto-fit minmax` 随窗口宽度换列。
+- **点击响应优化**：`RouterView` 整体 `<keep-alive>`——二次进入页面立即渲染缓存的列表/滚动/筛选状态，后台**静默重拉**（不闪 loading）；各视图独立请求一律 `Promise.all` 并行（Dashboard 三段瀑布合一）；写操作成功后用响应值原地更新，避免整表重拉（仅后端可能改写他字段时保留重拉并注释）。
 
 ---
 
-## 11. 构建与运行
+## 12. 构建与运行
 
-前置：Rust 1.85+、Node 20+/pnpm、Tauri 2 的 Linux 依赖（webkit2gtk-4.1、librsvg2 等）。
+前置：Rust 1.85+（注意：锁定的依赖树实际要求 ≥1.88，Docker 构建固定用 rust:1.95）、Node 20+/pnpm、Tauri 2 的 Linux 依赖（webkit2gtk-4.1、librsvg2 等；仅桌面端需要，server 形态无系统依赖）。
 
 ```bash
 # 后端：编译 + 测试（全 workspace）
@@ -423,33 +570,48 @@ cargo test  --workspace
 pnpm --dir ui install
 pnpm --dir ui build
 
-# 前端：纯浏览器开发（无需 Tauri 壳，自动启用内存 mock 数据）
+# 前端：纯浏览器开发（无需 Tauri 壳，默认连本地真实服务端）
 pnpm --dir ui dev
-# 然后浏览器访问 http://localhost:5173；header 会出现琥珀色「MOCK 数据」徽标
+# 浏览器访问 http://localhost:5173；vite 把 /api 代理到 127.0.0.1:38440，
+# 页面先弹登录卡填 admin token。VITE_USE_MOCK=1 pnpm --dir ui dev 则切内存
+# mock 数据（不连后端），header 出现琥珀色「MOCK 数据」徽标
+
+# 无头服务端（本地跑 web 模式的后端）
+cargo run -p moonbridge-server -- --admin-token dev-token
+# 同端口提供网关 + /api/* + ./ui/dist 静态托管
 
 # 桌面应用（开发热重载）：从项目根运行
 cargo tauri dev
 
 # 打包
 cargo tauri build
+
+# Docker（多阶段：ui 构建 + server 编译 + slim 运行时，uid 10001，EXPOSE 38440）
+docker build -t moonbridge-next:local .
+docker run -d -p 38440:38440 -e MOONBRIDGE_ADMIN_TOKEN=<token> \
+  -v $PWD/data:/data --restart unless-stopped moonbridge-next:local
+# soul 部署样例见 deploy/soul/（compose + .env.example）
 ```
 
 > 本机 pnpm 若因供应链策略忽略 `esbuild/vue-demi` 构建脚本而阻断 `pnpm run`，已在 `ui/pnpm-workspace.yaml` 设置 `strictDepBuilds:false` 与 `verifyDepsBeforeRun:false`（esbuild 平台二进制经 optional 依赖 `@esbuild/linux-x64` 就位，忽略无实际影响）。
 
-> 前端 mock 模式：所有 command 调用收敛在 `ui/src/lib/api.ts` 的 `call()` 分发层，非 Tauri 环境（纯浏览器）或 `VITE_USE_MOCK=1` 时自动切换到 `ui/src/lib/mock.ts` 的内存实现（数据刷新即重置，CRUD 写操作在会话内生效）。Tauri 壳内不受影响，仍走真实 IPC。
+> 前端运行时三态：所有 command 调用收敛在 `ui/src/lib/api.ts` 的 `call()` 分发层——Tauri 壳内走真实 IPC；纯浏览器默认走 `ui/src/lib/web.ts` 的 REST 客户端（连真实服务端，token 存 localStorage）；仅 `VITE_USE_MOCK=1` 时切到 `ui/src/lib/mock.ts` 的内存实现（数据刷新即重置，CRUD 写操作在会话内生效）。
 
-网关默认监听 `127.0.0.1:38440`；健康检查 `GET /health`；模型列表 `GET /v1/models`。
+网关默认监听 `127.0.0.1:38440`；健康检查 `GET /health`；模型列表 `GET /v1/models`（后两者公开，POST 入口在配置 `auth_token` 后要求 Bearer）。
 
 ---
 
-## 12. 当前实现状态
+## 13. 当前实现状态
 
 **已交付**：M1 脚手架 · M2 Provider/Model/Offer/Route CRUD · M3 非流式链路 · M4 SSE 流式 ·
 M5 Lua 插件系统（Core 层 + 报文层 raw 钩子、宿主 API、沙箱配额硬化、启用门控 `MB.requires`、示例插件、Plugins 管理页）·
-M6 四协议全矩阵 + Usage/Traces 可视化。
+M6 四协议全矩阵 + Usage/Traces 可视化 · M7 无头服务端与 web 前端（crates/server + ui web 运行时 + Docker 部署）·
+M8 余额&健康看板（一次性 Lua 查询脚本 + 定时调度 + 多 key 逐 key 拆卡 + 卡片式看板）与 web 点击响应优化。
 
-- 5 个 lib crate + src-tauri + ui 全部编译通过；`cargo test --workspace` 全绿 **262 项**
-  （core 9 / protocol 108 / plugin 19 lib + 5 integration / store 7 / gateway 70 lib + 30 e2e / app 14）；
+- 6 个 lib crate + src-tauri + ui 全部编译通过；`cargo test --workspace` 全绿 **345 项**
+  （core 9 / protocol 108 / plugin 22 lib + 5 integration / store 13 / gateway 70 lib + 31 e2e + 18 balance /
+  server 32 lib + 23 integration / app 14；无桌面系统库的环境可 `--exclude moonbridge-app`，
+  其余 331 项照常全绿）；
   `cargo check --workspace --all-targets` 与 `cargo clippy --workspace --all-targets` 均**零告警**；
   `pnpm --dir ui type-check`（`vue-tsc --noEmit`）无错。
   原存量的 6 条 clippy 提示已全部清理：4 处真改（两处 markdown 文档列表缺空行分隔、
@@ -463,10 +625,14 @@ M6 四协议全矩阵 + Usage/Traces 可视化。
   **带理由的作用域 `#[allow]`** 保留——参数逐项平铺就是前端 `invoke("usage_query", {...})`
   的载荷形状（`ui/src/lib/api.ts`），收拢成结构体会改 IPC 契约。
 - **推理强度传导**：`CoreRequest.reasoning.effort` 由四个上游 adapter 各自落地——Chat 用
-  `reasoning_effort`、Responses 用 `reasoning.{effort,summary}`、Anthropic 用
-  `thinking:{type,budget_tokens}`（effort→预算表，并按 `max_tokens` 夹逼）、Gemini 用
+  `reasoning_effort`、Responses 用 `reasoning.{effort,summary}`、Anthropic 默认用
+  `thinking:{type:"adaptive"}` + `output_config.effort`，端点指定 `thinking_mode:"enabled"`
+  时按 effort→预算表生成 `budget_tokens` 并按 `max_tokens` 夹逼；Gemini 用
   `generationConfig.thinkingConfig.{thinkingBudget,includeThoughts}`。effort→预算表共享于
-  `adapters/mod.rs`。
+  `adapters/mod.rs`。Anthropic 入站的 enabled/adaptive 均优先读取非空的
+  `output_config.effort`；enabled 缺省时才从预算反推，最低档归为 `low`，adaptive
+  缺省为 `high`。disabled/未知模式维持不下发 reasoning；不改变 Gemini 预算映射或
+  Chat/Responses 显式 `minimal` 的透传行为。
 - **trace/DTO 命名契约**：Core IR 刻意保持 snake_case（Lua 侧直接可读），面向前端的 DTO 为
   camelCase；serde 的 `rename_all` **不会**递归作用于嵌套类型，故 `TraceRecord.usage` 需自带
   `#[serde(rename_all = "camelCase")]` 的独立 `TraceUsage` 类型（有回归测试断言 snake_case 键不出现）。
@@ -502,6 +668,17 @@ M6 四协议全矩阵 + Usage/Traces 可视化。
   不占新块、signature_delta 随行、responses done item 摘要同带 marker）。
 - **短路不再绕过审计**：8 个 `ShortCircuit`/`Abort` 返回点统一走 `answered` / `aborted`
   → `finish_audit`，插件代答与被插件拒绝的请求都留下 usage 行和 trace 文件（见 §8）。
+- **无头服务端与 web 前端（M7，见 §10）**：`crates/server` 同端口合并网关 + `/api/*`
+  管理 REST（与 src-tauri commands 1:1，40+ 端点）+ SPA 静态托管；单一 admin token
+  同时守护 LLM 入口与管理 API（内存注入、不落盘，`PUT /api/config` 强制回填）。
+  前端 `call()` 三分发（IPC / mock / REST），web 模式有登录卡、401 事件重登、
+  multipart 插件导入。Docker 多阶段构建（`rust:1.95-bookworm` → `debian:bookworm-slim`，
+  uid 10001），`deploy/soul/` 提供 compose 样例；已部署 soul 替换老 Go moonbridge
+  （`mb.qincaizheng.online` 公开路径不变）。
+- **入口鉴权口径**：配置 `auth_token` 后，POST 入口（`/v1/responses` / `/v1/messages` /
+  `/v1/chat/completions`）一律要求 Bearer；`GET /v1/models` 与 `/health` 刻意公开
+  （允许裸奔——模型目录不视为敏感，与多数 OpenAI 兼容服务一致，探活/监控可无凭据
+  拉取）。e2e 钉死该口径（`e2e_models_is_public_but_post_entry_requires_bearer`）。
 
 **可选后续增强**（非阻塞）：
 

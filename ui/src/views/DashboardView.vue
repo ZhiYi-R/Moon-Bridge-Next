@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { AlertCircle, RefreshCw } from "lucide-vue-next";
-import { onMounted, ref } from "vue";
+import { onActivated, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 
 import Badge from "@/components/ui/Badge.vue";
@@ -111,8 +111,9 @@ function cacheStats() {
 const TTFT_BAR = "bg-sky-500/60 group-hover:bg-sky-500/85";
 const TPS_BAR = "bg-emerald-500/60 group-hover:bg-emerald-500/85";
 
-async function loadPerf() {
-  perfLoading.value = true;
+/** silent=true 用于 keep-alive 切回时的后台重拉：不点亮 refresh 图标，避免每次进页面都闪一次 loading。 */
+async function loadPerf(silent = false) {
+  perfLoading.value = !silent;
   try {
     records.value = await usageApi.query({ limit: 1000 });
     perf.value = perfStats();
@@ -124,20 +125,32 @@ async function loadPerf() {
   }
 }
 
-async function loadAll() {
-  await gateway.refresh();
+/** 首屏/切回加载：网关状态与概览数据互相独立，一次并行（原 3 段串行瀑布合并为 1 跳）。 */
+async function loadAll(silent = false) {
+  await Promise.all([gateway.refresh(), refresh(silent)]);
+}
+
+async function refresh(silent = false) {
   try {
-    const [p, s] = await Promise.all([providerApi.list(), usageApi.summary()]);
+    const [p, s] = await Promise.all([providerApi.list(), usageApi.summary(), loadPerf(silent)]);
     providers.value = p;
     summary.value = s;
     loadError.value = null;
   } catch (e) {
     loadError.value = errMsg(e);
   }
-  await loadPerf();
 }
 
-onMounted(loadAll);
+onMounted(() => {
+  void loadAll();
+});
+
+// keep-alive 下首次激活紧跟 onMounted（同一次进入），第二次起才后台静默重拉
+let activated = false;
+onActivated(() => {
+  if (activated) void loadAll(true);
+  activated = true;
+});
 </script>
 
 <template>
@@ -210,7 +223,7 @@ onMounted(loadAll);
             class="size-7"
             :disabled="perfLoading"
             title="刷新"
-            @click="loadPerf"
+            @click="loadPerf()"
           >
             <RefreshCw class="size-3.5" :class="perfLoading ? 'animate-spin' : ''" />
           </Button>

@@ -28,7 +28,8 @@ export const useProviderStore = defineStore("provider", () => {
 
   async function remove(key: string) {
     await providerApi.remove(key);
-    await load();
+    // 删除只影响这一行：本地移除，无需重拉整表
+    providers.value = providers.value.filter((p) => p.key !== key);
   }
 
   return { providers, loading, error, load, save, remove };

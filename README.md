@@ -38,17 +38,29 @@ Moon Bridge Next 是一个本地 LLM 网关，把客户端和上游模型服务�
 
 开启 trace 后，每次请求在入站、出站、上游响应、客户端响应四个阶段的原始报文都会快照存盘；流式请求的响应由网关从事件流聚合还原为完整消息体后再记录，因此能精确区分「上游实际发送的内容」与「客户端实际收到的内容」。Traces 页支持浏览、对照查看与删除，是核对插件改写效果、排查上游问题的主要手段。
 
+### 余额&健康看板
+
+「余额」页按提供商分组、以卡片展示各上游 key 的配额与健康状态：每张卡片**引用一个已配置的上游服务**加一个**可选的查询 URL**；Provider 端点里的 API key 去重后，引擎对**每个 key 各执行一次脚本并自动拆成多张卡片**（逐 key 显示掩码 key 标签、独立状态与配额、可单独刷新某个 key），脚本始终只按单个 key 编写（`ctx.key`）。新建卡片可从**内置模板库**一键填充脚本——模板按各服务真实接口编写（new-api 系中转站、DeepSeek、Moonshot/Kimi 开放平台、SiliconFlow、OpenRouter、智谱 GLM Coding Plan、Kimi Coding Plan、Claude Code 订阅等），也可完全手写自定义 Lua（沙箱内执行，可用 `mb.http.request` 访问上游配额接口，返回 JSON 契约——配额百分比或「消耗/余额」金额（`unit` + `used_amount`/`left_amount`）、重置时间、摘要等；编辑器内置编写指南与**测试拉取**预览——保存前即可试跑验证脚本），支持按卡片设置定时查询间隔（可禁用）、一键全部刷新、卡片级百分比/金额显示切换；某个 key 查询失败时对应卡片标记异常并保留该 key 最近一次成功结果。配额条数量与名称完全由脚本决定。
+
 ### 会话识别
 
 会话身份按以下优先级解析：请求显式携带的标识（body 中的 `session_id`、`previous_response_id`，或 `X-Codex-Window-Id` 请求头）优先。对完全不带会话标识的客户端（如 Qwen Code），网关会把 `[mb:<载荷>]` 标记嵌进助手**推理（CoT）块明文的首部**，客户端下一轮带回完整对话历史时即可认回同一会话；网关自分配会话的载荷就是会话 uuid，因此身份不随活跃会话表淘汰或网关重启而漂移（无推理块的轮次不打标）。标记在转发上游前被完整剥除，不进入模型上下文，也不存在被模型模仿的风险；该功能可在设置中关闭，关闭后入站方向的存量标记仍会被剥除。会话识别决定了插件 `mb.session` 的状态隔离粒度与 trace 的会话目录归类。
 
 ### 访问控制
 
-网关可为自身入口配置访问令牌（`auth_token`），配置后客户端请求须携带 `Authorization: Bearer <token>`。未配置时不做入口校验，适用于仅监听本机回环地址的默认场景。
+网关可为自身入口配置访问令牌（`auth_token`），配置后客户端的 POST 请求须携带 `Authorization: Bearer <token>`。`GET /health` 与 `GET /v1/models` 刻意保持公开（模型目录不视为敏感，便于探活与监控无凭据拉取）。未配置时不做入口校验，适用于仅监听本机回环地址的默认场景。
 
 ### 桌面应用
 
-所有管理工作在图形界面完成：Dashboard（网关状态、用量与 Provider 概览）、Providers（端点与密钥）、Models（目录导入与 Offer）、Routes（别名）、Plugins（在线脚本编辑、启停，重启网关生效）、Usage（图表与明细）、Traces（报文浏览）、Settings（网关参数）。系统托盘提供主窗口唤出、网关一键启停与退出。
+所有管理工作在图形界面完成：Dashboard（网关状态、用量与 Provider 概览）、Providers（端点与密钥）、Models（目录导入与 Offer）、Routes（别名）、Plugins（在线脚本编辑、启停，重启网关生效）、Usage（图表与明细）、Balance（余额&健康看板）、Traces（报文浏览）、Settings（网关参数）。系统托盘提供主窗口唤出、网关一键启停与退出。
+
+### 服务器部署（Web 模式）
+
+不带桌面的服务器场景可用无头服务端 `moonbridge-server`：同一端口同时提供 LLM 网关、`/api/*` 管理 REST API 与前端页面的静态托管——浏览器打开地址、填入 admin token 即可使用与桌面端相同的管理界面。
+
+- 启动必须显式提供 admin token（`--admin-token` 或环境变量 `MOONBRIDGE_ADMIN_TOKEN`）；它同时是 LLM 入口与 `/api/*` 的 Bearer token，只驻留内存、不写入配置文件。
+- 提供多阶段 `Dockerfile`（构建前端 + 编译服务端 + slim 运行时，uid 10001），`deploy/soul/` 有 docker compose 部署样例；容器内「重启网关」等价于进程退出，依赖 restart 策略复活。
+- 公网暴露时建议前置反向代理（TLS 终止），并妥善保管 token。
 
 ## 使用方式
 

@@ -860,10 +860,8 @@ pub fn contents_to_core(contents: &[Value]) -> Vec<Message> {
 pub fn system_instruction_to_core(si: Option<&Value>) -> Vec<ContentBlock> {
     let mut out = Vec::new();
     match si {
-        Some(Value::String(s)) => {
-            if !s.is_empty() {
-                out.push(ContentBlock::text(s.clone()));
-            }
+        Some(Value::String(s)) if !s.is_empty() => {
+            out.push(ContentBlock::text(s.clone()));
         }
         Some(v) => {
             if let Some(parts) = v.get("parts").and_then(|p| p.as_array()) {

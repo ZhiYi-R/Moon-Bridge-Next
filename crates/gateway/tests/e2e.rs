@@ -1267,6 +1267,60 @@ async fn e2e_serve_pairs_plugin_init_and_shutdown() {
     );
 }
 
+/// 口径钉死：配置 auth_token 后，GET /v1/models 与 /health 仍保持公开（允许裸奔——
+/// 模型目录不视为敏感，探活/监控调用方可无凭据拉取），而真正消耗上游额度的
+/// POST 入口必须要求 Bearer。
+#[tokio::test]
+async fn e2e_models_is_public_but_post_entry_requires_bearer() {
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let cfg = GatewayConfig {
+        auth_token: Some("secret-token".into()),
+        ..GatewayConfig::default()
+    };
+    let state = bootstrap(cfg, db).unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, server::router(state)).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+
+    // 公开面：/health 与 /v1/models 无 token 也是 200
+    for path in ["/health", "/v1/models"] {
+        let r = client
+            .get(format!("http://{addr}{path}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "{path} 应保持公开");
+    }
+
+    // 受保护面：POST 入口无 token / 错 token 一律 401
+    let url = format!("http://{addr}/v1/chat/completions");
+    let body = json!({ "model": "x", "messages": [{ "role": "user", "content": "hi" }] });
+    let r = client.post(&url).json(&body).send().await.unwrap();
+    assert_eq!(r.status(), 401, "POST 入口无 token 必须 401");
+    let r = client
+        .post(&url)
+        .bearer_auth("wrong")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401, "POST 入口错 token 必须 401");
+    // 正确 token 应通过鉴权（后续路由解析失败返回非 401，证明已过 check_auth）
+    let r = client
+        .post(&url)
+        .bearer_auth("secret-token")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(r.status(), 401, "正确 token 应通过鉴权");
+}
+
 /// 回归：插件短路直答不得绕过审计——usage 落库 + trace 落盘都要有。
 /// 历史缺陷是这些路径直接 return，插件代答的请求在用量与 Traces 页完全不可见。
 #[tokio::test]

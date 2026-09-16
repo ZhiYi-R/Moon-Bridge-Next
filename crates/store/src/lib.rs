@@ -2,13 +2,15 @@
 //!
 //! 以 SQLite（rusqlite, bundled + WAL）为唯一持久化后端，承载 provider/model/
 //! route/plugin/usage/settings 全部配置与运行时数据。手写版本化 migration
-//! （见 [`schema`]），每表一个 DAO 模块（见 [`dao`]），统一由 [`Database`] 暴露。
+//! （见 [`schema`]），每表一个 DAO 模块（见 [`dao`]；余额看板见 [`balance`]），
+//! 统一由 [`Database`] 暴露。
 //!
 //! 并发模型：单连接 + `parking_lot::Mutex` 串行化。本地网关的管理类读写为低并发，
 //! 该模型足够且实现简单；如需更高写入并发可平滑替换为连接池。
 //!
 //! 依赖方向：store → core（不依赖 protocol/plugin/gateway）。
 
+pub mod balance;
 pub mod crypto;
 pub mod dao;
 pub mod error;
@@ -20,11 +22,13 @@ use std::path::Path;
 use parking_lot::Mutex;
 use rusqlite::Connection;
 
+pub use balance::{clamp_interval_secs, MIN_INTERVAL_SECS};
 pub use crypto::{EncKey, PlaintextKey};
 pub use dao::usage::UsageSummary;
 pub use error::{Result, StoreError};
 pub use models::{
-    Endpoint, ModelDef, Offer, PluginBinding, PluginRecord, Provider, Route, Setting, UsageQuery,
+    BalanceCard, BalanceCardView, BalanceKeyResult, BalanceQuota, BalanceResult, Endpoint,
+    ModelDef, Offer, PluginBinding, PluginRecord, Provider, Route, Setting, UsageQuery,
     UsageRecord,
 };
 
@@ -93,7 +97,7 @@ mod tests {
     #[test]
     fn migrates_and_reports_version() {
         let db = Database::open_in_memory().unwrap();
-        assert_eq!(db.version().unwrap(), 9);
+        assert_eq!(db.version().unwrap(), 12);
     }
 
     /// 回归：V8 新增 max_output_tokens 列须随模型定义往返（供上游必填
