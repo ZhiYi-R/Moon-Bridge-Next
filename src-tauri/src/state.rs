@@ -50,6 +50,14 @@ pub struct ManagedState {
     lifecycle: tokio::sync::Mutex<()>,
     /// 进行中的 OAuth 登录流程（flowId → 句柄；见 `commands::oauth`）。
     pub oauth_flows: Mutex<HashMap<String, OAuthFlow>>,
+    /// models.dev 目录缓存（4.5MB JSON 的解析结果；TTL 见 `commands::catalog`）。
+    pub catalog_cache: Mutex<Option<CatalogCacheEntry>>,
+}
+
+/// models.dev 目录缓存条目（Arc 共享避免克隆大 JSON）。
+pub struct CatalogCacheEntry {
+    pub fetched_at: std::time::Instant,
+    pub root: Arc<serde_json::Value>,
 }
 
 /// OAuth 登录流程状态（前端轮询；camelCase DTO）。
@@ -104,6 +112,7 @@ impl ManagedState {
             last_error: Mutex::new(None),
             lifecycle: tokio::sync::Mutex::new(()),
             oauth_flows: Mutex::new(HashMap::new()),
+            catalog_cache: Mutex::new(None),
         }))
     }
 

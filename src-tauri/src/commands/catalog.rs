@@ -29,6 +29,26 @@ const FETCH_TIMEOUT_SECS: u64 = 30;
 /// 实时探测上游模型列表的超时（秒）。
 const PROBE_TIMEOUT_SECS: u64 = 15;
 
+/// models.dev 目录缓存 TTL：4.5MB 拉取体感时快时慢，检测/目录页共享 5 分钟窗口。
+const CATALOG_CACHE_TTL: Duration = Duration::from_secs(300);
+
+/// 读缓存（TTL 内命中才返回）。
+fn catalog_cache_get(state: &ManagedState) -> Option<Arc<Value>> {
+    let g = state.catalog_cache.lock().unwrap();
+    match g.as_ref() {
+        Some(c) if c.fetched_at.elapsed() < CATALOG_CACHE_TTL => Some(c.root.clone()),
+        _ => None,
+    }
+}
+
+/// 写缓存（覆盖旧条目）。
+fn catalog_cache_put(state: &ManagedState, root: Arc<Value>) {
+    *state.catalog_cache.lock().unwrap() = Some(crate::state::CatalogCacheEntry {
+        fetched_at: std::time::Instant::now(),
+        root,
+    });
+}
+
 /// 一个可导入的候选模型（后端解析 models.dev 后的扁平视图）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -206,9 +226,13 @@ fn parse_catalog(root: &Value) -> Vec<CatalogModel> {
     out
 }
 
-/// 拉取 models.dev 顶层 JSON（约 4.5MB）。后端直接 reqwest 拉取（复用 workspace 的
-/// rustls 客户端），网络错误以可读消息返回前端。
-async fn fetch_models_dev_root() -> Result<Value, String> {
+/// 拉取 models.dev 顶层 JSON（约 4.5MB）。TTL 内命中缓存直接返回（检测/目录页共享），
+/// 未命中才走网络。后端直接 reqwest 拉取（复用 workspace 的 rustls 客户端），网络错误
+/// 以可读消息返回前端。
+async fn fetch_models_dev_root(state: &ManagedState) -> Result<Arc<Value>, String> {
+    if let Some(cached) = catalog_cache_get(state) {
+        return Ok(cached);
+    }
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
         .build()
@@ -224,17 +248,22 @@ async fn fetch_models_dev_root() -> Result<Value, String> {
         return Err(format!("models.dev 返回错误状态: {}", resp.status()));
     }
 
-    resp.json()
+    let root: Value = resp
+        .json()
         .await
-        .map_err(|e| format!("解析 models.dev 响应失败: {e}"))
+        .map_err(|e| format!("解析 models.dev 响应失败: {e}"))?;
+    let root = Arc::new(root);
+    catalog_cache_put(state, root.clone());
+    Ok(root)
 }
 
 /// 从 models.dev 拉取并解析全部候选模型。
 ///
 /// 解析精简后返回扁平列表，避免 4.5MB 原始 JSON 过 webview。
 #[tauri::command]
-pub async fn catalog_fetch(_state: State<'_, Arc<ManagedState>>) -> CmdResult<Vec<CatalogModel>> {
-    Ok(parse_catalog(&fetch_models_dev_root().await?))
+pub async fn catalog_fetch(state: State<'_, Arc<ManagedState>>) -> CmdResult<Vec<CatalogModel>> {
+    let root = fetch_models_dev_root(&state).await?;
+    Ok(parse_catalog(&root))
 }
 
 /// 把用户勾选的候选模型批量导入：模型定义按 slug upsert；models.dev 的定价写入
@@ -471,7 +500,7 @@ pub async fn provider_detect_models(
     let mut catalog: Option<Vec<CatalogModel>> = None;
     let mut catalog_err: Option<String> = None;
     if let Some(mid) = models_dev_id {
-        match fetch_models_dev_root().await {
+        match fetch_models_dev_root(&state).await {
             Ok(root) => catalog = Some(catalog_section(&root, mid, &provider.key)),
             Err(e) => catalog_err = Some(e),
         }
@@ -764,4 +793,28 @@ mod tests {
         assert!(catalog_section(&root, "no-such", "x").is_empty());
     }
 
+    // ── 目录缓存 ──
+
+    fn temp_state(tag: &str) -> (Arc<ManagedState>, std::path::PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("mbn-catalog-cache-{}-{tag}", std::process::id()));
+        let paths = crate::config::AppPaths::resolve(dir.join("config"), dir.join("data"));
+        (ManagedState::new(paths).unwrap(), dir)
+    }
+
+    #[test]
+    fn catalog_cache_hit_within_ttl_and_miss_after() {
+        let (st, dir) = temp_state("ttl");
+        assert!(catalog_cache_get(&st).is_none(), "空缓存未命中");
+        catalog_cache_put(&st, Arc::new(json!({})));
+        assert!(catalog_cache_get(&st).is_some(), "TTL 内命中");
+        // 手动把条目时间戳回拨到 TTL 之外
+        if let Some(c) = st.catalog_cache.lock().unwrap().as_mut() {
+            c.fetched_at = std::time::Instant::now()
+                .checked_sub(CATALOG_CACHE_TTL + Duration::from_secs(1))
+                .unwrap();
+        }
+        assert!(catalog_cache_get(&st).is_none(), "过期未命中");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
