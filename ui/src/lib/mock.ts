@@ -8,6 +8,7 @@ import type {
   AppConfig,
   AppInfo,
   CatalogModel,
+  DetectedModel,
   GatewayConfig,
   GatewayStatus,
   Json,
@@ -482,6 +483,30 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
       }
       return list.length as T;
     }
+
+
+    // ── 上游预设与模型检测 ──
+    case "preset_list":
+      return [
+        { id: "ollama", label: "Ollama", category: "api", protocol: "openai-chat", baseUrl: "http://localhost:11434/v1", dashboardUrl: null, keyOptional: true, note: "本地 Ollama 服务（OpenAI 兼容端点），通常无需 Key", modelsDevId: null, enabled: true },
+        { id: "deepseek", label: "DeepSeek", category: "api", protocol: "openai-chat", baseUrl: "https://api.deepseek.com", dashboardUrl: "https://platform.deepseek.com/api_keys", keyOptional: false, note: null, modelsDevId: "deepseek", enabled: true },
+        { id: "openrouter", label: "OpenRouter", category: "api", protocol: "openai-chat", baseUrl: "https://openrouter.ai/api/v1", dashboardUrl: "https://openrouter.ai/keys", keyOptional: false, note: "聚合商：模型量大，导入时注意勾选", modelsDevId: "openrouter", enabled: true },
+        { id: "kimi-oauth", label: "Kimi", category: "account", protocol: "", baseUrl: "", dashboardUrl: null, keyOptional: false, note: "Kimi 账户 OAuth 登录（后续版本支持）", modelsDevId: null, enabled: false },
+      ] as T;
+    case "provider_detect_models": {
+      const key = String((args as { providerKey?: string }).providerKey ?? "");
+      const detected: DetectedModel[] = [
+        { providerKey: key, providerName: key, id: "deepseek-flash", name: "DeepSeek V4.1 Flash", contextWindow: 1048576, maxOutputTokens: 131072, modalities: ["text"], reasoningLevels: ["low", "high"], pricing: { input: 0.27, output: 1.1 }, exists: false },
+        { providerKey: key, providerName: key, id: "deepseek-reasoner", name: "DeepSeek Reasoner", contextWindow: 1048576, maxOutputTokens: 65536, modalities: ["text"], reasoningLevels: [], pricing: { input: 0.55, output: 2.19 }, exists: false },
+        { providerKey: key, providerName: key, id: "custom-alpha", name: null, contextWindow: null, maxOutputTokens: null, modalities: [], reasoningLevels: [], pricing: {}, exists: false },
+      ];
+      // 已导入判定与后端一致：该 provider 下已有 offer 的 slug
+      for (const m of detected) {
+        m.exists = offers.some((o) => o.providerKey === key && o.modelSlug === m.id);
+      }
+      return { source: "live", warning: null, models: detected } as T;
+    }
+
 
     // ── Route ──
     case "route_list":

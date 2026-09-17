@@ -1,6 +1,7 @@
 // 前后端契约层：Tauri command 的类型安全封装 + DTO 类型定义。
 
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 import { mockInvoke } from "./mock";
 
@@ -228,11 +229,46 @@ export const gatewayApi = {
   status: () => call<GatewayStatus>("gateway_status"),
 };
 
+
+/** 上游预设（后端静态表；account 分组为 OAuth 后做占位，enabled=false）。 */
+export interface ProviderPreset {
+  id: string;
+  label: string;
+  /** api / account */
+  category: string;
+  /** MBN 协议串；account 占位为空串 */
+  protocol: string;
+  baseUrl: string;
+  dashboardUrl?: string | null;
+  keyOptional: boolean;
+  note?: string | null;
+  modelsDevId?: string | null;
+  enabled: boolean;
+}
+
+/** 模型检测到的候选：目录字段 + 是否已导入。 */
+export interface DetectedModel extends CatalogModel {
+  exists: boolean;
+}
+
+/** 模型检测结果：live=实时探测 / catalog=models.dev 目录回退。 */
+export interface DetectResult {
+  source: "live" | "catalog";
+  warning?: string | null;
+  models: DetectedModel[];
+}
+
+
 export const providerApi = {
   list: () => call<Provider[]>("provider_list"),
   get: (key: string) => call<Provider | null>("provider_get", { key }),
   save: (provider: Provider) => call<void>("provider_save", { provider }),
   remove: (key: string) => call<void>("provider_delete", { key }),
+  /** 上游预设静态表（含禁用的账户占位）。 */
+  presets: () => call<ProviderPreset[]>("preset_list"),
+  /** 模型检测：实时探测首端点模型列表并用 models.dev enrich，失败回退目录。 */
+  detectModels: (key: string) =>
+    call<DetectResult>("provider_detect_models", { providerKey: key }),
 };
 
 export const modelApi = {
@@ -322,6 +358,12 @@ export const appApi = {
 };
 
 /** 从 Tauri command 错误中提取可读消息（后端返回 `{ message }`）。 */
+/** 打开外部链接：Tauri 壳内走系统浏览器（opener 插件），浏览器 mock 走 window.open。 */
+export function openExternal(url: string) {
+  if (isTauriRuntime) void openUrl(url);
+  else window.open(url, "_blank", "noopener");
+}
+
 export function errMsg(e: unknown): string {
   if (typeof e === "string") return e;
   if (e && typeof e === "object" && "message" in e) return String((e as { message: unknown }).message);

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronDown, ChevronRight, Pencil, Plus, Search, Trash2 } from "lucide-vue-next";
+import { ChevronDown, ChevronRight, Pencil, Plus, ScanSearch, Search, Trash2 } from "lucide-vue-next";
 import { computed, onMounted, reactive, ref, watch } from "vue";
 
 import Badge from "@/components/ui/Badge.vue";
@@ -14,14 +14,19 @@ import { useConfirm } from "@/composables/useConfirm";
 import { useToast } from "@/composables/useToast";
 import {
   errMsg,
+  catalogApi,
   modelApi,
+  openExternal,
   pluginApi,
+  providerApi,
+  type DetectResult,
   type ModelDef,
   type Offer,
   type PluginBinding,
   type PluginRecord,
   type Provider,
   type ProviderEndpoint,
+  type ProviderPreset,
 } from "@/lib/api";
 import { useGatewayStore } from "@/stores/gateway";
 import { useProviderStore } from "@/stores/provider";
@@ -235,8 +240,151 @@ async function tryClose() {
   if (await closeGuard()) closeModal();
 }
 
-async function newProvider() {
+
+// ── 预设选择器：新建先选预设（API）或走自定义；账户组为 OAuth 后做占位 ──
+const picking = ref(false);
+const presetQuery = ref("");
+const presets = ref<ProviderPreset[]>([]);
+/** 顶层标签：API 直连 / 账户登录（对齐 ocx 的弹窗标签形态） */
+const PRESET_TABS = [
+  { id: "api", label: "API Key 直连" },
+  { id: "account", label: "账户登录（OAuth）" },
+] as const;
+const presetTab = ref<(typeof PRESET_TABS)[number]["id"]>("api");
+/** 当前表单关联的预设（新建时来自选择器；编辑时按 key/baseUrl 找回） */
+const activePreset = ref<ProviderPreset | null>(null);
+
+/** 预设按 label/id 过滤（分组保持原顺序）。 */
+function presetFilter(list: ProviderPreset[]): ProviderPreset[] {
+  const q = presetQuery.value.trim().toLowerCase();
+  if (!q) return list;
+  return list.filter(
+    (p) => p.label.toLowerCase().includes(q) || p.id.toLowerCase().includes(q),
+  );
+}
+/** 当前标签下的预设列表（搜索过滤在标签内生效） */
+const activePresets = computed(() =>
+  presetFilter(presets.value.filter((p) => p.category === presetTab.value)),
+);
+
+function openPicker() {
+  presetQuery.value = "";
+  presetTab.value = "api";
+  picking.value = true;
+}
+
+/** 打开预设的取 Key 页面（空值不动作）。 */
+function openDashboard(url?: string | null) {
+  if (url) openExternal(url);
+}
+
+function choosePreset(p: ProviderPreset) {
+  picking.value = false;
+  void newProvider(p);
+}
+
+function chooseCustom() {
+  picking.value = false;
+  void newProvider(null);
+}
+
+// ── 模型检测：实时探测 + 目录 enrich，勾选后导入 ──
+const detectOpen = ref(false);
+const detectProvider = ref<Provider | null>(null);
+const detectLoading = ref(false);
+const detectError = ref<string | null>(null);
+const detectResult = ref<DetectResult | null>(null);
+const detectQuery = ref("");
+/** 勾选集合（默认全选） */
+const checkedIds = ref<string[]>([]);
+const importing = ref(false);
+
+const detectFiltered = computed(() => {
+  const list = detectResult.value?.models ?? [];
+  const q = detectQuery.value.trim().toLowerCase();
+  if (!q) return list;
+  return list.filter(
+    (m) => m.id.toLowerCase().includes(q) || (m.name ?? "").toLowerCase().includes(q),
+  );
+});
+
+/** 按预设/改名后的 baseUrl 找回预设（编辑时展示横幅）。 */
+function matchPreset(p: Provider): ProviderPreset | null {
+  return (
+    presets.value.find((x) => x.enabled && x.id === p.key) ??
+    presets.value.find(
+      (x) =>
+        x.enabled &&
+        x.baseUrl &&
+        p.endpoints.some((e) => e.baseUrl.replace(/\/+$/, "") === x.baseUrl.replace(/\/+$/, "")),
+    ) ??
+    null
+  );
+}
+
+async function openDetect(p: Provider) {
+  detectProvider.value = p;
+  detectOpen.value = true;
+  detectLoading.value = true;
+  detectError.value = null;
+  detectResult.value = null;
+  detectQuery.value = "";
+  try {
+    const r = await providerApi.detectModels(p.key);
+    detectResult.value = r;
+    checkedIds.value = r.models.map((m) => m.id);
+  } catch (e) {
+    detectError.value = errMsg(e);
+  } finally {
+    detectLoading.value = false;
+  }
+}
+
+function toggleDetect(id: string) {
+  checkedIds.value = checkedIds.value.includes(id)
+    ? checkedIds.value.filter((x) => x !== id)
+    : [...checkedIds.value, id];
+}
+
+function selectAllDetected() {
+  checkedIds.value = detectFiltered.value.map((m) => m.id);
+}
+
+function selectNoneDetected() {
+  checkedIds.value = [];
+}
+
+/** 只勾选尚未导入的（已导入的重复导入无意义：offer 已存在不覆盖定价）。 */
+function selectNewDetected() {
+  checkedIds.value = detectFiltered.value.filter((m) => !m.exists).map((m) => m.id);
+}
+
+async function importDetected() {
+  const selected = (detectResult.value?.models ?? []).filter((m) => checkedIds.value.includes(m.id));
+  if (selected.length === 0) return;
+  importing.value = true;
+  try {
+    // 去掉前端附加的 exists 标记，还原为 CatalogModel 入参
+    const key = detectProvider.value?.key ?? "";
+    const n = await catalogApi.import(selected.map(({ exists: _exists, ...rest }) => rest));
+    toast.success("已从 “" + key + "” 导入 " + n + " 个模型");
+    detectOpen.value = false;
+  } catch (e) {
+    detectError.value = errMsg(e);
+  } finally {
+    importing.value = false;
+  }
+}
+
+
+async function newProvider(preset: ProviderPreset | null = null) {
+  activePreset.value = preset;
   Object.assign(form, emptyProvider());
+  // 预设预填：名称/协议/Base URL 就位，只剩 API Key 待输入
+  if (preset) {
+    form.key = preset.id;
+    form.endpoints = [{ protocol: preset.protocol, baseUrl: preset.baseUrl, apiKey: "" }];
+  }
   error.value = null;
   editing.value = true;
   expandedEndpoint.value = null;
@@ -254,6 +402,7 @@ function closeModal() {
 }
 
 async function editProvider(p: Provider) {
+  activePreset.value = matchPreset(p);
   // JSON 深拷贝隔离编辑态（structuredClone 无法克隆 Vue 响应式 Proxy）
   Object.assign(form, JSON.parse(JSON.stringify(p)));
   error.value = null;
@@ -320,6 +469,12 @@ async function remove(key: string) {
 
 onMounted(() => {
   void store.load();
+  void providerApi
+    .presets()
+    .then((list) => {
+      presets.value = list;
+    })
+    .catch(() => {});
   void pluginApi
     .list()
     .then((list) => {
@@ -339,6 +494,156 @@ onMounted(() => {
       {{ listError }}
     </div>
 
+
+    <!-- 预设选择器：API 直连可用，账户组为 OAuth 后做占位 -->
+    <Modal :open="picking" title="新建上游服务" @close="picking = false">
+      <div class="relative mb-3">
+        <Search class="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+        <Input v-model="presetQuery" placeholder="搜索预设…" class="pl-8" />
+      </div>
+
+
+      <!-- 顶层标签切换：API / 账户（对齐 ocx 弹窗形态） -->
+      <div class="mb-3 flex gap-4 border-b">
+        <button
+          v-for="t in PRESET_TABS"
+          :key="t.id"
+          type="button"
+          class="-mb-px border-b-2 px-1 pb-2 text-sm transition-colors"
+          :class="
+            presetTab === t.id
+              ? 'border-primary font-medium text-foreground'
+              : 'border-transparent text-muted-foreground hover:text-foreground'
+          "
+          @click="presetTab = t.id"
+        >
+          {{ t.label }}
+        </button>
+      </div>
+
+      <div class="space-y-2">
+        <button
+          v-for="p in activePresets"
+          :key="p.id"
+          type="button"
+          :disabled="!p.enabled"
+          class="w-full rounded-md border p-3 text-left transition-colors"
+          :class="
+            p.enabled ? 'hover:border-primary/60 hover:bg-accent/40' : 'cursor-not-allowed opacity-60'
+          "
+          @click="choosePreset(p)"
+        >
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-sm font-medium">{{ p.label }}</span>
+            <span class="flex items-center gap-1">
+              <Badge v-if="!p.enabled" variant="warning">后续支持</Badge>
+              <Badge v-else variant="secondary" class="font-mono">{{ p.protocol }}</Badge>
+              <Badge v-if="p.keyOptional" variant="outline">Key 可空</Badge>
+            </span>
+          </div>
+          <div v-if="p.note" class="mt-1 text-xs text-muted-foreground">{{ p.note }}</div>
+          <div v-if="p.baseUrl" class="mt-0.5 font-mono text-xs text-muted-foreground/70">
+            {{ p.baseUrl }}
+          </div>
+        </button>
+        <div
+          v-if="activePresets.length === 0"
+          class="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground"
+        >
+          无匹配预设
+        </div>
+      </div>
+
+      <template #footer>
+        <Button variant="ghost" size="sm" @click="picking = false">取消</Button>
+        <Button variant="outline" size="sm" @click="chooseCustom">自定义上游</Button>
+      </template>
+    </Modal>
+
+    <!-- 模型检测：实时探测/目录回退 + 勾选导入 -->
+    <Modal
+      :open="detectOpen"
+      :title="'模型检测 — ' + (detectProvider?.key ?? '')"
+      width="max-w-3xl"
+      @close="detectOpen = false"
+    >
+      <div
+        v-if="detectLoading"
+        class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
+      >
+        正在探测远端模型列表…
+      </div>
+      <div
+        v-else-if="detectError"
+        class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+      >
+        {{ detectError }}
+      </div>
+      <template v-else-if="detectResult">
+        <div class="mb-3 flex items-center gap-2">
+          <Badge :variant="detectResult.source === 'live' ? 'success' : 'warning'">
+            {{ detectResult.source === "live" ? "实时探测" : "目录回退" }}
+          </Badge>
+          <span class="text-xs text-muted-foreground">共 {{ detectResult.models.length }} 个模型</span>
+        </div>
+        <div
+          v-if="detectResult.warning"
+          class="mb-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-500"
+        >
+          {{ detectResult.warning }}
+        </div>
+        <template v-if="detectResult.models.length > 0">
+          <div class="relative mb-2">
+            <Search class="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+            <Input v-model="detectQuery" placeholder="搜索模型…" class="pl-8" />
+          </div>
+          <div class="mb-2 flex items-center justify-between text-xs text-muted-foreground">
+            <div class="flex gap-3">
+              <button type="button" class="hover:text-foreground" @click="selectAllDetected">全选</button>
+              <button type="button" class="hover:text-foreground" @click="selectNoneDetected">清空</button>
+              <button type="button" class="hover:text-foreground" @click="selectNewDetected">仅未导入</button>
+            </div>
+            <span>已选 {{ checkedIds.length }} / {{ detectResult.models.length }}</span>
+          </div>
+          <div class="scrollbar-thin max-h-80 space-y-0.5 overflow-y-auto rounded-md border p-2">
+            <label
+              v-for="m in detectFiltered"
+              :key="m.id"
+              class="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 hover:bg-accent/40"
+            >
+              <input
+                type="checkbox"
+                class="size-4 shrink-0 accent-primary"
+                :checked="checkedIds.includes(m.id)"
+                @change="toggleDetect(m.id)"
+              />
+              <span class="min-w-0 flex-1 truncate font-mono text-xs">{{ m.id }}</span>
+              <span v-if="m.name" class="hidden max-w-44 truncate text-xs text-muted-foreground sm:inline">{{ m.name }}</span>
+              <span v-if="m.contextWindow" class="shrink-0 font-mono text-xs text-muted-foreground">
+                {{ m.contextWindow.toLocaleString() }}
+              </span>
+              <Badge v-if="m.exists" variant="outline" class="shrink-0">已导入</Badge>
+            </label>
+            <div v-if="detectFiltered.length === 0" class="p-4 text-center text-xs text-muted-foreground">
+              无匹配模型
+            </div>
+          </div>
+        </template>
+        <div
+          v-else
+          class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
+        >
+          未检测到模型
+        </div>
+      </template>
+      <template #footer>
+        <Button variant="ghost" size="sm" @click="detectOpen = false">取消</Button>
+        <Button size="sm" :disabled="checkedIds.length === 0 || importing" @click="importDetected">
+          {{ importing ? "导入中…" : "导入 " + checkedIds.length + " 个" }}
+        </Button>
+      </template>
+    </Modal>
+
     <!-- 编辑弹窗 -->
     <Modal
       :open="editing"
@@ -352,6 +657,26 @@ onMounted(() => {
       >
         {{ error }}
       </div>
+
+      <!-- 预设横幅：来源标识 + 取 Key 链接 -->
+      <div
+        v-if="activePreset"
+        class="mb-3 flex items-center justify-between gap-3 rounded-md border bg-muted/40 px-3 py-2 text-xs"
+      >
+        <span class="min-w-0 truncate">
+          预设：{{ activePreset.label }}
+          <span v-if="activePreset.note" class="text-muted-foreground"> · {{ activePreset.note }}</span>
+        </span>
+        <button
+          v-if="activePreset.dashboardUrl"
+          type="button"
+          class="shrink-0 text-primary hover:underline"
+          @click="openDashboard(activePreset.dashboardUrl)"
+        >
+          获取 API Key ↗
+        </button>
+      </div>
+
       <div class="grid gap-4 grid-cols-[repeat(auto-fit,minmax(14rem,1fr))]">
         <div class="space-y-1.5">
           <Label for="p-key">唯一标识</Label>
@@ -479,7 +804,7 @@ onMounted(() => {
     <!-- 上游服务：满版单卡 -->
     <Card class="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div class="flex shrink-0 items-center justify-end border-b px-5 py-3">
-        <Button size="sm" @click="newProvider">
+        <Button size="sm" @click="openPicker">
           <Plus class="size-4" /> 新建
         </Button>
       </div>
@@ -503,7 +828,7 @@ onMounted(() => {
               <th class="py-2 font-medium">协议</th>
               <th class="py-2 font-medium">端点</th>
               <th class="py-2 text-center font-medium">状态</th>
-              <th class="w-20 py-2 text-center font-medium">操作</th>
+              <th class="w-28 py-2 text-center font-medium">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -521,6 +846,9 @@ onMounted(() => {
               </td>
               <td class="py-2">
                 <div class="flex justify-center gap-0.5">
+                  <Button variant="ghost" size="icon" class="size-7" title="模型检测" @click="openDetect(p)">
+                    <ScanSearch class="size-3.5" />
+                  </Button>
                   <Button variant="ghost" size="icon" class="size-7" title="编辑" @click="editProvider(p)">
                     <Pencil class="size-3.5" />
                   </Button>

@@ -6,7 +6,14 @@ use moonbridge_store::Provider;
 use tauri::State;
 
 use crate::commands::CmdResult;
+use crate::presets::{ProviderPreset, PRESETS};
 use crate::state::ManagedState;
+
+/// 列出全部上游预设（静态表，含禁用的账户占位）。
+#[tauri::command]
+pub fn preset_list() -> CmdResult<Vec<ProviderPreset>> {
+    Ok(PRESETS.to_vec())
+}
 
 /// 列出全部 provider。
 #[tauri::command]
