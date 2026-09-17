@@ -279,11 +279,12 @@ function maskKey(key: string): string {
   return `${key.slice(0, 6)}…${key.slice(-4)}`;
 }
 
-/** 解析有效 key 列表（与后端同口径：端点留空回退前一个非空 key、去重保序；空列表
+/** 解析有效 key 列表（与后端同口径：手动列表优先，否则端点留空回退前一个非空 key；去重保序，空列表
  *  回落为单空串，手填只填 URL 的卡也能跑）。pool 显式传入：种子初始化时 live 列表
  *  尚未声明（TDZ），读种子池；运行期 handler 读 live 池。 */
 function mockCardKeys(providerKey: string | null, apiKey: string, pool: Provider[]): string[] {
-  const keys: string[] = [];
+  const keys = [...new Set(apiKey.split(/\r?\n/).map((key) => key.trim()).filter(Boolean))];
+  if (keys.length > 0) return keys;
   const pk = providerKey?.trim();
   if (pk) {
     const p = pool.find((x) => x.key === pk);
@@ -292,8 +293,6 @@ function mockCardKeys(providerKey: string | null, apiKey: string, pool: Provider
       if (ep.apiKey) carry = ep.apiKey;
       if (carry && !keys.includes(carry)) keys.push(carry);
     }
-  } else if (apiKey) {
-    keys.push(apiKey);
   }
   return keys.length > 0 ? keys : [""];
 }

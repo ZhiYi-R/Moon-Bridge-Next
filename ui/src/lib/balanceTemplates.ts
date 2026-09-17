@@ -5,15 +5,15 @@
 // 或返回 unix 秒数字（契约会把数字归一成字符串，前端再格式化为时间）。
 //
 // 接口依据摘要：
-// - new-api 系中转：GET {base}/api/usage/token/，Bearer sk-key → data.{total_used,
-//   total_available, unlimited_quota, expires_at}；quota 默认 500000 = $1（站点可改）
+// - new-api 冰哥兼容口径：GET {base}/api/user/self → data.used_quota / 10000000 作余额
 // - DeepSeek：GET api.deepseek.com/user/balance → balance_infos[]（金额为字符串）
 // - Moonshot：GET api.moonshot.cn/v1/users/me/balance → data.available/voucher/cash_balance
 // - SiliconFlow：GET api.siliconflow.cn/v1/user/info → data.balance/chargeBalance/totalBalance
 // - OpenRouter：GET openrouter.ai/api/v1/credits + /api/v1/key → credits 相减得余额
 // - 智谱 Coding Plan：GET open.bigmodel.cn/api/monitor/usage/quota/limit（裸 key 鉴权）
 //   → data.limits[].{type, percentage, nextResetTime(ms)}
-// - Kimi Coding Plan：GET api.kimi.com/coding/v1/usages → credits.monthlyCredits +
+// - Kimi Coding Plan：GET api.kimi.com/coding/v1/usages → usages.limit_5h/limit_7d.{used_ratio,reset_time}
+// - CommandCode：GET api.commandcode.ai/alpha/billing/credits → credits.monthlyCredits +
 //   windowLimits.{fiveHour,weekly}.{used,cap,resetAt(ms)}
 // - Claude Code 订阅：GET api.anthropic.com/api/oauth/usage（OAuth token + 必需头）
 //   → five_hour/seven_day.{utilization, resets_at(ISO)}
@@ -85,54 +85,38 @@ end
 `;
 
 const NEW_API = `MB = {}
--- new-api 系中转站：GET {base}/api/usage/token/ 查询本 key 额度
--- 适用：new-api 及实现了该端点的兼容站点（one-api / Veloera / done-hub 没有
--- key 维度查询接口，不能用本模板）。查询 URL 填站点根地址（不带 /v1）。
 
 function MB.query(ctx)
   if ctx.base_url == "" then
-    return { status = "error", message = "请在卡片上填写查询 URL（站点根地址，不带 /v1）" }
+    return { status = "error", message = "请填写查询 URL（站点根地址，不带 /v1）" }
+  end
+  local extra = ctx.extra or {}
+  local qpu = tonumber(extra.quota_per_unit or 10000000)
+  if not qpu or qpu <= 0 then
+    return { status = "error", message = "quota_per_unit 必须是大于 0 的数字" }
   end
   local r = mb.http.request({
     method = "GET",
-    url = ctx.base_url .. "/api/usage/token/",
+    url = string.gsub(ctx.base_url, "/+$", "") .. "/api/user/self",
     headers = { { "authorization", "Bearer " .. ctx.key } },
     timeout_ms = 10000,
   })
   if r.status ~= 200 then
-    return { status = "error", message = "站点返回 HTTP " .. tostring(r.status)
-      .. "（站点非 new-api 系或版本过旧，不支持 key 维度查询）" }
+    return { status = "error", message = "站点返回 HTTP " .. tostring(r.status) }
   end
-  local d = (r.body or {}).data
-  if not d then
-    return { status = "error", message = "响应缺少 data 字段" }
+  local body = type(r.body) == "table" and r.body or {}
+  if body.success == false then
+    return { status = "error", message = tostring(body.message or "账户查询失败") }
   end
-  if d.unlimited_quota then
-    return { status = "ok", summary = (d.name or "该 key") .. "：无限额度", quotas = {} }
+  local d = type(body.data) == "table" and body.data or {}
+  local quota = tonumber(d.used_quota)
+  if not quota then
+    return { status = "error", message = "响应缺少有效的 data.used_quota（冰哥兼容口径）" }
   end
-  local used = d.total_used or 0
-  local avail = d.total_available or 0
-  local total = used + avail
-  if total <= 0 then
-    return { status = "ok", summary = (d.name or "该 key") .. "：无额度记录", quotas = {} }
-  end
-  -- quota 与货币的换算可被站点自定义；默认 500000 quota = 1 美元，
-  -- 不准时在卡片「额外参数 JSON」里改 quota_per_unit / unit
-  local extra = ctx.extra or {}
-  local qpu = extra.quota_per_unit or 500000
-  local unit = extra.unit or "$"
   return {
     status = "ok",
-    summary = string.format("%s：剩余 %.2f%s", d.name or "key", avail / qpu, unit),
     quotas = {
-      {
-        label = "额度",
-        used_percent = used / total * 100,
-        unit = unit,
-        used_amount = used / qpu,
-        left_amount = avail / qpu,
-        reset_at = (d.expires_at and d.expires_at > 0) and d.expires_at or nil,
-      },
+      { label = "额度", unit = extra.unit or "¥", left_amount = quota / qpu },
     },
   }
 end
@@ -329,16 +313,12 @@ end
 `;
 
 const KIMI_CODING = `MB = {}
--- Kimi Coding Plan：GET {base}/coding/v1/usages
--- credits.monthlyCredits = 月度剩余额度；windowLimits.fiveHour / weekly 是
--- 5 小时与每周窗口的已用量。各档上限因套餐而异，在卡片「额外参数 JSON」里配
--- monthly_cap / five_hour_cap / weekly_cap / unit。
 
 function MB.query(ctx)
   local base = ctx.base_url ~= "" and ctx.base_url or "https://api.kimi.com"
   local r = mb.http.request({
     method = "GET",
-    url = base .. "/coding/v1/usages",
+    url = string.gsub(base, "/+$", "") .. "/coding/v1/usages",
     headers = {
       { "authorization", "Bearer " .. ctx.key },
       { "user-agent", "cli" },
@@ -348,41 +328,91 @@ function MB.query(ctx)
   if r.status ~= 200 then
     return { status = "error", message = "上游返回 HTTP " .. tostring(r.status) }
   end
-  local body = r.body or {}
-  local extra = ctx.extra or {}
-  local unit = extra.unit or "$"
-  local monthlyCap = extra.monthly_cap or 70
-  local fiveCap = extra.five_hour_cap or 14
-  local weeklyCap = extra.weekly_cap or 35
+  local body = type(r.body) == "table" and r.body or {}
+  local usages = type(body.usages) == "table" and body.usages or {}
   local quotas = {}
-  local credits = body.credits
-  if credits and credits.monthlyCredits then
-    local left = credits.monthlyCredits
+  for _, item in ipairs({ { "limit_5h", "5 小时" }, { "limit_7d", "Weekly" } }) do
+    local w = usages[item[1]]
+    local ratio = type(w) == "table" and tonumber(w.used_ratio) or nil
+    if not ratio then
+      return { status = "error", message = "响应缺少有效的 usages." .. item[1] .. ".used_ratio" }
+    end
     table.insert(quotas, {
-      label = "月度",
+      label = item[2],
+      used_percent = ratio * 100,
+      reset_at = w.reset_time,
+    })
+  end
+  return { status = "ok", quotas = quotas }
+end
+`;
+
+const COMMANDCODE = `MB = {}
+
+local function round2(value)
+  return math.floor(value * 100 + 0.5) / 100
+end
+
+function MB.query(ctx)
+  local extra = ctx.extra or {}
+  local monthly_cap = tonumber(extra.monthly_cap or 70)
+  if not monthly_cap or monthly_cap <= 0 then
+    return { status = "error", message = "monthly_cap 必须是大于 0 的数字" }
+  end
+  local unit = extra.unit or ""
+  local url = ctx.base_url ~= "" and ctx.base_url or "https://api.commandcode.ai/alpha/billing/credits"
+  local r = mb.http.request({
+    method = "GET",
+    url = url,
+    headers = {
+      { "authorization", "Bearer " .. ctx.key },
+      { "content-type", "application/json" },
+      { "user-agent", "cli" },
+    },
+    timeout_ms = 10000,
+  })
+  if r.status ~= 200 then
+    return { status = "error", message = "上游返回 HTTP " .. tostring(r.status) }
+  end
+  local body = type(r.body) == "table" and r.body or {}
+  local credits = type(body.credits) == "table" and body.credits or {}
+  local monthly_left = tonumber(credits.monthlyCredits)
+  local quotas = {}
+  if monthly_left then
+    table.insert(quotas, {
+      label = "Monthly",
       unit = unit,
-      used_amount = monthlyCap - left,
-      left_amount = left,
+      used_amount = round2(monthly_cap - monthly_left),
+      left_amount = round2(math.max(monthly_left, 0)),
     })
   end
-  local wl = body.windowLimits or {}
-  local function window(label, w, cap)
-    if not w or not w.used then return end
-    table.insert(quotas, {
-      label = label,
-      used_percent = w.used / cap * 100,
-      reset_at = w.resetAt and math.floor(w.resetAt / 1000) or nil,
-    })
+  local windows = type(body.windowLimits) == "table" and body.windowLimits or {}
+  for _, item in ipairs({ { "fiveHour", "5H" }, { "weekly", "Weekly" } }) do
+    local w = windows[item[1]]
+    if w ~= nil then
+      local used = type(w) == "table" and tonumber(w.used) or nil
+      local cap = type(w) == "table" and tonumber(w.cap) or nil
+      if not used or not cap or cap < 0 then
+        return { status = "error", message = "响应缺少有效的 windowLimits." .. item[1] .. ".used/cap" }
+      end
+      local reset = tonumber(w.resetAt)
+      table.insert(quotas, {
+        label = item[2],
+        unit = unit,
+        used_amount = round2(used),
+        left_amount = round2(math.max(cap - used, 0)),
+        reset_at = reset and math.floor(reset / 1000) or nil,
+      })
+    end
   end
-  window("5 小时", wl.fiveHour, fiveCap)
-  window("Weekly", wl.weekly, weeklyCap)
   if #quotas == 0 then
-    return { status = "error", message = "响应缺少 credits / windowLimits（该 key 可能不是 Coding Plan）" }
+    return { status = "error", message = "响应缺少 credits.monthlyCredits / windowLimits" }
   end
-  local summary = credits and credits.monthlyCredits
-    and string.format("月度剩余 %.2f%s / %g%s", credits.monthlyCredits, unit, monthlyCap, unit)
-    or nil
-  return { status = "ok", summary = summary, quotas = quotas }
+  return {
+    status = "ok",
+    summary = monthly_left and string.format("月度剩余 %.2f%s / %g%s", math.max(monthly_left, 0), unit, monthly_cap, unit) or nil,
+    quotas = quotas,
+  }
 end
 `;
 
@@ -428,6 +458,87 @@ function MB.query(ctx)
 end
 `;
 
+const SUB2API = `MB = {}
+
+function MB.query(ctx)
+  local base = (ctx.base_url or ""):match("^%s*(.-)%s*$")
+  base = base:gsub("/+$", ""):gsub("/v1$", "")
+  if base == "" then
+    return { status = "error", message = "请在卡片上填写查询 URL（Sub2API 站点地址）" }
+  end
+  if not ctx.key or ctx.key == "" then
+    return { status = "error", message = "请填写 Sub2API API Key" }
+  end
+  local r = mb.http.request({
+    method = "GET",
+    url = base .. "/v1/usage",
+    headers = { { "authorization", "Bearer " .. ctx.key } },
+    timeout_ms = 10000,
+  })
+  if r.status ~= 200 then
+    local message = "查询失败，HTTP " .. tostring(r.status)
+    if r.status == 401 then
+      message = message .. "：API Key 无效或未被接受"
+    elseif r.status == 403 then
+      message = message .. "：访问被拒绝，请检查 Key 状态及访问限制"
+    elseif r.status == 404 then
+      message = message .. "：请检查站点地址及是否支持 /v1/usage"
+    end
+    return { status = "error", message = message }
+  end
+  local d = r.body
+  if type(d) ~= "table" then
+    return { status = "error", message = "接口未返回有效的 JSON 对象" }
+  end
+  if d.isValid == false then
+    return { status = "error", message = "接口返回 Key 不可用" }
+  end
+  local quotas = {}
+  local function add(label, amount)
+    local value = tonumber(amount)
+    if value ~= nil then
+      quotas[#quotas + 1] = { label = label, unit = "$", left_amount = value }
+      return true
+    end
+    return false
+  end
+  local has_amount = false
+  if type(d.quota) == "table" then
+    has_amount = add("Key 剩余额度", d.quota.remaining)
+  end
+  if not has_amount then
+    has_amount = add("钱包余额", d.balance)
+  end
+  if not has_amount then
+    local label = "剩余额度"
+    if d.mode == "quota_limited" then
+      label = "Key 剩余额度"
+    elseif d.planName == "钱包余额" then
+      label = "钱包余额"
+    elseif d.planName then
+      label = tostring(d.planName) .. " 剩余额度"
+    end
+    add(label, d.remaining)
+  end
+  local windows = { ["5h"] = "5 小时", ["1d"] = "1 天", ["7d"] = "7 天" }
+  if type(d.rate_limits) == "table" then
+    for _, limit in ipairs(d.rate_limits) do
+      if type(limit) == "table" then
+        local window = tostring(limit.window or "")
+        add((windows[window] or window) .. "周期剩余额度", limit.remaining)
+      end
+    end
+  end
+  if #quotas == 0 then
+    return {
+      status = "error",
+      message = "响应未包含余额或剩余额度，可能是订阅信息不可用或站点版本不兼容",
+    }
+  end
+  return { status = "ok", quotas = quotas }
+end
+`;
+
 /** 内置模板清单（新建卡片时的选择顺序即数组顺序）。 */
 export const BALANCE_TEMPLATES: BalanceTemplate[] = [
   {
@@ -447,9 +558,18 @@ export const BALANCE_TEMPLATES: BalanceTemplate[] = [
     id: "new-api",
     label: "new-api 中转站",
     description:
-      "适用于 new-api 及兼容站点：GET {URL}/api/usage/token/ 查本 key 额度。查询 URL 填站点根地址（不带 /v1）；one-api/Veloera/done-hub 不支持 key 维度查询。quota 换算默认 500000=$1，可在额外参数改。",
-    extraText: '{\n  "quota_per_unit": 500000,\n  "unit": "$"\n}',
+      "冰哥+opus 兼容口径：Bearer 鉴权 GET {URL}/api/user/self，将 data.used_quota / 10000000 显示为余额（默认 ¥）。并非所有 new-api 站点通用；请使用能访问账户接口的凭据，查询 URL 填站点根地址，不带 /v1。换算和单位可通过额外参数调整。",
+    baseUrl: "",
+    extraText: '{\n  "quota_per_unit": 10000000,\n  "unit": "¥"\n}',
     script: NEW_API,
+  },
+  {
+    id: "sub2api",
+    label: "Sub2API",
+    description: "Bearer 鉴权 GET /v1/usage：优先显示 Key 剩余额度，其次钱包余额或套餐剩余额度，并附带 5 小时 / 1 天 / 7 天周期余额（美元）。查询 URL 填站点根地址或以 /v1 结尾的地址。",
+    baseUrl: "",
+    extraText: "{}",
+    script: SUB2API,
   },
   {
     id: "deepseek",
@@ -484,9 +604,18 @@ export const BALANCE_TEMPLATES: BalanceTemplate[] = [
   {
     id: "kimi-coding",
     label: "Kimi Coding Plan",
-    description: "Kimi 编程订阅：月度剩余额度（金额口径）+ 5 小时 / 每周窗口（已用百分比 + 重置时间）。各档上限因套餐而异，在额外参数里配 monthly_cap / five_hour_cap / weekly_cap / unit。默认地址 https://api.kimi.com。",
-    extraText: '{\n  "monthly_cap": 70,\n  "five_hour_cap": 14,\n  "weekly_cap": 35,\n  "unit": "$"\n}',
+    description: "Kimi 编程订阅：读取 usages.limit_5h / limit_7d 的 used_ratio 与 reset_time，显示 5 小时 / 每周已用百分比及重置时间。无需配置额度上限，查询 URL 填 API 根地址。",
+    baseUrl: "https://api.kimi.com",
+    extraText: "{}",
     script: KIMI_CODING,
+  },
+  {
+    id: "commandcode",
+    label: "CommandCode",
+    description: "月度剩余额度 + 5H / Weekly 金额窗口；窗口上限取接口 cap，月上限默认 70，可在额外参数 monthly_cap 修改。查询 URL 是完整接口地址；unit 默认空，可自行填写。",
+    baseUrl: "https://api.commandcode.ai/alpha/billing/credits",
+    extraText: '{\n  "monthly_cap": 70,\n  "unit": ""\n}',
+    script: COMMANDCODE,
   },
   {
     id: "claude-code",

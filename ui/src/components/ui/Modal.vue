@@ -52,6 +52,9 @@ onUnmounted(() => document.removeEventListener("keydown", onKey));
               <X class="size-4" />
             </button>
           </div>
+          <div v-if="$slots.notice" class="shrink-0">
+            <slot name="notice" />
+          </div>
           <div class="scrollbar-thin min-h-0 flex-1 overflow-y-auto p-5">
             <slot />
           </div>

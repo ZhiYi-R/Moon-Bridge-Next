@@ -337,12 +337,11 @@ export type DisplayMode = "auto" | "percent" | "amount";
 /** 余额卡片：key 即卡片名，scriptRef 为插件目录内的 `.lua` 路径或内联脚本原文。 */
 export interface BalanceCard {
   key: string;
-  /** 引用的上游服务 key（`Provider.key`）；引擎据此解析端点与有效 API Key。
-   *  `null` = 旧版手填模式，退回 `apiKey`/`baseUrl`（新卡片不再提供手填入口）。 */
+  /** 上游服务引用；无手动 Key 时解析其端点 Key，否则仅作分组和提供商标签。 */
   providerKey: string | null;
   /** 显示样式；后端落库时非法值归一为 `auto`。 */
   displayMode: DisplayMode;
-  /** 旧版手填模式的 API Key，引用模式下为空串。 */
+  /** 手动 Key，可换行输入多个；去空白、保序去重后非空则完全覆盖上游服务 Key。 */
   apiKey: string;
   /** 查询 URL（可选）：配额接口基准地址，脚本里 `ctx.base_url` 读取；与 Provider 端点无关。 */
   baseUrl: string;

@@ -475,13 +475,15 @@ camelCase 契约，前端 `call()` 分发层据此在 IPC 与 REST 间透明切�
   自定义 JSON，同时也作为 `mb.config`）；`keys` 恒为当前 key 的单元素数组。
   `mb.http.request` 的响应 body 在上游返回 JSON 时已自动解析为 Lua table，脚本可直接
   `r.body.xxx`。
-- **卡片引用上游 Provider**（`provider_key`，V11 起）：引擎从该 Provider 的端点解析
-  有效 key（端点 key 留空回退前一个非空 key，与路由侧同口径）并**去重保序**；V12 起
-  **对每个 key 各执行一次脚本并拆成多张卡片展示**——一个提供商多个 key 只写一段脚本，
-  脚本始终按单 key 编写（`ctx.key`），不必遍历汇总。引用的 Provider 不存在时报引擎级
-  错误（落单行 `key_index=0` 的错误结果）。`provider_key` 为空是旧版手填模式
-  （`api_key` 退化为单元素列表），仅为兼容保留，UI 已不提供手填入口；手填连 key 都
-  留空时仍执行一次（ctx.key 为空串），卡片不会因此停摆。
+- **卡片 Key 来源**：新增/编辑支持手动单 Key 或换行分隔的 Key 列表，沿用
+  `api_key`（REST/IPC `apiKey`）字符串存储，不改变表结构。按行去首尾空白、忽略空行、
+  **去重保序**后非空则完全覆盖服务引用，不读取或混入 Provider 的 Key；此时
+  `provider_key` 可选，只作分组和 `ctx.provider` 的默认标签，引用失效也不影响手动查询。
+  手动输入为空时才从 Provider 端点解析 Key（空端点继承前一个非空 Key）并去重，
+  Provider 不存在则报引擎级错误。UI 保存/测试要求手动 Key 或服务引用至少一项；
+  后端保留两者均空时用空 Key 执行一次的公开查询兼容性。
+  **每个 Key 各执行一次脚本并拆成多张卡片展示**，`ctx.key` 与单元素 `ctx.keys`
+  契约不变，保存、测试拉取、单 Key 刷新和定时查询采用相同优先级。
 - **结果按 key 拆行落库**（V12）：`(card_key, key_index)` 联合主键，每行带
   `key_label`（掩码展示标签：长度 ≤4 → `****`，≤10 → 前 2 位 + `…`，更长 →
   前 6 位 + `…` + 后 4 位；key 原文不进结果表）。整卡执行后 `key_index >= 当前 key 数`
@@ -498,11 +500,18 @@ camelCase 契约，前端 `call()` 分发层据此在 IPC 与 REST 间透明切�
   沙箱无 os 库，脚本拿到毫秒时间戳只能除 1000 后给数字）；脚本自定义字段原样保留在 payload。
 - **内置脚本模板**（`ui/src/lib/balanceTemplates.ts`）：新建卡片时可从模板填充脚本与建议
   默认值（查询 URL/额外参数/间隔）。模板按各服务真实接口编写：通用百分比/金额骨架 +
-  new-api 系中转（`/api/usage/token/`，key 维度额度）、DeepSeek、Moonshot/Kimi 开放平台、
-  SiliconFlow、OpenRouter（credits + key 限额双接口）、智谱 GLM Coding Plan（裸 key 鉴权 +
-  Bearer 回退）、Kimi Coding Plan（月度 credits + 5h/weekly 窗口）、Claude Code 订阅
-  （OAuth usage 接口）。OpenAI 官方与 one-api/Veloera/done-hub 无 key 维度余额接口，
-  不提供模板。
+  new-api 冰哥兼容口径（`/api/user/self`，`data.used_quota / 10000000` 作余额，默认 ¥，
+  不是所有 new-api 站点的通用口径）、DeepSeek、Moonshot/Kimi 开放平台、SiliconFlow、
+  OpenRouter（credits + key 限额双接口）、智谱 GLM Coding Plan（裸 key 鉴权 + Bearer 回退）、
+  Kimi Coding Plan（`usages.limit_5h/limit_7d` 的 `used_ratio * 100`、`reset_time`）、
+  CommandCode（完整 URL `/alpha/billing/credits`；月度 `monthlyCredits` 剩余额度，
+  月上限默认 70；5H/Weekly 的 used/cap 金额与毫秒 resetAt，单位默认空）、Claude Code
+  订阅（OAuth usage 接口）、Sub2API（Bearer `GET /v1/usage`；优先 `quota.remaining`，
+  再回退 `balance` / `remaining`，附带 `rate_limits` 的周期剩余额度，单位 $；站点 URL
+  自动去尾斜杠及 `/v1`）。模板不携带账户密钥，也不覆盖已保存卡片的脚本。
+- **弹窗错误反馈**：新增/编辑表单的校验、保存失败和测试拉取错误显示在弹窗标题下，
+  通过 Modal 的可选 `notice` 插槽置于滚动内容区外，始终可见；多 Key 错误保留掩码标签，
+  支持脚本 `payload.message`，详情仍在测试预览。页面级刷新/删除错误独立展示。
 - **两种配额模式与显示切换**：百分比模式给 percent 字段，显示「{used}% · 剩余 {left}%」；
   金额模式给 `unit` + `used_amount`（可再带 `left_amount`），显示
   「消耗 {used}{unit} · 余额 {left}{unit}」。进度条比例：优先 percent，否则双 amount 时
@@ -549,7 +558,7 @@ Vue 3.5 + Vite 7 + TS 5 + Pinia + Vue Router + TailwindCSS 3 + shadcn-vue 风格
 - `src/lib/api.ts`：前后端契约层（DTO 类型 + command 封装，按领域分组）。
 - `src/stores/`：Pinia（gateway 状态、provider 列表）。
 - `src/router`：hash 路由（Tauri 自定义协议友好）。
-- `src/views/`：Dashboard（网关状态 + 用量 + Provider 概览）、Providers（完整 CRUD；可用模型选择器先列已选 chips，候选列表在搜索框聚焦时才展开下拉）、Models（模型 CRUD + 从 models.dev 搜索勾选批量导入 + provider 维度 Offer 管理，Offer 可绑定端点协议；两区可拖拽分栏）、Routes（别名 CRUD + 必填校验 + 可搜索模型下拉）、Plugins（在线脚本编辑 + 启停/增删 + 一键重启网关生效）、Usage（汇总卡片 + token 时序堆叠柱图 + 模型分布 Top 3 + 其他聚合 + 明细表，纯CSS/SVG 无额外依赖）、Balance（余额&健康看板：卡片引用上游 Provider + 可选查询 URL + 新建时可从内置模板库填充脚本（new-api 中转/DeepSeek/Moonshot/SiliconFlow/OpenRouter/智谱/Kimi Coding Plan/Claude Code 等真实接口模板）+ 多 key 逐 key 拆卡（掩码 key chip + 单 key 刷新）+ 按提供商分组 + 百分比/金额两种模式与卡片级显示切换 + 状态徽章 + 一键刷新 + 单列弹窗内测试拉取预览（逐 key 结果）+ 带编写指南的 Lua 脚本编辑）、Traces（主从布局 + 可拖宽列表 + ↑↓ 键盘导航 + 各阶段报文只读高亮，超 256KB 回退纯文本 + 删除）、Settings（网关分区默认展开）。
+- `src/views/`：Dashboard（网关状态 + 用量 + Provider 概览）、Providers（完整 CRUD；可用模型选择器先列已选 chips，候选列表在搜索框聚焦时才展开下拉）、Models（模型 CRUD + 从 models.dev 搜索勾选批量导入 + provider 维度 Offer 管理，Offer 可绑定端点协议；两区可拖拽分栏）、Routes（别名 CRUD + 必填校验 + 可搜索模型下拉）、Plugins（在线脚本编辑 + 启停/增删 + 一键重启网关生效）、Usage（汇总卡片 + token 时序堆叠柱图 + 模型分布 Top 3 + 其他聚合 + 明细表，纯CSS/SVG 无额外依赖）、Balance（余额&健康看板：卡片引用上游 Provider 或手动 Key 列表（手动优先）+ 可选查询 URL + 新建时可从内置模板库填充脚本（new-api 中转/DeepSeek/Moonshot/SiliconFlow/OpenRouter/智谱/Kimi Coding Plan/Claude Code 等真实接口模板）+ 多 key 逐 key 拆卡（掩码 key chip + 单 key 刷新）+ 按提供商分组 + 百分比/金额两种模式与卡片级显示切换 + 状态徽章 + 一键刷新 + 单列弹窗内测试拉取预览（逐 key 结果）+ 带编写指南的 Lua 脚本编辑）、Traces（主从布局 + 可拖宽列表 + ↑↓ 键盘导航 + 各阶段报文只读高亮，超 256KB 回退纯文本 + 删除）、Settings（网关分区默认展开）。
 - `src/components/ui`：Button / Badge / Card / Input / Label / Modal（动画 + dirty 守卫）/ Select / Switch / Pagination / ToastHost / CodeEditor（CodeMirror 6）等，精简 shadcn 风格。
 - `src/composables/`：`useConfirm`（Promise 化确认弹窗）、`useToast`（全局通知）、`useAutoPageSize`（实测行高分页 + 页首行锚定防漂移）、`usePointerDrag`（拖宽/分栏共用）。
 - 反馈与自适应：保存/删除统一走 toast；网关状态 4s 轮询；列表区分加载态与空态；表单网格 `auto-fit minmax` 随窗口宽度换列。

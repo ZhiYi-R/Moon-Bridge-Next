@@ -157,15 +157,15 @@ pub struct PluginBinding {
 pub struct BalanceCard {
     /// 唯一 key（卡片名，亦作为脚本 ctx 的 `name`）。
     pub key: String,
-    /// 引用的上游 Provider key（`providers.key`）。设置后脚本 ctx 的 `key`/`keys`
-    /// 由该 Provider 的端点解析（key 去重）；`None` 时为旧版手填模式，回落到 `api_key`。
+    /// 引用的上游 Provider key（`providers.key`）；仅在无手动 key 时解析其端点 key。
+    /// 有手动 key 时仅用作分组和脚本 ctx.provider 的默认标签。
     #[serde(default)]
     pub provider_key: Option<String>,
     /// 显示样式：`auto`（按数据自动）| `percent`（强制百分比）| `amount`（强制金额）。
     /// 纯前端展示 concern，引擎不参与；保存时非法值归一为 `auto`。
     #[serde(default = "default_display_mode")]
     pub display_mode: String,
-    /// 卡片 API Key（明文）。旧版手填模式专用，设置 `provider_key` 后忽略。
+    /// 手动 API Key（明文），多 key 用换行分隔；去空白、保序去重后非空则覆盖服务引用。
     #[serde(default)]
     pub api_key: String,
     /// 查询 URL（脚本 ctx 的 `base_url`）。用户可选填写的配额接口基准地址，

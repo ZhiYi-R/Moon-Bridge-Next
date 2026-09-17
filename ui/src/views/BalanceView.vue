@@ -33,6 +33,7 @@ const { confirm } = useConfirm();
 const toast = useToast();
 
 const error = ref<string | null>(null);
+const formError = ref<string | null>(null);
 const editing = ref(false);
 const isNew = ref(false);
 const busy = ref(false);
@@ -40,6 +41,7 @@ const busy = ref(false);
 interface Form {
   key: string;
   providerKey: string;
+  apiKey: string;
   baseUrl: string;
   displayMode: DisplayMode;
   intervalSecs: number;
@@ -52,6 +54,7 @@ interface Form {
 const form = reactive<Form>({
   key: "",
   providerKey: "",
+  apiKey: "",
   baseUrl: "",
   displayMode: "auto",
   intervalSecs: 900,
@@ -199,9 +202,16 @@ async function ensureProviders() {
   providers.value = await providerApi.list().catch(() => [] as Provider[]);
 }
 
-const providerOptions = computed(() =>
-  providers.value.map((p) => ({ value: p.key, label: p.key })),
-);
+const providerOptions = computed(() => [
+  { value: "", label: "不引用上游服务" },
+  ...providers.value.map((p) => ({ value: p.key, label: p.key })),
+]);
+
+function manualKeys(value: string): string[] {
+  return [...new Set(value.split(/\r?\n/).map((key) => key.trim()).filter(Boolean))];
+}
+
+const formManualKeys = computed(() => manualKeys(form.apiKey));
 
 /** 表单当前选中的上游服务（未选中时为 undefined）。 */
 const selectedProvider = computed(() =>
@@ -218,9 +228,12 @@ const selectedProviderSummary = computed(() =>
   selectedProvider.value ? providerSummary(selectedProvider.value) : "",
 );
 
-/** 卡片副标题：绑定的上游服务 + 可选查询 URL；旧手填卡标出手填模式。 */
+/** 卡片副标题只展示 Key 来源，不展示密钥原文。 */
 function cardBindingText(c: BalanceCardView): string {
-  const target = c.providerKey ? c.providerKey : "手填模式（旧版）";
+  const count = manualKeys(c.apiKey).length;
+  const target = count > 0
+    ? `${c.providerKey ? `${c.providerKey} · ` : ""}手动 Key（${count} 个）`
+    : c.providerKey || "无 Key 查询";
   const url = (c.baseUrl ?? "").trim();
   return url ? `${target} · ${url}` : target;
 }
@@ -276,6 +289,7 @@ function newCard() {
   Object.assign(form, {
     key: "",
     providerKey: "",
+    apiKey: "",
     baseUrl: "",
     displayMode: "auto",
     intervalSecs: 900,
@@ -285,6 +299,7 @@ function newCard() {
     extraText: "{}",
   });
   error.value = null;
+  formError.value = null;
   testResult.value = null;
   templateId.value = "";
   editing.value = true;
@@ -301,6 +316,7 @@ function editCard(key: string) {
   Object.assign(form, {
     key: c.key,
     providerKey: c.providerKey ?? "",
+    apiKey: c.apiKey,
     baseUrl: c.baseUrl,
     displayMode: c.displayMode,
     intervalSecs: c.intervalSecs,
@@ -310,6 +326,7 @@ function editCard(key: string) {
     extraText: JSON.stringify(c.extra ?? {}, null, 2),
   });
   error.value = null;
+  formError.value = null;
   testResult.value = null;
   templateId.value = "";
   editing.value = true;
@@ -344,6 +361,13 @@ function applyTemplate(id: string) {
 // ── 测试拉取（dry-run 预览）：用当前表单内容逐 key 试跑一次，不保存、不影响线上结果 ──
 const testing = ref(false);
 const testResult = ref<BalanceKeyResult[] | null>(null);
+const testErrors = computed(() => (testResult.value ?? [])
+  .filter((result) => result.status === "error")
+  .map((result) => {
+    const message = result.error || result.payload?.message || "查询失败";
+    return result.keyLabel ? `${result.keyLabel}：${message}` : message;
+  }));
+const modalErrors = computed(() => formError.value ? [formError.value] : testErrors.value);
 
 /** 本地校验失败时直接构造一个 error 结果进预览面板，不发请求。 */
 function testLocalError(message: string) {
@@ -353,10 +377,13 @@ function testLocalError(message: string) {
 }
 
 async function runTest() {
+  formError.value = null;
   testResult.value = null;
   const scriptRef = form.scriptRef.trim() || form.inlineScript;
   if (!scriptRef.trim()) return testLocalError("请先填写脚本路径或内联脚本");
-  if (!form.providerKey.trim()) return testLocalError("请先选择上游服务");
+  if (!form.providerKey.trim() && formManualKeys.value.length === 0) {
+    return testLocalError("请填写手动 API Key 或选择上游服务");
+  }
   let extra: unknown;
   try {
     extra = JSON.parse(form.extraText || "{}");
@@ -368,9 +395,9 @@ async function runTest() {
   try {
     testResult.value = await balanceApi.test({
       key: form.key.trim() || "preview",
-      providerKey: form.providerKey,
+      providerKey: form.providerKey.trim() || null,
       displayMode: form.displayMode,
-      apiKey: "",
+      apiKey: formManualKeys.value.join("\n"),
       baseUrl: form.baseUrl.trim(),
       providerLabel: "",
       scriptRef,
@@ -422,34 +449,34 @@ function toCardInput(c: BalanceCardView): BalanceCard {
 }
 
 async function save(andQuery: boolean) {
-  error.value = null;
+  formError.value = null;
+  testResult.value = null;
   const key = form.key.trim();
   if (!key) {
-    error.value = "卡片名（key）不能为空";
+    formError.value = "卡片名（key）不能为空";
     return;
   }
-  if (!form.providerKey.trim()) {
-    error.value = "请选择上游服务";
+  if (!form.providerKey.trim() && formManualKeys.value.length === 0) {
+    formError.value = "请填写手动 API Key 或选择上游服务";
     return;
   }
   if (!form.scriptRef.trim() && !form.inlineScript.trim()) {
-    error.value = "请填写脚本路径或内联脚本";
+    formError.value = "请填写脚本路径或内联脚本";
     return;
   }
   let extra: unknown;
   try {
     extra = JSON.parse(form.extraText || "{}");
   } catch {
-    error.value = "extra 不是合法 JSON";
+    formError.value = "额外参数不是合法 JSON";
     return;
   }
   const existing = store.cards.find((c) => c.key === key);
   const card: BalanceCard = {
     key,
-    providerKey: form.providerKey,
+    providerKey: form.providerKey.trim() || null,
     displayMode: form.displayMode,
-    // 手填 key 已废弃：新卡片不再提供入口，保存时显式回退为空（旧卡数据在此被清空）
-    apiKey: "",
+    apiKey: formManualKeys.value.join("\n"),
     baseUrl: form.baseUrl.trim(),
     // 显示名字段已并入「上游服务」选择：恒为空串，界面按 providerKey 展示与分组
     providerLabel: "",
@@ -469,7 +496,7 @@ async function save(andQuery: boolean) {
     toast.success(isNew.value ? `余额卡片 “${key}” 已创建` : `余额卡片 “${key}” 已更新`);
     if (andQuery) await refreshOne(key);
   } catch (e) {
-    error.value = errMsg(e);
+    formError.value = errMsg(e);
   } finally {
     busy.value = false;
   }
@@ -517,7 +544,7 @@ async function remove(key: string) {
       v-else-if="store.cards.length === 0"
       class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
     >
-      <p>还没有余额卡片。每张卡片绑定一个上游服务，用一段 Lua 脚本查询额度并按间隔自动刷新。</p>
+      <p>还没有余额卡片。手动填写 API Key 或引用上游服务，用 Lua 脚本查询额度并按间隔自动刷新。</p>
       <Button class="mt-4" size="sm" @click="newCard">
         <Plus class="size-4" /> 使用示例脚本新建
       </Button>
@@ -691,6 +718,15 @@ async function remove(key: string) {
       :guard="guardClose"
       @close="editing = false"
     >
+      <template v-if="modalErrors.length" #notice>
+        <div
+          role="alert"
+          aria-live="assertive"
+          class="scrollbar-thin mx-5 mt-3 max-h-28 overflow-y-auto rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive"
+        >
+          <p v-for="(message, index) in modalErrors" :key="index" class="whitespace-pre-wrap break-words">{{ message }}</p>
+        </div>
+      </template>
       <div class="grid gap-4">
         <!-- 模板填充（仅新建）：选中即填入脚本与建议的 URL/额外参数/间隔 -->
         <div v-if="isNew" class="space-y-1.5 rounded-md border border-dashed p-3">
@@ -718,16 +754,36 @@ async function remove(key: string) {
         </div>
 
         <div class="space-y-1.5">
-          <Label>上游服务</Label>
+          <Label>上游服务（可选）</Label>
           <Select v-model="form.providerKey" :options="providerOptions" placeholder="请选择上游服务" />
-          <p v-if="selectedProviderSummary" class="text-xs text-muted-foreground">
+          <p v-if="selectedProviderSummary && formManualKeys.length === 0" class="text-xs text-muted-foreground">
             {{ selectedProviderSummary }}
           </p>
-          <p v-else-if="providerOptions.length === 0" class="text-xs text-muted-foreground">
-            还没有上游服务，请先到「上游服务」页创建。
+          <p v-else-if="providers.length === 0" class="text-xs text-muted-foreground">
+            还没有上游服务，可直接填写下方 API Key。
           </p>
           <p class="text-xs text-muted-foreground">
-            引擎用该服务端点的 key（去重保序，留空继承前一个非空 key）逐个执行脚本，每个 key 拆成一张卡片
+            手动 Key 为空时，使用该服务端点的 Key（去重保序，留空继承前一个非空 Key）；否则仅用于分组，不引用服务的 Key。
+          </p>
+        </div>
+
+        <div class="space-y-1.5">
+          <Label for="bc-api-keys">手动 API Key（可选，一行一个）</Label>
+          <textarea
+            id="bc-api-keys"
+            v-model="form.apiKey"
+            rows="3"
+            autocomplete="off"
+            autocapitalize="off"
+            :spellcheck="false"
+            placeholder="填写一个 Key，或换行输入 Key 列表"
+            class="flex w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          ></textarea>
+          <p class="text-xs text-muted-foreground">
+            手动填写后只使用这些 Key，不混入上游服务的 Key；忽略空行和重复值，每个 Key 单独查询。
+          </p>
+          <p v-if="formManualKeys.length > 0" class="text-xs text-muted-foreground">
+            当前使用 {{ formManualKeys.length }} 个手动 Key；清空后恢复上游服务引用。
           </p>
         </div>
 

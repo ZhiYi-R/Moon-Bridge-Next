@@ -1233,6 +1233,87 @@ async fn balance_refresh_runs_inline_script() {
 }
 
 #[tokio::test]
+async fn balance_manual_keys_override_provider_via_api() {
+    let h = Harness::new("balance-manual-keys");
+    let (status, _) = h.json(Method::PUT, "/api/providers", json!({
+        "key": "upstream",
+        "endpoints": [{"protocol": "openai-chat", "baseUrl": "https://unused.test", "apiKey": "provider-key"}]
+    })).await;
+    assert_eq!(status, StatusCode::OK);
+    let mut card = balance_card("manual", 0);
+    card["providerKey"] = json!("upstream");
+    card["apiKey"] = json!(" manual-a\r\nmanual-b\nmanual-a\n");
+    card["scriptRef"] = json!(
+        r#"
+    MB = {}
+    function MB.query(ctx)
+      assert(#ctx.keys == 1 and ctx.keys[1] == ctx.key)
+      return { summary = ctx.key }
+    end
+    "#
+    );
+    let (status, preview) = h
+        .json(Method::POST, "/api/balance/test", card.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(preview.as_array().unwrap().len(), 2);
+    assert_eq!(preview[0]["payload"]["summary"], json!("manual-a"));
+    assert_eq!(preview[1]["payload"]["summary"], json!("manual-b"));
+    let (_, cards) = h.get("/api/balance/cards").await;
+    assert_eq!(cards, json!([]));
+
+    let (status, _) = h
+        .json(Method::PUT, "/api/balance/cards", card.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, cards) = h.get("/api/balance/cards").await;
+    assert_eq!(cards[0]["apiKey"], card["apiKey"]);
+    let (status, refreshed) = h
+        .json(
+            Method::POST,
+            "/api/balance/cards/manual/refresh",
+            Value::Null,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(refreshed["results"].as_array().unwrap().len(), 2);
+    for idx in 0..2 {
+        assert_eq!(refreshed["results"][idx]["status"], json!("ok"));
+        assert_eq!(
+            refreshed["results"][idx]["payload"],
+            preview[idx]["payload"]
+        );
+    }
+
+    card["providerKey"] = json!("missing");
+    let (status, preview) = h
+        .json(Method::POST, "/api/balance/test", card.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(preview.as_array().unwrap().len(), 2);
+    assert_eq!(preview[0]["status"], json!("ok"));
+    assert_eq!(preview[1]["status"], json!("ok"));
+
+    card["providerKey"] = json!("upstream");
+    card["apiKey"] = json!(" \r\n ");
+    let (status, _) = h.json(Method::PUT, "/api/balance/cards", card).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, refreshed) = h
+        .json(
+            Method::POST,
+            "/api/balance/cards/manual/refresh",
+            Value::Null,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(refreshed["results"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        refreshed["results"][0]["payload"]["summary"],
+        json!("provider-key")
+    );
+}
+
+#[tokio::test]
 async fn balance_refresh_unknown_key_is_404() {
     let h = Harness::new("balance-404");
 

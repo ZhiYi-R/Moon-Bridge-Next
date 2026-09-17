@@ -381,6 +381,7 @@ async fn provider_card_splits_into_per_key_results() {
     end
     "#;
     let mut c = card("ref", script);
+    c.api_key.clear();
     c.provider_key = Some("kimi".to_string());
     c.provider_label = String::new(); // 留空 → 取 Provider key
     c.base_url = "https://quota.example".to_string(); // URL 是卡片自己的可选输入
@@ -435,6 +436,7 @@ async fn per_key_failure_is_independent() {
     end
     "#;
     let mut c = card("ind", script);
+    c.api_key.clear();
     c.provider_key = Some("kimi".to_string());
 
     let results = engine(&db, None).run_card(&c).await;
@@ -473,6 +475,7 @@ async fn engine_failure_keeps_payload_per_key() {
     .unwrap();
     let eng = engine(&db, None);
     let mut c = card("keep2", SCRIPT_OK);
+    c.api_key.clear();
     c.provider_key = Some("kimi".to_string());
 
     let results = eng.run_card(&c).await;
@@ -491,6 +494,7 @@ async fn engine_failure_keeps_payload_per_key() {
     end
     "#,
     );
+    broken.api_key.clear();
     broken.provider_key = Some("kimi".to_string());
     let results = eng.run_card(&broken).await;
     assert_eq!(results[0].result.status, "ok");
@@ -523,6 +527,7 @@ async fn shrinking_keys_prunes_stale_rows() {
     .unwrap();
     let eng = engine(&db, None);
     let mut c = card("prune", SCRIPT_OK);
+    c.api_key.clear();
     c.provider_key = Some("kimi".to_string());
     assert_eq!(eng.run_card(&c).await.len(), 2);
 
@@ -549,6 +554,7 @@ async fn refresh_card_with_key_index_reruns_only_that_key() {
     .unwrap();
     let eng = engine(&db, None);
     let mut c = card("one", SCRIPT_OK);
+    c.api_key.clear();
     c.provider_key = Some("kimi".to_string());
     db.upsert_balance_card(&c).unwrap();
     eng.run_card(&c).await;
@@ -564,6 +570,7 @@ async fn refresh_card_with_key_index_reruns_only_that_key() {
     end
     "#,
     );
+    changed.api_key.clear();
     changed.provider_key = Some("kimi".to_string());
     let view = eng.refresh_card(&changed, Some(0)).await;
     assert_eq!(view.results.len(), 2);
@@ -606,6 +613,7 @@ async fn refresh_card_with_key_index_reruns_only_that_key() {
 async fn provider_key_missing_is_single_error_row() {
     let db = Arc::new(Database::open_in_memory().unwrap());
     let mut c = card("ghost", SCRIPT_OK);
+    c.api_key.clear();
     c.provider_key = Some("ghost".to_string());
 
     let results = engine(&db, None).run_card(&c).await;
@@ -646,6 +654,106 @@ async fn provider_key_missing_is_single_error_row() {
         1,
         "解析失败路径同样 prune 残留行"
     );
+}
+
+#[tokio::test]
+async fn manual_keys_override_provider_across_query_paths() {
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    db.upsert_provider(&provider(
+        "upstream",
+        &[("https://unused", "provider-secret")],
+    ))
+    .unwrap();
+    let script = r#"
+    MB = {}
+    function MB.query(ctx)
+      assert(ctx.key ~= "provider-secret")
+      assert(#ctx.keys == 1 and ctx.keys[1] == ctx.key)
+      return { summary = ctx.key .. "|" .. ctx.provider }
+    end
+    "#;
+    let eng = engine(&db, None);
+    let mut c = card("manual", script);
+    c.provider_key = Some("upstream".into());
+    c.provider_label.clear();
+    c.api_key = "  sk-manual-alpha\r\n\n sk-manual-beta \n sk-manual-alpha\n".into();
+    db.upsert_balance_card(&c).unwrap();
+
+    let preview = eng.test_card(&c).await;
+    assert_eq!(preview.len(), 2);
+    assert!(db.list_balance_results("manual").unwrap().is_empty());
+    let results = eng.run_card(&c).await;
+    assert_eq!(results.len(), 2);
+    for (idx, key) in ["sk-manual-alpha", "sk-manual-beta"].iter().enumerate() {
+        assert_eq!(results[idx].result.status, "ok");
+        assert_eq!(results[idx].result.payload, preview[idx].result.payload);
+        assert_eq!(
+            results[idx].result.payload.as_ref().unwrap()["summary"],
+            json!(format!("{key}|upstream"))
+        );
+        assert_ne!(results[idx].key_label, *key);
+    }
+
+    c.provider_key = Some("missing".into());
+    db.upsert_balance_card(&c).unwrap();
+    let refreshed = eng.refresh_card(&c, Some(1)).await;
+    assert_eq!(
+        refreshed.results[0].result.payload,
+        results[0].result.payload
+    );
+    assert_eq!(refreshed.results[1].result.status, "ok");
+    assert_eq!(
+        refreshed.results[1].result.payload.as_ref().unwrap()["summary"],
+        json!("sk-manual-beta|missing")
+    );
+    assert!(eng
+        .test_card(&c)
+        .await
+        .iter()
+        .all(|r| r.result.status == "ok"));
+
+    c.api_key = "sk-manual-alpha".into();
+    c.provider_key = None;
+    c.provider_label = "manual-label".into();
+    db.upsert_balance_card(&c).unwrap();
+    let all = eng.refresh_all().await;
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].results.len(), 1);
+    assert_eq!(
+        all[0].results[0].result.payload.as_ref().unwrap()["summary"],
+        json!("sk-manual-alpha|manual-label")
+    );
+    assert_eq!(db.list_balance_results("manual").unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn whitespace_manual_keys_fall_back_to_provider() {
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    db.upsert_provider(&provider(
+        "upstream",
+        &[("https://unused", "from-provider")],
+    ))
+    .unwrap();
+    let mut c = card(
+        "fallback",
+        r#"
+    MB = {}
+    function MB.query(ctx)
+      assert(ctx.key == "from-provider")
+      return { summary = "provider" }
+    end
+    "#,
+    );
+    c.api_key = " \r\n\t\n ".into();
+    c.provider_key = Some("upstream".into());
+    let eng = engine(&db, None);
+    for results in [eng.test_card(&c).await, eng.run_card(&c).await] {
+        assert_eq!(only(&results).result.status, "ok");
+        assert_eq!(
+            only(&results).result.payload.as_ref().unwrap()["summary"],
+            json!("provider")
+        );
+    }
 }
 
 #[tokio::test]
@@ -760,10 +868,298 @@ async fn test_card_runs_without_persisting() {
     ))
     .unwrap();
     let mut c = card("drymulti", SCRIPT_OK);
+    c.api_key.clear();
     c.provider_key = Some("kimi".to_string());
     let results = eng.test_card(&c).await;
     assert_eq!(results.len(), 2, "dry-run 也按 key 拆结果");
     assert_eq!(results[0].key_label, "sk-alp…0001");
     assert_eq!(results[1].key_label, "sk-bet…0002");
     assert!(db.list_balance_results("drymulti").unwrap().is_empty());
+}
+
+async fn run_builtin_template(
+    name: &str,
+    status: u16,
+    body: Value,
+    extra: Value,
+) -> BalanceKeyResult {
+    let source = include_str!("../../../ui/src/lib/balanceTemplates.ts");
+    let marker = format!("const {name} = `");
+    let script = source
+        .split_once(&marker)
+        .unwrap()
+        .1
+        .split_once("`;")
+        .unwrap()
+        .0;
+    let path = match name {
+        "NEW_API" => "/api/user/self",
+        "KIMI_CODING" => "/coding/v1/usages",
+        "COMMANDCODE" => "/alpha/billing/credits",
+        "SUB2API" => "/v1/usage",
+        _ => panic!("unknown template"),
+    };
+    let require_cli = matches!(name, "KIMI_CODING" | "COMMANDCODE");
+    let require_json = name == "COMMANDCODE";
+    let app = Router::new().route(
+        path,
+        axum::routing::get(move |headers: axum::http::HeaderMap| {
+            let body = body.clone();
+            async move {
+                assert_eq!(headers.get("authorization").unwrap(), "Bearer sk-test");
+                if require_cli {
+                    assert_eq!(headers.get("user-agent").unwrap(), "cli");
+                }
+                if require_json {
+                    assert_eq!(headers.get("content-type").unwrap(), "application/json");
+                }
+                (
+                    axum::http::StatusCode::from_u16(status).unwrap(),
+                    Json(body),
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let mut c = card("template", script);
+    c.base_url = if name == "COMMANDCODE" {
+        format!("http://{addr}{path}")
+    } else if name == "SUB2API" {
+        format!("  http://{addr}/v1/  ")
+    } else {
+        format!("http://{addr}/")
+    };
+    c.extra = extra;
+    let results = engine(&db, None).test_card(&c).await;
+    server.abort();
+    only(&results).clone()
+}
+
+#[tokio::test]
+async fn new_api_template_uses_account_quota_including_zero() {
+    for (quota, expected) in [(12500000, 1.25), (0, 0.0)] {
+        let result = run_builtin_template(
+            "NEW_API",
+            200,
+            json!({"data": {"used_quota": quota}}),
+            json!({}),
+        )
+        .await;
+        assert_eq!(result.result.status, "ok");
+        let payload = result.result.payload.unwrap();
+        assert_eq!(payload["quotas"][0]["unit"], json!("¥"));
+        assert_close(payload["quotas"][0]["leftAmount"].as_f64(), expected);
+    }
+    let result = run_builtin_template(
+        "NEW_API",
+        200,
+        json!({"data": {"used_quota": "12500000"}}),
+        json!({"quota_per_unit": 500000, "unit": "$"}),
+    )
+    .await;
+    let payload = result.result.payload.unwrap();
+    assert_close(payload["quotas"][0]["leftAmount"].as_f64(), 25.0);
+    assert_eq!(payload["quotas"][0]["unit"], json!("$"));
+}
+
+#[tokio::test]
+async fn kimi_template_uses_ratios_and_reset_times() {
+    let result = run_builtin_template(
+        "KIMI_CODING",
+        200,
+        json!({"usages": {
+            "limit_5h": {"used_ratio": 0, "reset_time": "2026-09-17T12:00:00Z"},
+            "limit_7d": {"used_ratio": 0.375, "reset_time": "2026-09-21T12:00:00Z"}
+        }}),
+        json!({}),
+    )
+    .await;
+    assert_eq!(result.result.status, "ok");
+    let payload = result.result.payload.unwrap();
+    let quotas = payload["quotas"].as_array().unwrap();
+    assert_eq!(quotas.len(), 2);
+    assert_close(quotas[0]["usedPercent"].as_f64(), 0.0);
+    assert_close(quotas[0]["leftPercent"].as_f64(), 100.0);
+    assert_close(quotas[1]["usedPercent"].as_f64(), 37.5);
+    assert_eq!(quotas[0]["resetAt"], json!("2026-09-17T12:00:00Z"));
+    assert_eq!(quotas[1]["resetAt"], json!("2026-09-21T12:00:00Z"));
+}
+
+#[tokio::test]
+async fn commandcode_template_uses_monthly_and_window_amounts() {
+    let result = run_builtin_template(
+        "COMMANDCODE",
+        200,
+        json!({
+            "credits": {"monthlyCredits": 52.345},
+            "windowLimits": {
+                "fiveHour": {"used": 0, "cap": 14, "resetAt": 1800000000123_i64},
+                "weekly": {"used": 36, "cap": 35}
+            }
+        }),
+        json!({}),
+    )
+    .await;
+    assert_eq!(result.result.status, "ok");
+    let payload = result.result.payload.unwrap();
+    let quotas = payload["quotas"].as_array().unwrap();
+    assert_eq!(quotas.len(), 3);
+    assert_close(quotas[0]["leftAmount"].as_f64(), 52.35);
+    assert_close(quotas[0]["usedAmount"].as_f64(), 17.66);
+    assert_eq!(quotas[0]["unit"], json!(""));
+    assert_close(quotas[1]["leftAmount"].as_f64(), 14.0);
+    assert_eq!(quotas[1]["resetAt"], json!("1800000000"));
+    assert_close(quotas[2]["leftAmount"].as_f64(), 0.0);
+    let result = run_builtin_template(
+        "COMMANDCODE",
+        200,
+        json!({"credits": {"monthlyCredits": 0}}),
+        json!({"monthly_cap": 100, "unit": "$"}),
+    )
+    .await;
+    let payload = result.result.payload.unwrap();
+    assert_close(payload["quotas"][0]["usedAmount"].as_f64(), 100.0);
+    assert_close(payload["quotas"][0]["leftAmount"].as_f64(), 0.0);
+    assert_eq!(payload["quotas"][0]["unit"], json!("$"));
+    let result = run_builtin_template(
+        "COMMANDCODE",
+        200,
+        json!({"windowLimits": {"weekly": {"used": 1, "cap": 2}}}),
+        json!({}),
+    )
+    .await;
+    assert_eq!(result.result.status, "ok");
+    assert!(result.result.payload.unwrap()["summary"].is_null());
+}
+
+#[tokio::test]
+async fn builtin_templates_report_http_and_schema_errors() {
+    for name in ["NEW_API", "KIMI_CODING", "COMMANDCODE", "SUB2API"] {
+        for (status, body) in [
+            (401, json!({})),
+            (200, json!({})),
+            (200, json!("not an object")),
+        ] {
+            let result = run_builtin_template(name, status, body, json!({})).await;
+            assert_eq!(result.result.status, "error", "{name}");
+            let payload = result
+                .result
+                .payload
+                .expect("business error must retain its payload");
+            let message = payload["message"].as_str().unwrap();
+            assert!(!message.is_empty());
+            assert_eq!(result.result.error.as_deref(), Some(message));
+        }
+    }
+    for (name, body, extra) in [
+        (
+            "NEW_API",
+            json!({"success": false, "message": "access denied"}),
+            json!({}),
+        ),
+        ("NEW_API", json!({}), json!({"quota_per_unit": 0})),
+        (
+            "KIMI_CODING",
+            json!({"usages": {"limit_5h": {"used_ratio": 0}}}),
+            json!({}),
+        ),
+        (
+            "COMMANDCODE",
+            json!({"windowLimits": {"weekly": {"used": 1}}}),
+            json!({}),
+        ),
+        ("COMMANDCODE", json!({}), json!({"monthly_cap": 0})),
+    ] {
+        let result = run_builtin_template(name, 200, body, extra).await;
+        assert_eq!(result.result.status, "error", "{name}");
+        let payload = result
+            .result
+            .payload
+            .expect("business error must retain its payload");
+        assert_eq!(result.result.error.as_deref(), payload["message"].as_str());
+        assert!(!payload["message"].as_str().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn sub2api_template_preserves_balance_precedence_and_windows() {
+    for (body, label, amount) in [
+        (
+            json!({"quota": {"remaining": "0"}, "balance": 99, "remaining": 100}),
+            "Key 剩余额度",
+            0.0,
+        ),
+        (
+            json!({"quota": {}, "balance": "12.5", "remaining": 100}),
+            "钱包余额",
+            12.5,
+        ),
+        (
+            json!({"mode": "quota_limited", "remaining": 3}),
+            "Key 剩余额度",
+            3.0,
+        ),
+        (
+            json!({"planName": "钱包余额", "remaining": -1}),
+            "钱包余额",
+            -1.0,
+        ),
+        (
+            json!({"planName": "Pro", "remaining": 7}),
+            "Pro 剩余额度",
+            7.0,
+        ),
+        (json!({"remaining": 8}), "剩余额度", 8.0),
+    ] {
+        let result = run_builtin_template("SUB2API", 200, body, json!({})).await;
+        assert_eq!(result.result.status, "ok");
+        let payload = result.result.payload.unwrap();
+        let quotas = payload["quotas"].as_array().unwrap();
+        assert_eq!(quotas.len(), 1);
+        assert_eq!(quotas[0]["label"], json!(label));
+        assert_eq!(quotas[0]["unit"], json!("$"));
+        assert_close(quotas[0]["leftAmount"].as_f64(), amount);
+    }
+    let result = run_builtin_template(
+        "SUB2API",
+        200,
+        json!({"rate_limits": [
+            {"window": "5h", "remaining": 0},
+            {"window": "1d", "remaining": "1.5"},
+            {"window": "7d", "remaining": 2},
+            {"window": "30d", "remaining": 3},
+            {"window": "bad", "remaining": "invalid"},
+            "invalid"
+        ]}),
+        json!({}),
+    )
+    .await;
+    assert_eq!(result.result.status, "ok");
+    let payload = result.result.payload.unwrap();
+    let quotas = payload["quotas"].as_array().unwrap();
+    assert_eq!(quotas.len(), 4);
+    for (i, label) in ["5 小时", "1 天", "7 天", "30d"].iter().enumerate() {
+        assert_eq!(quotas[i]["label"], json!(format!("{label}周期剩余额度")));
+    }
+    assert_close(quotas[0]["leftAmount"].as_f64(), 0.0);
+}
+
+#[tokio::test]
+async fn sub2api_template_reports_invalid_key_and_access_errors() {
+    for (status, body, expected) in [
+        (200, json!({"isValid": false, "balance": 100}), "Key 不可用"),
+        (401, json!({}), "API Key 无效"),
+        (403, json!({}), "访问被拒绝"),
+        (404, json!({}), "/v1/usage"),
+    ] {
+        let result = run_builtin_template("SUB2API", status, body, json!({})).await;
+        assert_eq!(result.result.status, "error");
+        assert!(result.result.payload.unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .contains(expected));
+    }
 }

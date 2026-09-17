@@ -5,7 +5,7 @@
 //! 落库。脚本不进网关的 [`moonbridge_protocol::PluginHooks`] 注册表，宿主桥也只实现
 //! `mb.http.request`——余额查询是旁路能力，不该与网关生命周期互相牵制。
 //!
-//! 多 key 拆卡：卡片引用 Provider 时，从端点解析出去重保序的有效 key 列表，引擎对
+//! 多 key 拆卡：优先使用手动 key 列表，否则引用 Provider 端点，去重保序后引擎对
 //! 每个 key 各跑一次脚本（ctx 为单 key 形状，`keys` 是单元素数组），结果按
 //! `(card_key, key_index)` 拆行落库，前端逐 key 渲染一张卡片。落库的 `key_label`
 //! 是掩码后的展示标签，key 原文不进结果表。
@@ -347,16 +347,35 @@ impl BalanceEngine {
 
     /// 解析卡片的有效 key 列表与提供商展示名。
     ///
-    /// 引用模式（`provider_key` 非空）：从 Provider 端点解析有效 key——端点 key 留空
-    /// 回退前一个非空 key（与路由侧端点同口径）——再去重（保序）；引用的 Provider
-    /// 不存在时报引擎级错误。手填模式（旧版）：`api_key` 退化为单元素列表。
-    ///
-    /// 空列表回落为 `[""]`：手填模式允许只填 URL 查公开接口，卡片不应因此永不执行。
+    /// 手动 key 按行解析、去空白并保序去重；非空时不读取 Provider。
+    /// 否则从 Provider 端点继承并去重 key，失效引用报错。
+    /// 空列表回落为 `[""]`，兼容无需认证的公开查询接口。
     fn resolve_keys(&self, card: &BalanceCard) -> Result<(Vec<String>, String), String> {
         let mut keys: Vec<String> = Vec::new();
         let mut provider_name = card.provider_label.clone();
+        let provider_key = card
+            .provider_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        for key in card
+            .api_key
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if !keys.iter().any(|existing| existing == key) {
+                keys.push(key.to_string());
+            }
+        }
+        if !keys.is_empty() {
+            if provider_name.is_empty() {
+                provider_name = provider_key.unwrap_or_default().to_string();
+            }
+            return Ok((keys, provider_name));
+        }
 
-        if let Some(pk) = card.provider_key.as_deref().filter(|s| !s.is_empty()) {
+        if let Some(pk) = provider_key {
             let provider = self
                 .db
                 .get_provider(pk)
@@ -374,8 +393,6 @@ impl BalanceEngine {
             if provider_name.is_empty() {
                 provider_name = provider.key.clone();
             }
-        } else if !card.api_key.is_empty() {
-            keys.push(card.api_key.clone());
         }
 
         if keys.is_empty() {
@@ -463,7 +480,7 @@ impl BalanceEngine {
 }
 
 /// key 的展示掩码：空串 → `""`；长度 ≤ 4 → `****`；≤ 10 → 前 2 位 + `…`；
-/// 更长 → 前 6 位 + `…` + 后 4 位。结果表只落这个标签，key 原文不出引擎。
+/// 更长 → 前 6 位 + `…` + 后 4 位。结果的 key_label 只保存掩码，不保存完整 key。
 fn mask_key(key: &str) -> String {
     let chars: Vec<char> = key.chars().collect();
     let len = chars.len();

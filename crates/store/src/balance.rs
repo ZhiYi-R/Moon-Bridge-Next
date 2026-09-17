@@ -2,7 +2,7 @@
 //!
 //! [`BalanceCard`] 是用户配置（脚本引用、查询间隔、自定义参数），一卡一行；
 //! [`BalanceKeyResult`] 是引擎落库的**最近一次**结果，按 `(card_key, key_index)`
-//! 拆行（Provider 有几个有效 key 就有几行）。删除卡片时结果行在同一事务内级联
+//! 拆行（卡片有几个有效 key 就有几行）。删除卡片时结果行在同一事务内级联
 //! 删除，避免残留孤儿行。
 
 use rusqlite::params;
@@ -309,6 +309,31 @@ mod tests {
         assert_eq!(clamp_interval_secs(59), MIN_INTERVAL_SECS);
         assert_eq!(clamp_interval_secs(60), 60, "恰好达到下限不改变");
         assert_eq!(clamp_interval_secs(3600), 3600, "高于下限原样保留");
+    }
+
+    #[test]
+    fn manual_key_list_roundtrips_with_provider_reference() {
+        let db = Database::open_in_memory().unwrap();
+        let mut c = card("manual-list", 60, true, 0);
+        c.provider_key = Some("provider".into());
+        c.api_key = " first\r\nsecond\nfirst\n".into();
+        db.upsert_balance_card(&c).unwrap();
+        let loaded = db.get_balance_card(&c.key).unwrap().unwrap();
+        assert_eq!(loaded.api_key, c.api_key);
+        assert_eq!(loaded.provider_key, c.provider_key);
+        assert_eq!(db.list_balance_cards().unwrap()[0].api_key, c.api_key);
+        assert_eq!(
+            db.list_balance_cards_due(crate::now_unix()).unwrap()[0].api_key,
+            c.api_key
+        );
+        let json = serde_json::to_value(&loaded).unwrap();
+        let decoded: BalanceCard = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.api_key, c.api_key);
+        c.api_key.clear();
+        db.upsert_balance_card(&c).unwrap();
+        let loaded = db.get_balance_card(&c.key).unwrap().unwrap();
+        assert!(loaded.api_key.is_empty());
+        assert_eq!(loaded.provider_key, c.provider_key);
     }
 
     #[test]
