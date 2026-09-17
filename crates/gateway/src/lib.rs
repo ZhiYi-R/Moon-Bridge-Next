@@ -19,6 +19,7 @@ pub mod config;
 pub mod dispatch;
 pub mod error;
 pub mod handlers;
+pub mod oauth;
 pub mod router;
 pub mod server;
 pub mod session;

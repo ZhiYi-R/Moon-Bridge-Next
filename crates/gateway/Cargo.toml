@@ -34,3 +34,5 @@ chrono = { workspace = true }
 url = { workspace = true }
 once_cell = { workspace = true }
 parking_lot = { workspace = true }
+base64 = { workspace = true }
+dirs = { workspace = true }

@@ -145,30 +145,30 @@ pub const PRESETS: &[ProviderPreset] = &[
         models_dev_id: Some("openrouter"),
         enabled: true,
     },
-    // ---- OAuth 账户（后做，占位禁用）----
+    // ---- OAuth 账户（Devin 为后做占位）----
     ProviderPreset {
         id: "command-code-auth",
         label: "Command Code - Auth",
         category: "account",
-        protocol: "",
-        base_url: "",
-        dashboard_url: None,
+        protocol: "openai-chat",
+        base_url: "https://api.commandcode.ai/provider/v1",
+        dashboard_url: Some("https://commandcode.ai/studio/"),
         key_optional: false,
-        note: Some("Command Code 账户 OAuth 登录（后续版本支持）"),
+        note: Some("Command Code 账户登录（浏览器授权 / 本地 CLI 凭据导入）"),
         models_dev_id: None,
-        enabled: false,
+        enabled: true,
     },
     ProviderPreset {
         id: "kimi-oauth",
         label: "Kimi",
         category: "account",
-        protocol: "",
-        base_url: "",
+        protocol: "openai-chat",
+        base_url: "https://api.kimi.com/coding/v1",
         dashboard_url: None,
         key_optional: false,
-        note: Some("Kimi 账户 OAuth 登录（后续版本支持）"),
+        note: Some("Kimi 账户设备码登录（浏览器验证码授权）"),
         models_dev_id: None,
-        enabled: false,
+        enabled: true,
     },
     ProviderPreset {
         id: "devin",
@@ -236,12 +236,16 @@ mod tests {
     }
 
     #[test]
-    fn account_presets_are_disabled_placeholders() {
+    fn account_presets_gate_state() {
         let accounts: Vec<_> = PRESETS.iter().filter(|p| p.category == "account").collect();
-        assert_eq!(accounts.len(), 3, "账户占位应为 Command Code-Auth / Kimi / Devin 三个");
-        for p in accounts {
-            assert!(!p.enabled, "账户预设应为禁用占位: {}", p.id);
+        assert_eq!(accounts.len(), 3, "账户组应为 Command Code-Auth / Kimi / Devin 三个");
+        // 已实现的两家：启用且带合法协议与 baseUrl（登录成功即按此建 provider）
+        for p in accounts.iter().filter(|p| p.enabled) {
+            assert!(!p.protocol.is_empty() && p.base_url.starts_with("http"), "{}", p.id);
         }
+        // Devin 仍为后做占位（CLI 桥/自定义 wire 属另一轮）
+        let devin = accounts.iter().find(|p| p.id == "devin").unwrap();
+        assert!(!devin.enabled);
     }
 
     #[test]

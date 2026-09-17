@@ -25,6 +25,9 @@ import type {
 } from "./api";
 
 const now = Date.now();
+// OAuth mock 流程状态（begin 重置，status 计数推进）
+let oauthPolls = 0;
+let oauthMockPreset = "kimi-oauth";
 const MIN = 60_000;
 const HOUR = 60 * MIN;
 
@@ -491,7 +494,9 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
         { id: "ollama", label: "Ollama", category: "api", protocol: "openai-chat", baseUrl: "http://localhost:11434/v1", dashboardUrl: null, keyOptional: true, note: "本地 Ollama 服务（OpenAI 兼容端点），通常无需 Key", modelsDevId: null, enabled: true },
         { id: "deepseek", label: "DeepSeek", category: "api", protocol: "openai-chat", baseUrl: "https://api.deepseek.com", dashboardUrl: "https://platform.deepseek.com/api_keys", keyOptional: false, note: null, modelsDevId: "deepseek", enabled: true },
         { id: "openrouter", label: "OpenRouter", category: "api", protocol: "openai-chat", baseUrl: "https://openrouter.ai/api/v1", dashboardUrl: "https://openrouter.ai/keys", keyOptional: false, note: "聚合商：模型量大，导入时注意勾选", modelsDevId: "openrouter", enabled: true },
-        { id: "kimi-oauth", label: "Kimi", category: "account", protocol: "", baseUrl: "", dashboardUrl: null, keyOptional: false, note: "Kimi 账户 OAuth 登录（后续版本支持）", modelsDevId: null, enabled: false },
+        { id: "kimi-oauth", label: "Kimi", category: "account", protocol: "openai-chat", baseUrl: "https://api.kimi.com/coding/v1", dashboardUrl: null, keyOptional: false, note: "Kimi 账户设备码登录（浏览器验证码授权）", modelsDevId: null, enabled: true },
+        { id: "command-code-auth", label: "Command Code - Auth", category: "account", protocol: "openai-chat", baseUrl: "https://api.commandcode.ai/provider/v1", dashboardUrl: "https://commandcode.ai/studio/", keyOptional: false, note: "Command Code 账户登录（浏览器授权 / 本地 CLI 凭据导入）", modelsDevId: null, enabled: true },
+        { id: "devin", label: "Devin", category: "account", protocol: "", baseUrl: "", dashboardUrl: null, keyOptional: false, note: "Devin 账户（CLI 凭据导入 / Auth0 登录，后续版本支持）", modelsDevId: null, enabled: false },
       ] as T;
     case "provider_detect_models": {
       const key = String((args as { providerKey?: string }).providerKey ?? "");
@@ -506,6 +511,48 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
       }
       return { source: "live", warning: null, models: detected } as T;
     }
+
+
+
+    // ── OAuth 登录（mock：begin 后第二次轮询即完成并落库）──
+    case "oauth_begin": {
+      const preset = String((args as { preset?: string }).preset ?? "");
+      oauthMockPreset = preset;
+      oauthPolls = 0;
+      return {
+        flowId: "mock-flow",
+        kind: preset === "kimi-oauth" ? "device" : "callback",
+        alreadyDone: false,
+        verificationUrl: "https://example.com/mock-oauth",
+        userCode: preset === "kimi-oauth" ? "ABCD-EFGH" : null,
+        instructions: "mock 登录：第二次轮询自动完成",
+        providerKey: null,
+      } as T;
+    }
+    case "oauth_status": {
+      oauthPolls += 1;
+      if (oauthPolls < 2) return { state: "pending", message: "等待授权…", providerKey: null } as T;
+      const key = oauthMockPreset;
+      upsert(
+        providers,
+        {
+          key,
+          endpoints: [{ protocol: "openai-chat", baseUrl: "https://api.example.com/v1", apiKey: "mock-oauth-token" }],
+          version: null,
+          userAgent: null,
+          webSearch: null,
+          extra: { oauth: { kind: key === "kimi-oauth" ? "kimi" : "command-code", expiresAt: Date.now() + 3_600_000 } },
+          enabled: true,
+          createdAt: now,
+          updatedAt: now,
+        },
+        (x) => x.key,
+      );
+      return { state: "done", message: null, providerKey: key } as T;
+    }
+    case "oauth_cancel":
+    case "oauth_paste":
+      return undefined as T;
 
 
     // ── Route ──

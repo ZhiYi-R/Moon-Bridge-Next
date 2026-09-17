@@ -149,7 +149,7 @@ pub async fn handle_request(
     let session_tag = resolve_session(&state, &mut ctx, &mut core_req).await;
 
     // ── 路由解析 ──
-    let resolved = Router::resolve(&state.db, &core_req.model_alias).map_err(|e| {
+    let mut resolved = Router::resolve(&state.db, &core_req.model_alias).map_err(|e| {
         fail_audit(
             &state,
             &ctx,
@@ -164,6 +164,31 @@ pub async fn handle_request(
     ctx.upstream_model = Some(resolved.upstream_model.clone());
     ctx.upstream_max_output_tokens =
         crate::router::model_output_limit(&state.db, &resolved.upstream_model);
+
+    // ── OAuth 令牌保鲜：临期刷新并回写，随后重新解析路由以拿到新凭据 ──
+    // （端点 api_key 是登录时写入的快照；provider 无 OAuth 令牌包时开销仅一次读库判定）
+    if crate::oauth::provider_needs_refresh(&state.db, &resolved.provider_key) {
+        crate::oauth::ensure_fresh(&state, &resolved.provider_key)
+            .await
+            .map_err(|e| {
+                fail_audit(
+                    &state,
+                    &ctx,
+                    start,
+                    routed_trace(&ctx, &resolved, &client_request_snapshot),
+                    GatewayError::Route(e),
+                )
+            })?;
+        resolved = Router::resolve(&state.db, &core_req.model_alias).map_err(|e| {
+            fail_audit(
+                &state,
+                &ctx,
+                start,
+                pre_core_trace(&ctx, &client_request_snapshot),
+                e,
+            )
+        })?;
+    }
 
     // ── [CORE] 请求钩子 + 工具注入 ──
     state

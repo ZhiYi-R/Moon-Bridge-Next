@@ -4,6 +4,7 @@
 //! oneshot 优雅关闭信号驱动，实现「启动 / 停止 / 查询状态」。
 
 use std::sync::{Arc, Mutex, RwLock};
+use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use moonbridge_store::Database;
@@ -47,6 +48,34 @@ pub struct ManagedState {
     /// 恰好抹掉胜者刚存的句柄 ⇒ 网关在跑却停不掉、status 显示未运行、
     /// 再启动必报「地址被占用」。start/stop 全程持此锁即消除该 TOCTOU。
     lifecycle: tokio::sync::Mutex<()>,
+    /// 进行中的 OAuth 登录流程（flowId → 句柄；见 `commands::oauth`）。
+    pub oauth_flows: Mutex<HashMap<String, OAuthFlow>>,
+}
+
+/// OAuth 登录流程状态（前端轮询；camelCase DTO）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OAuthFlowStatus {
+    /// pending / done / error / cancelled
+    pub state: String,
+    /// 进度提示或错误原因（粘贴无效时的提示也走这里，state 保持 pending）。
+    pub message: Option<String>,
+    /// done 时的 provider key。
+    pub provider_key: Option<String>,
+}
+
+impl OAuthFlowStatus {
+    pub fn pending() -> Self {
+        Self { state: "pending".to_string(), message: None, provider_key: None }
+    }
+}
+
+/// OAuth 登录流程句柄：状态共享给 status 轮询；abort/paste 控制后台任务。
+/// 从注册表移除（cancel）即触发中止：sender Drop 使后台 select 的取消分支生效。
+pub struct OAuthFlow {
+    pub status: Arc<Mutex<OAuthFlowStatus>>,
+    pub abort: tokio::sync::oneshot::Sender<()>,
+    pub paste: tokio::sync::mpsc::UnboundedSender<String>,
 }
 
 impl ManagedState {
@@ -74,6 +103,7 @@ impl ManagedState {
             gateway: Mutex::new(None),
             last_error: Mutex::new(None),
             lifecycle: tokio::sync::Mutex::new(()),
+            oauth_flows: Mutex::new(HashMap::new()),
         }))
     }
 

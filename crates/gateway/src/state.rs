@@ -22,6 +22,8 @@ pub struct AppState {
     pub client: reqwest::Client,
     /// 活跃会话表（深度取 `config.session_table_depth`，见 `crate::session`）。
     pub sessions: SessionTable,
+    /// OAuth 令牌刷新串行化：并发请求不双刷同一 refresh_token（轮换会互踢）。
+    pub oauth_refresh_lock: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
@@ -41,6 +43,7 @@ impl AppState {
             hooks,
             client,
             sessions,
+            oauth_refresh_lock: tokio::sync::Mutex::new(()),
         })
     }
 }

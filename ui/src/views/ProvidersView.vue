@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ChevronDown, ChevronRight, Pencil, Plus, ScanSearch, Search, Trash2 } from "lucide-vue-next";
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 
 import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
@@ -16,11 +16,14 @@ import {
   errMsg,
   catalogApi,
   modelApi,
+  oauthApi,
   openExternal,
   pluginApi,
   providerApi,
   type DetectResult,
   type ModelDef,
+  type OAuthBegin,
+  type OAuthFlowStatus,
   type Offer,
   type PluginBinding,
   type PluginRecord,
@@ -280,6 +283,11 @@ function openDashboard(url?: string | null) {
 
 function choosePreset(p: ProviderPreset) {
   picking.value = false;
+  // 账户组：走 OAuth 登录编排；API 组：预填表单
+  if (p.category === "account") {
+    void startOAuth(p);
+    return;
+  }
   void newProvider(p);
 }
 
@@ -376,6 +384,82 @@ async function importDetected() {
   }
 }
 
+
+
+// ── OAuth 登录（账户组预设）：begin → 轮询 status → done/cancel ──
+const oauthOpen = ref(false);
+const oauthPreset = ref<ProviderPreset | null>(null);
+const oauthInfo = ref<OAuthBegin | null>(null);
+const oauthStatus = ref<OAuthFlowStatus | null>(null);
+const oauthError = ref<string | null>(null);
+const oauthPasteText = ref("");
+let oauthTimer: number | undefined;
+
+async function startOAuth(p: ProviderPreset) {
+  picking.value = false;
+  oauthPreset.value = p;
+  oauthInfo.value = null;
+  oauthStatus.value = null;
+  oauthError.value = null;
+  oauthPasteText.value = "";
+  oauthOpen.value = true;
+  try {
+    const b = await oauthApi.begin(p.id);
+    if (b.alreadyDone) {
+      toast.success("已导入本地凭据，上游 “" + (b.providerKey ?? p.id) + "” 已就绪");
+      oauthOpen.value = false;
+      void store.load();
+      return;
+    }
+    oauthInfo.value = b;
+    pollOAuth(b.flowId);
+  } catch (e) {
+    oauthError.value = errMsg(e);
+  }
+}
+
+function pollOAuth(flowId: string) {
+  window.clearInterval(oauthTimer);
+  oauthTimer = window.setInterval(() => {
+    void (async () => {
+      try {
+        const s = await oauthApi.status(flowId);
+        oauthStatus.value = s;
+        if (s.state === "done") {
+          window.clearInterval(oauthTimer);
+          toast.success("已登录，上游 “" + (s.providerKey ?? "") + "” 已创建");
+          oauthOpen.value = false;
+          void store.load();
+        } else if (s.state === "error") {
+          window.clearInterval(oauthTimer);
+          oauthError.value = s.message ?? "登录失败";
+        }
+      } catch {
+        // 流程被移除（取消）时静默
+      }
+    })();
+  }, 1500);
+}
+
+async function closeOAuth() {
+  window.clearInterval(oauthTimer);
+  if (oauthInfo.value && oauthStatus.value?.state !== "done") {
+    await oauthApi.cancel(oauthInfo.value.flowId).catch(() => {});
+  }
+  oauthOpen.value = false;
+}
+
+async function submitOAuthPaste() {
+  if (!oauthInfo.value || !oauthPasteText.value.trim()) return;
+  try {
+    await oauthApi.paste(oauthInfo.value.flowId, oauthPasteText.value.trim());
+    oauthPasteText.value = "";
+  } catch (e) {
+    oauthError.value = errMsg(e);
+  }
+}
+
+onUnmounted(() => window.clearInterval(oauthTimer));
 
 async function newProvider(preset: ProviderPreset | null = null) {
   activePreset.value = preset;
@@ -643,6 +727,86 @@ onMounted(() => {
         </Button>
       </template>
     </Modal>
+
+
+    <!-- OAuth 登录弹窗：设备码（Kimi）/ 浏览器回调 + 粘贴兜底（Command Code） -->
+    <Modal
+      :open="oauthOpen"
+      :title="'账户登录 — ' + (oauthPreset?.label ?? '')"
+      @close="closeOAuth"
+    >
+      <div
+        v-if="oauthError"
+        class="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+      >
+        {{ oauthError }}
+      </div>
+      <div
+        v-if="!oauthInfo && !oauthError"
+        class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
+      >
+        正在发起登录…
+      </div>
+      <template v-else-if="oauthInfo">
+        <p v-if="oauthInfo.instructions" class="mb-3 text-xs text-muted-foreground">
+          {{ oauthInfo.instructions }}
+        </p>
+
+        <!-- 设备码流（Kimi） -->
+        <div v-if="oauthInfo.kind === 'device'" class="space-y-3">
+          <div class="rounded-md border bg-muted/40 p-4 text-center">
+            <div class="text-xs text-muted-foreground">验证码</div>
+            <div class="mt-1 select-all font-mono text-2xl tracking-widest">
+              {{ oauthInfo.userCode }}
+            </div>
+          </div>
+          <Button
+            v-if="oauthInfo.verificationUrl"
+            variant="outline"
+            size="sm"
+            class="w-full"
+            @click="openDashboard(oauthInfo.verificationUrl)"
+          >
+            打开验证页 ↗
+          </Button>
+        </div>
+
+        <!-- 浏览器回调 + 粘贴兜底（Command Code） -->
+        <div v-else class="space-y-3">
+          <Button
+            v-if="oauthInfo.verificationUrl"
+            variant="outline"
+            size="sm"
+            class="w-full"
+            @click="openDashboard(oauthInfo.verificationUrl)"
+          >
+            打开登录授权页 ↗
+          </Button>
+          <div class="border-t pt-3">
+            <Label for="oauth-paste">手动粘贴（回调信息或 API Key）</Label>
+            <div class="mt-1.5 flex gap-2">
+              <Input
+                id="oauth-paste"
+                v-model="oauthPasteText"
+                placeholder="粘贴回调 JSON / URL 或 API Key"
+              />
+              <Button size="sm" :disabled="!oauthPasteText.trim()" @click="submitOAuthPaste">
+                提交
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-4 flex items-center gap-2 text-xs text-muted-foreground">
+          <span class="inline-block size-2 animate-pulse rounded-full bg-amber-500" />
+          {{ oauthStatus?.message ?? "等待授权…" }}
+        </div>
+      </template>
+      <template #footer>
+        <Button variant="ghost" size="sm" @click="closeOAuth">取消</Button>
+      </template>
+    </Modal>
+
 
     <!-- 编辑弹窗 -->
     <Modal

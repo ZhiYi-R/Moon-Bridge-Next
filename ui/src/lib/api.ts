@@ -246,6 +246,29 @@ export interface ProviderPreset {
   enabled: boolean;
 }
 
+
+/** OAuth 登录启动结果（账户组预设点击后由 `oauth_begin` 返回）。 */
+export interface OAuthBegin {
+  flowId: string;
+  /** device（Kimi 设备码）/ callback（Command Code 浏览器回调 + 粘贴兜底） */
+  kind: "device" | "callback";
+  /** 本地 CLI 凭据导入命中，begin 即完成 */
+  alreadyDone: boolean;
+  verificationUrl?: string | null;
+  userCode?: string | null;
+  instructions?: string | null;
+  providerKey?: string | null;
+}
+
+/** OAuth 流程状态（轮询）。 */
+export interface OAuthFlowStatus {
+  /** pending / done / error / cancelled */
+  state: string;
+  message?: string | null;
+  providerKey?: string | null;
+}
+
+
 /** 模型检测到的候选：目录字段 + 是否已导入。 */
 export interface DetectedModel extends CatalogModel {
   exists: boolean;
@@ -280,6 +303,15 @@ export const modelApi = {
   offerSave: (offer: Offer) => call<void>("offer_save", { offer }),
   offerRemove: (providerKey: string, modelSlug: string) =>
     call<void>("offer_delete", { providerKey, modelSlug }),
+};
+
+export const oauthApi = {
+  /** 启动 OAuth 登录（参数为预设 id：kimi-oauth / command-code-auth）。 */
+  begin: (preset: string) => call<OAuthBegin>("oauth_begin", { preset }),
+  status: (flowId: string) => call<OAuthFlowStatus>("oauth_status", { flowId }),
+  cancel: (flowId: string) => call<void>("oauth_cancel", { flowId }),
+  /** Command Code 手动粘贴（回调 JSON / URL / 裸 API Key）。 */
+  paste: (flowId: string, text: string) => call<void>("oauth_paste", { flowId, text }),
 };
 
 export const catalogApi = {
