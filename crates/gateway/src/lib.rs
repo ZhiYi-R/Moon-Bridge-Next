@@ -310,9 +310,11 @@ mod tests {
         let plugins = dir.join("plugins");
         let inside = plugins.join("ok.lua");
         std::fs::write(&inside, "MB = {}").unwrap();
+        // 返回值按当前实现是原样路径（canonicalize 只发生在 is_within_root 的包含性
+        // 校验内）；Windows 上 canonicalize() 会加 \\?\ UNC 前缀，断言不能再用它。
         assert_eq!(
             parse_script_ref(inside.to_str().unwrap(), Some(&plugins)),
-            ScriptRef::File(inside.canonicalize().unwrap())
+            ScriptRef::File(inside.clone())
         );
 
         for evil in [
