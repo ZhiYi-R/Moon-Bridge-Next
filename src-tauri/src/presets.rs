@@ -15,7 +15,7 @@ pub struct ProviderPreset {
     pub id: &'static str,
     /// 展示名。
     pub label: &'static str,
-    /// 分组：`api`（API Key 直连）/ `account`（OAuth 账户，后做）。
+    /// 分组：`api`（API Key 直连）/ `account`（OAuth 账户登录编排）。
     pub category: &'static str,
     /// MBN 协议串（`openai-chat` 等；登录成功后按此建 provider 端点）。
     pub protocol: &'static str,
