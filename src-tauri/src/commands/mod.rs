@@ -7,6 +7,7 @@ pub mod app;
 pub mod catalog;
 pub mod gateway;
 pub mod model;
+pub mod oauth;
 pub mod plugin;
 pub mod provider;
 pub mod route;

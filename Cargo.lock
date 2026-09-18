@@ -2643,6 +2643,7 @@ dependencies = [
  "toml 0.8.2",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -2662,8 +2663,10 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "chrono",
+ "dirs 5.0.1",
  "eventsource-stream",
  "futures",
  "http",

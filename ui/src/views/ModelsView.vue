@@ -512,7 +512,8 @@ function tierHint(p: unknown): string | null {
   const sizes = tiers
     .map((t) => (t as Record<string, unknown>)?.tier as Record<string, unknown> | undefined)
     .filter((m) => m?.type === "context" && typeof m.size === "number")
-    .map((m) => m.size as number);
+    // filter 已在运行时保证 m 非空且 size 为 number（类型收窄无法穿透 filter 回调）
+    .map((m) => m!.size as number);
   if (o.context_over_200k != null) sizes.push(200_000);
   if (sizes.length === 0) return null;
   return `>${Math.min(...sizes) / 1000}K 加价`;
