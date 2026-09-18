@@ -244,7 +244,7 @@ async function tryClose() {
 }
 
 
-// ── 预设选择器：新建先选预设（API）或走自定义；账户组为 OAuth 后做占位 ──
+// ── 预设选择器：新建先选预设（API）或走自定义；账户组走 OAuth 登录编排 ──
 const picking = ref(false);
 const presetQuery = ref("");
 const presets = ref<ProviderPreset[]>([]);
@@ -579,7 +579,7 @@ onMounted(() => {
     </div>
 
 
-    <!-- 预设选择器：API 直连可用，账户组为 OAuth 后做占位 -->
+    <!-- 预设选择器：API 直连预填，账户组 OAuth 登录编排 -->
     <Modal :open="picking" title="新建上游服务" @close="picking = false">
       <div class="relative mb-3">
         <Search class="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />

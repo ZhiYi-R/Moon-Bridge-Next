@@ -496,7 +496,6 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
         { id: "openrouter", label: "OpenRouter", category: "api", protocol: "openai-chat", baseUrl: "https://openrouter.ai/api/v1", dashboardUrl: "https://openrouter.ai/keys", keyOptional: false, note: "聚合商：模型量大，导入时注意勾选", modelsDevId: "openrouter", enabled: true },
         { id: "kimi-oauth", label: "Kimi", category: "account", protocol: "openai-chat", baseUrl: "https://api.kimi.com/coding/v1", dashboardUrl: null, keyOptional: false, note: "Kimi 账户设备码登录（浏览器验证码授权）", modelsDevId: null, enabled: true },
         { id: "command-code-auth", label: "Command Code - Auth", category: "account", protocol: "openai-chat", baseUrl: "https://api.commandcode.ai/provider/v1", dashboardUrl: "https://commandcode.ai/studio/", keyOptional: false, note: "Command Code 账户登录（浏览器授权 / 本地 CLI 凭据导入）", modelsDevId: null, enabled: true },
-        { id: "devin", label: "Devin", category: "account", protocol: "", baseUrl: "", dashboardUrl: null, keyOptional: false, note: "Devin 账户（CLI 凭据导入 / Auth0 登录，后续版本支持）", modelsDevId: null, enabled: false },
       ] as T;
     case "provider_detect_models": {
       const key = String((args as { providerKey?: string }).providerKey ?? "");

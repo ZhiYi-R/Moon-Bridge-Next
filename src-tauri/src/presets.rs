@@ -2,8 +2,8 @@
 //!
 //! 预设是**代码内嵌**的精选清单（随代码版本演进，与 opencodex registry 的做法一致），
 //! 字段对齐其 registry 后裁剪到 MBN 口径：`protocol` 只取 MBN 四协议串。
-//! `category = "account"` 的 OAuth 预设为后做占位（`enabled = false`），前端禁用展示、
-//! 不进入表单。
+//! `category = "account"` 的 OAuth 账户预设（Kimi / Command Code）经 `commands::oauth`
+//! 登录编排建号——不走 API Key 表单。
 
 use serde::Serialize;
 
@@ -17,7 +17,7 @@ pub struct ProviderPreset {
     pub label: &'static str,
     /// 分组：`api`（API Key 直连）/ `account`（OAuth 账户，后做）。
     pub category: &'static str,
-    /// MBN 协议串（`openai-chat` 等）；account 占位为空串（不进入表单）。
+    /// MBN 协议串（`openai-chat` 等；登录成功后按此建 provider 端点）。
     pub protocol: &'static str,
     /// 预填 Base URL。
     pub base_url: &'static str,
@@ -30,7 +30,7 @@ pub struct ProviderPreset {
     /// models.dev 目录中的 provider key：实时探测失败时的回退数据源，也用于元数据
     /// enrich。`None` 表示 models.dev 无对应目录（如本地运行时）。
     pub models_dev_id: Option<&'static str>,
-    /// 可用状态：`false` = 后做占位（前端禁用展示）。
+    /// 可用状态：`false` 时前端禁用展示（当前全部预设均为 `true`）。
     pub enabled: bool,
 }
 
@@ -145,7 +145,7 @@ pub const PRESETS: &[ProviderPreset] = &[
         models_dev_id: Some("openrouter"),
         enabled: true,
     },
-    // ---- OAuth 账户（Devin 为后做占位）----
+    // ---- OAuth 账户（登录编排）----
     ProviderPreset {
         id: "command-code-auth",
         label: "Command Code - Auth",
@@ -169,18 +169,6 @@ pub const PRESETS: &[ProviderPreset] = &[
         note: Some("Kimi 账户设备码登录（浏览器验证码授权）"),
         models_dev_id: None,
         enabled: true,
-    },
-    ProviderPreset {
-        id: "devin",
-        label: "Devin",
-        category: "account",
-        protocol: "",
-        base_url: "",
-        dashboard_url: None,
-        key_optional: false,
-        note: Some("Devin 账户（CLI 凭据导入 / Auth0 登录，后续版本支持）"),
-        models_dev_id: None,
-        enabled: false,
     },
 ];
 
@@ -238,14 +226,12 @@ mod tests {
     #[test]
     fn account_presets_gate_state() {
         let accounts: Vec<_> = PRESETS.iter().filter(|p| p.category == "account").collect();
-        assert_eq!(accounts.len(), 3, "账户组应为 Command Code-Auth / Kimi / Devin 三个");
-        // 已实现的两家：启用且带合法协议与 baseUrl（登录成功即按此建 provider）
-        for p in accounts.iter().filter(|p| p.enabled) {
+        assert_eq!(accounts.len(), 2, "账户组应为 Command Code-Auth / Kimi 两个");
+        // 两家均已实现：启用且带合法协议与 baseUrl（登录成功即按此建 provider）
+        for p in accounts.iter() {
+            assert!(p.enabled, "账户预设应可用: {}", p.id);
             assert!(!p.protocol.is_empty() && p.base_url.starts_with("http"), "{}", p.id);
         }
-        // Devin 仍为后做占位（CLI 桥/自定义 wire 属另一轮）
-        let devin = accounts.iter().find(|p| p.id == "devin").unwrap();
-        assert!(!devin.enabled);
     }
 
     #[test]
@@ -259,7 +245,7 @@ mod tests {
         );
         // 无映射时返回 None（如自定义 relay）
         assert!(find_preset("custom", &["https://relay.example.com"]).is_none());
-        // 禁用占位不参与 baseUrl 匹配（其 base_url 为空，本就不会误中）
+        // 空 base_url 不参与 baseUrl 匹配（守卫只对带真实 baseUrl 的启用预设生效）
         assert!(find_preset("x", &[""]).is_none());
     }
 }

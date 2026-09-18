@@ -388,7 +388,7 @@ Client → axum: POST /v1/responses | /v1/messages | /v1/chat/completions
   - 网关：`gateway_start / stop / restart / status`
   - CRUD：`provider_* / model_* / offer_* / route_* / plugin_*（含 `plugin_read_script` / `plugin_write_script` 在线编辑）/ binding_* / usage_* / settings_*`
   - 模型目录：`catalog_fetch`（后端 reqwest 拉取 `models.dev/api.json`，解析精简为扁平候选列表；顶层 JSON 在 `ManagedState` 有 5 分钟 TTL 缓存，目录页与模型检测共享，避免 4.5MB 反复拉取）/ `catalog_import`（勾选批量导入：模型**元数据** upsert 到 `models`，**定价**经 `insert_offer_if_absent` 写入对应 provider 的 offer，并对同 slug 已有空定价的行回填 `backfill_offer_pricing`；刻意不触碰 provider 端点配置）
-  - 预设与模型检测：`preset_list`（`presets.rs` 内嵌静态预设表：API Key 直连组开箱即用；账户组 Kimi/Command Code 已启用走 OAuth 登录编排，Devin 为后做占位）/ `provider_detect_models`（实时探测首端点的模型列表——OpenAI 系 `GET {base}/models`、Anthropic `GET {base}/v1/models`——再用 models.dev 目录按预设的 `models_dev_id` 分区 enrich 元数据；探测失败或空列表时回退目录分区；无目录映射时返回裸列表并以 warning 告知。预设解析先按 provider key 精确匹配，再按端点 Base URL 归一化匹配，用户改名后仍能找回目录映射）
+  - 预设与模型检测：`preset_list`（`presets.rs` 内嵌静态预设表：API Key 直连组开箱即用；账户组 Kimi/Command Code 已启用走 OAuth 登录编排）/ `provider_detect_models`（实时探测首端点的模型列表——OpenAI 系 `GET {base}/models`、Anthropic `GET {base}/v1/models`——再用 models.dev 目录按预设的 `models_dev_id` 分区 enrich 元数据；探测失败或空列表时回退目录分区；无目录映射时返回裸列表并以 warning 告知。预设解析先按 provider key 精确匹配，再按端点 Base URL 归一化匹配，用户改名后仍能找回目录映射）
   - Trace：`trace_list / trace_read / trace_delete`（只读浏览 `trace_dir`，含路径穿越校验）
   - OAuth 账户：`oauth_begin / oauth_status / oauth_cancel / oauth_paste`——begin 启动后台登录任务并返回流程描述（Kimi 设备码 / Command Code 回调+粘贴），前端轮询 status，cancel 经移除流程条目中止后台任务
   - 应用：`app_info / config_get / config_set`
@@ -452,7 +452,7 @@ cargo tauri build
 M5 Lua 插件系统（Core 层 + 报文层 raw 钩子、宿主 API、沙箱配额硬化、启用门控 `MB.requires`、示例插件、Plugins 管理页）·
 M6 四协议全矩阵 + Usage/Traces 可视化 · M7 上游预设与模型检测（预设选择器 API/账户顶层标签、
 实时探测 + models.dev enrich/目录回退、勾选导入）· M8 OAuth 账户（Kimi 设备码 + Command Code
-回调/导入/粘贴，令牌包落 extra_json.oauth，gateway 出站前保鲜；Devin 为后做占位）。
+回调/导入/粘贴，令牌包落 extra_json.oauth，gateway 出站前保鲜）。
 
 - 5 个 lib crate + src-tauri + ui 全部编译通过；`cargo test --workspace` 全绿 **282 项**
   （core 9 / protocol 108 / plugin 19 lib + 5 integration / store 7 / gateway 79 lib + 30 e2e / app 25）；
