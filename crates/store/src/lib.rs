@@ -2,13 +2,15 @@
 //!
 //! 以 SQLite（rusqlite, bundled + WAL）为唯一持久化后端，承载 provider/model/
 //! route/plugin/usage/settings 全部配置与运行时数据。手写版本化 migration
-//! （见 [`schema`]），每表一个 DAO 模块（见 [`dao`]），统一由 [`Database`] 暴露。
+//! （见 [`schema`]），每表一个 DAO 模块（见 [`dao`]；余额看板见 [`balance`]），
+//! 统一由 [`Database`] 暴露。
 //!
 //! 并发模型：单连接 + `parking_lot::Mutex` 串行化。本地网关的管理类读写为低并发，
 //! 该模型足够且实现简单；如需更高写入并发可平滑替换为连接池。
 //!
 //! 依赖方向：store → core（不依赖 protocol/plugin/gateway）。
 
+pub mod balance;
 pub mod crypto;
 pub mod dao;
 pub mod error;
@@ -20,11 +22,13 @@ use std::path::Path;
 use parking_lot::Mutex;
 use rusqlite::Connection;
 
-pub use crypto::{EncKey, PlaintextKey};
+pub use balance::{clamp_interval_secs, MIN_INTERVAL_SECS};
+pub use crypto::{AesGcmKey, EncKey, PlaintextKey};
 pub use dao::usage::UsageSummary;
 pub use error::{Result, StoreError};
 pub use models::{
-    Endpoint, ModelDef, Offer, PluginBinding, PluginRecord, Provider, Route, Setting, UsageQuery,
+    BalanceCard, BalanceCardView, BalanceKeyResult, BalanceQuota, BalanceResult, Endpoint,
+    ModelDef, Offer, PluginBinding, PluginRecord, Provider, Route, Setting, UsageQuery,
     UsageRecord,
 };
 
@@ -35,39 +39,204 @@ pub struct Database {
 }
 
 impl Database {
-    /// 打开（或创建）指定路径的数据库，启用 WAL 并执行 migration。
-    ///
-    /// 使用默认 [`PlaintextKey`]（脚手架阶段；生产可换 [`Database::open_with_key`]）。
+    /// 打开文件数据库，以 `<数据库完整路径>.key` 保存 AES-256 主密钥。
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::open_with_key(path, Box::new(PlaintextKey))
+        let path = path.as_ref();
+        let mut key_path = path.as_os_str().to_os_string();
+        key_path.push(".key");
+        Self::open_with_key_file(path, Path::new(&key_path))
     }
 
-    /// 使用自定义 [`EncKey`] 打开数据库（用于 api_key 加密）。
+    /// 旧库按默认明文来源升级；旧自定义加密库须使用 open_with_legacy_key。
+    /// 主密钥仅可为未加密数据库首次生成；已加密库缺失或无法认证时拒绝打开。
+    pub fn open_with_key_file(path: &Path, key_path: &Path) -> Result<Self> {
+        if path == Path::new(":memory:") || path.as_os_str().is_empty() {
+            return Err(StoreError::Encryption(
+                "文件加密接口需要持久化数据库路径".into(),
+            ));
+        }
+        Self::create_parent(path)?;
+        let mut conn = Connection::open(path)?;
+        Self::prepare_conn(&conn)?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let (scheme, _) = Self::encryption_state(&tx)?;
+        let enc = Box::new(crypto::load_key_file(key_path, scheme == "plaintext")?);
+        Self::initialize_encryption(&tx, enc.as_ref(), Some(&PlaintextKey))?;
+        tx.commit()?;
+        Self::checkpoint_encryption(&conn, enc.as_ref())?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+            enc,
+        })
+    }
+
+    /// 使用显式自定义密钥；旧 provider 数据升级需通过 open_with_legacy_key 指定来源。
     pub fn open_with_key(path: impl AsRef<Path>, enc: Box<dyn EncKey>) -> Result<Self> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
+        Self::create_parent(path)?;
         let conn = Connection::open(path)?;
-        Self::from_conn(conn, enc)
+        Self::from_conn(conn, enc, None)
     }
 
-    /// 打开内存数据库（测试用）。
+    /// 将旧 provider 密钥按指定来源解密后迁移到目标密钥；旧 balance 密钥始终按明文迁移。
+    pub fn open_with_legacy_key(
+        path: impl AsRef<Path>,
+        target: Box<dyn EncKey>,
+        legacy_provider_key: &dyn EncKey,
+    ) -> Result<Self> {
+        let path = path.as_ref();
+        Self::create_parent(path)?;
+        let conn = Connection::open(path)?;
+        Self::from_conn(conn, target, Some(legacy_provider_key))
+    }
+
+    /// 打开内存数据库，显式使用 PlaintextKey（测试用）。
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        Self::from_conn(conn, Box::new(PlaintextKey))
+        Self::from_conn(conn, Box::new(PlaintextKey), None)
     }
 
-    fn from_conn(conn: Connection, enc: Box<dyn EncKey>) -> Result<Self> {
-        // 内存库设置 WAL 无意义但不报错；忽略 pragma 失败以兼容各平台
-        conn.pragma_update(None, "journal_mode", "WAL").ok();
-        conn.pragma_update(None, "synchronous", "NORMAL").ok();
+    fn create_parent(path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
+        Ok(())
+    }
+
+    fn prepare_conn(conn: &Connection) -> Result<()> {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        schema::migrate(&conn)?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "FULL")?;
+        conn.pragma_update(None, "secure_delete", "ON")?;
+        schema::migrate(conn)
+    }
+
+    fn from_conn(
+        mut conn: Connection,
+        enc: Box<dyn EncKey>,
+        legacy_provider_key: Option<&dyn EncKey>,
+    ) -> Result<Self> {
+        Self::prepare_conn(&conn)?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        Self::initialize_encryption(&tx, enc.as_ref(), legacy_provider_key)?;
+        tx.commit()?;
+        Self::checkpoint_encryption(&conn, enc.as_ref())?;
         Ok(Database {
             conn: Mutex::new(conn),
             enc,
         })
+    }
+
+    fn checkpoint_encryption(conn: &Connection, enc: &dyn EncKey) -> Result<()> {
+        if enc.scheme() != "plaintext" {
+            let busy: i32 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+            if busy != 0 {
+                return Err(StoreError::Encryption(
+                    "无法清理迁移日志，请关闭其他数据库连接后重试".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn encryption_state(conn: &Connection) -> Result<(String, String)> {
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM encryption_metadata", [], |r| r.get(0))?;
+        if count != 1 {
+            return Err(StoreError::Encryption("加密元数据缺失或损坏".into()));
+        }
+        let (scheme, verifier): (String, String) = conn.query_row(
+            "SELECT scheme, verifier FROM encryption_metadata WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if scheme.is_empty() || (scheme == "plaintext" && !verifier.is_empty()) {
+            return Err(StoreError::Encryption("加密元数据无效".into()));
+        }
+        Ok((scheme, verifier))
+    }
+
+    fn initialize_encryption(
+        conn: &Connection,
+        enc: &dyn EncKey,
+        legacy_provider_key: Option<&dyn EncKey>,
+    ) -> Result<()> {
+        const VERIFIER: &str = "moonbridge-store:key-verifier:v1";
+        let (scheme, verifier) = Self::encryption_state(conn)?;
+        let legacy = scheme == "plaintext";
+        if !legacy && (scheme != enc.scheme() || enc.decrypt(&verifier)? != VERIFIER) {
+            return Err(StoreError::Encryption("数据库主密钥不匹配".into()));
+        }
+        if legacy && enc.scheme() == "plaintext" && legacy_provider_key.is_none() {
+            return Ok(());
+        }
+        let mut stmt =
+            conn.prepare("SELECT provider_key, idx, api_key_enc FROM provider_endpoints")?;
+        let endpoints = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        if legacy && legacy_provider_key.is_none() {
+            let has_providers: bool =
+                conn.query_row("SELECT EXISTS(SELECT 1 FROM providers)", [], |r| r.get(0))?;
+            if has_providers || !endpoints.is_empty() {
+                return Err(StoreError::Encryption(
+                    "旧 provider 密钥来源不明确，请使用 open_with_legacy_key 显式指定来源密钥（明文使用 PlaintextKey）".into(),
+                ));
+            }
+        }
+        let source = legacy_provider_key.unwrap_or(&PlaintextKey);
+        let mut stmt = conn.prepare("SELECT key, api_key FROM balance_cards")?;
+        let cards = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        for (provider, idx, stored) in endpoints {
+            if legacy {
+                let plaintext = source.decrypt(&stored)?;
+                conn.execute(
+                    "UPDATE provider_endpoints SET api_key_enc = ?1 WHERE provider_key = ?2 AND idx = ?3",
+                    rusqlite::params![enc.encrypt(&plaintext)?, provider, idx],
+                )?;
+            } else {
+                enc.decrypt(&stored)?;
+            }
+        }
+        for (key, stored) in cards {
+            if legacy {
+                conn.execute(
+                    "UPDATE balance_cards SET api_key = ?1 WHERE key = ?2",
+                    rusqlite::params![enc.encrypt(&stored)?, key],
+                )?;
+            } else {
+                enc.decrypt(&stored)?;
+            }
+        }
+        if legacy {
+            let verifier = if enc.scheme() == "plaintext" {
+                String::new()
+            } else {
+                let verifier = enc.encrypt(VERIFIER)?;
+                if verifier == VERIFIER
+                    || enc.decrypt(&verifier)? != VERIFIER
+                    || enc.scheme().is_empty()
+                {
+                    return Err(StoreError::Encryption("EncKey 未提供可验证的加密".into()));
+                }
+                verifier
+            };
+            conn.execute(
+                "UPDATE encryption_metadata SET scheme = ?1, verifier = ?2 WHERE id = 1",
+                rusqlite::params![enc.scheme(), verifier],
+            )?;
+        }
+        Ok(())
     }
 
     /// 当前 schema 版本。
@@ -93,7 +262,19 @@ mod tests {
     #[test]
     fn migrates_and_reports_version() {
         let db = Database::open_in_memory().unwrap();
-        assert_eq!(db.version().unwrap(), 9);
+        assert_eq!(db.version().unwrap(), 13);
+        assert_eq!(db.enc.scheme(), "plaintext");
+        assert_eq!(db.enc.encrypt("memory-secret").unwrap(), "memory-secret");
+        let state: (String, String) = db
+            .conn
+            .lock()
+            .query_row(
+                "SELECT scheme, verifier FROM encryption_metadata WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, ("plaintext".into(), String::new()));
     }
 
     /// 回归：V8 新增 max_output_tokens 列须随模型定义往返（供上游必填

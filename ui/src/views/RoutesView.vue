@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Pencil, Plus, Trash2 } from "lucide-vue-next";
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onActivated, onMounted, reactive, ref } from "vue";
 
 import Button from "@/components/ui/Button.vue";
 import Card from "@/components/ui/Card.vue";
@@ -78,10 +78,14 @@ async function save() {
     return;
   }
   try {
-    await routeApi.save({ ...form, alias });
+    const rec: Route = { ...form, alias };
+    await routeApi.save(rec);
     editing.value = false;
     toast.success(isNew.value ? `路由 “${alias}” 已创建` : `路由 “${alias}” 已更新`);
-    await load();
+    // 服务端只写这一行：按别名原地增改，无需整表重拉
+    routes.value = routes.value.some((r) => r.alias === alias)
+      ? routes.value.map((r) => (r.alias === alias ? rec : r))
+      : [...routes.value, rec];
   } catch (e) {
     error.value = errMsg(e);
   }
@@ -92,13 +96,23 @@ async function remove(alias: string) {
   try {
     await routeApi.remove(alias);
     toast.success(`路由 “${alias}” 已删除`);
-    await load();
+    // 删除只影响这一行：本地移除，无需重拉整表
+    routes.value = routes.value.filter((r) => r.alias !== alias);
   } catch (e) {
     error.value = errMsg(e);
   }
 }
 
-onMounted(load);
+onMounted(() => {
+  void load();
+});
+
+// keep-alive 下切回本页：第二次起静默重拉，不闪 loading
+let activated = false;
+onActivated(() => {
+  if (activated) void load();
+  activated = true;
+});
 </script>
 
 <template>

@@ -18,6 +18,7 @@ src-tauri/gen
 # ── 环境与系统 ──
 .env
 .env.*
+!deploy/soul/.env.example
 .DS_Store
 
 # ── IDE ──

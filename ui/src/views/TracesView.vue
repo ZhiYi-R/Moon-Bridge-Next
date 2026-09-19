@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { RefreshCw, Trash2 } from "lucide-vue-next";
-import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref } from "vue";
 
 import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
@@ -73,11 +73,18 @@ const filtered = computed(() => {
   );
 });
 
-async function load() {
-  loading.value = true;
+/** silent=true 用于 keep-alive 切回时的后台重拉：不点亮 refresh 图标，避免每次进页面都闪一次 loading。 */
+async function load(silent = false) {
+  loading.value = !silent;
   error.value = null;
   try {
-    entries.value = await traceApi.list(500);
+    const [list, info] = await Promise.all([
+      traceApi.list(500),
+      // 目录信息仅作展示，失败不影响列表
+      appApi.info().catch(() => null),
+    ]);
+    entries.value = list;
+    if (info) traceDir.value = info.traceDir;
   } catch (e) {
     error.value = errMsg(e);
   } finally {
@@ -113,7 +120,8 @@ async function remove(entry: TraceEntry) {
       selected.value = null;
       detail.value = null;
     }
-    await load();
+    // 删除只影响这一行：本地移除，无需重拉整表
+    entries.value = entries.value.filter((x) => x.relPath !== entry.relPath);
   } catch (e) {
     error.value = errMsg(e);
   }
@@ -173,12 +181,18 @@ function onKey(e: KeyboardEvent) {
 onMounted(async () => {
   document.addEventListener("keydown", onKey);
   await load();
-  try {
-    traceDir.value = (await appApi.info()).traceDir;
-  } catch {
-    // 忽略：仅展示用途
-  }
 });
+
+// keep-alive 下切回本页：恢复键盘导航，第二次起静默重拉，选中项与详情保持不动
+let activated = false;
+onActivated(() => {
+  document.addEventListener("keydown", onKey);
+  if (activated) void load(true);
+  activated = true;
+});
+
+// 视图被缓存后不再卸载：键盘导航监听改在停用时摘除，避免离开本页仍劫持上下键
+onDeactivated(() => document.removeEventListener("keydown", onKey));
 
 onUnmounted(() => document.removeEventListener("keydown", onKey));
 </script>
@@ -204,7 +218,7 @@ onUnmounted(() => document.removeEventListener("keydown", onKey));
             class="size-8 shrink-0"
             :disabled="loading"
             title="刷新"
-            @click="load"
+            @click="load()"
           >
             <RefreshCw class="size-4" :class="loading && 'animate-spin'" />
           </Button>

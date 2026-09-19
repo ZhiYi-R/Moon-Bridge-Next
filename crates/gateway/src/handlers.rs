@@ -47,7 +47,11 @@ pub async fn health() -> &'static str {
     "ok"
 }
 
-/// GET /v1/models —— 列出可用模型。
+/// GET /v1/models —— 列出可用模型（**公开接口**，配置 auth_token 也不要求 Bearer）。
+///
+/// 允许裸奔是既定取舍：模型目录不视为敏感信息（与多数 OpenAI 兼容服务一致），
+/// 监控/探活类调用方可以无凭据拉取；真正消耗上游额度的 POST 入口仍由 `check_auth`
+/// 把守。`/health` 同为公开。
 ///
 /// 聚合口径与 [`crate::router::Router::resolve`] 的解析优先级严格一致，只列客户端
 /// **实际可路由**的名字：
@@ -110,12 +114,7 @@ fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<()> {
     let Some(token) = &state.config.auth_token else {
         return Ok(());
     };
-    let auth = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let provided = auth.strip_prefix("Bearer ").unwrap_or(auth);
-    if provided != token {
+    if !crate::auth::bearer_matches(headers, token) {
         return Err(GatewayError::Auth("无效或缺失的 Bearer token".to_string()));
     }
     Ok(())

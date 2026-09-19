@@ -47,6 +47,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: "用量", icon: "BarChart3" } satisfies NavMeta,
   },
   {
+    path: "/balance",
+    name: "balance",
+    component: () => import("@/views/BalanceView.vue"),
+    meta: { title: "余额", icon: "Wallet" } satisfies NavMeta,
+  },
+  {
     path: "/traces",
     name: "traces",
     component: () => import("@/views/TracesView.vue"),
