@@ -114,12 +114,7 @@ fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<()> {
     let Some(token) = &state.config.auth_token else {
         return Ok(());
     };
-    let auth = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let provided = auth.strip_prefix("Bearer ").unwrap_or(auth);
-    if provided != token {
+    if !crate::auth::bearer_matches(headers, token) {
         return Err(GatewayError::Auth("无效或缺失的 Bearer token".to_string()));
     }
     Ok(())

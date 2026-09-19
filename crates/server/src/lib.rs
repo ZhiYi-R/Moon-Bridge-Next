@@ -14,4 +14,5 @@
 pub mod admin;
 pub mod args;
 pub mod config;
+pub mod lifecycle;
 pub mod serve;

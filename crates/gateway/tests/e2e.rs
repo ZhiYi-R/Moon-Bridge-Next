@@ -1267,11 +1267,9 @@ async fn e2e_serve_pairs_plugin_init_and_shutdown() {
     );
 }
 
-/// 口径钉死：配置 auth_token 后，GET /v1/models 与 /health 仍保持公开（允许裸奔——
-/// 模型目录不视为敏感，探活/监控调用方可无凭据拉取），而真正消耗上游额度的
-/// POST 入口必须要求 Bearer。
+/// 配置 auth_token 后，探活和模型目录保持公开，推理入口要求 Bearer。
 #[tokio::test]
-async fn e2e_models_is_public_but_post_entry_requires_bearer() {
+async fn e2e_health_and_models_are_public_with_auth_configured() {
     let db = Arc::new(Database::open_in_memory().unwrap());
     let cfg = GatewayConfig {
         auth_token: Some("secret-token".into()),
@@ -1287,15 +1285,39 @@ async fn e2e_models_is_public_but_post_entry_requires_bearer() {
 
     let client = reqwest::Client::new();
 
-    // 公开面：/health 与 /v1/models 无 token 也是 200
-    for path in ["/health", "/v1/models"] {
-        let r = client
-            .get(format!("http://{addr}{path}"))
+    let health = client
+        .get(format!("http://{addr}/health"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(health.status(), 200);
+    let models_url = format!("http://{addr}/v1/models");
+    assert_eq!(client.get(&models_url).send().await.unwrap().status(), 200);
+    for authorization in [
+        "secret-token",
+        "Basic secret-token",
+        "Bearer wrong",
+        "Bearer ",
+    ] {
+        let response = client
+            .get(&models_url)
+            .header("authorization", authorization)
             .send()
             .await
             .unwrap();
-        assert_eq!(r.status(), 200, "{path} 应保持公开");
+        assert_eq!(
+            response.status(),
+            200,
+            "公开模型列表不受鉴权影响：{authorization:?}"
+        );
     }
+    let models = client
+        .get(&models_url)
+        .bearer_auth("secret-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(models.status(), 200);
 
     // 受保护面：POST 入口无 token / 错 token 一律 401
     let url = format!("http://{addr}/v1/chat/completions");

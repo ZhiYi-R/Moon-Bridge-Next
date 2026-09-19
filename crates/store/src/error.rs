@@ -11,6 +11,12 @@ pub enum StoreError {
     #[error("序列化错误: {0}")]
     Serde(#[from] serde_json::Error),
 
+    #[error("密钥文件错误: {0}")]
+    KeyFile(#[from] std::io::Error),
+
+    #[error("加密错误: {0}")]
+    Encryption(String),
+
     /// 记录不存在。
     #[error("未找到: {0}")]
     NotFound(String),

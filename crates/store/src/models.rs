@@ -198,7 +198,7 @@ pub struct BalanceCard {
     pub updated_at: i64,
 }
 
-/// 余额卡片最近一次查询结果（一卡一行，随卡片删除级联清理）。
+/// 单个 key 最近一次查询结果，按 (card_key, key_index) 保存，随卡片删除级联清理。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BalanceResult {
@@ -301,7 +301,7 @@ pub struct BalanceCardView {
 /// 单个 key 的查询结果（`balance_results` 一行的视图，按 `(card_key, key_index)` 定位）。
 ///
 /// `key_label` 是掩码后的 key 展示标签（如 `sk-kim…LXyw`），由引擎在运行时写入；
-/// 前端展示 key 身份只认它，绝不接触 key 原文。
+/// 查询结果只携带掩码；管理员编辑卡片或 Provider 时仍可接触原始凭据。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BalanceKeyResult {

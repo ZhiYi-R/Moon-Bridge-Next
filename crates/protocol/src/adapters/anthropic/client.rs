@@ -181,12 +181,9 @@ impl ClientAdapter for AnthropicAdapter {
                 .filter(|e| !e.is_empty());
             let effort = match t.get("type").and_then(|v| v.as_str()) {
                 Some("enabled") => explicit_effort.or_else(|| {
-                    t.get("budget_tokens").and_then(|v| v.as_u64()).map(
-                        |b| match effort_from_budget(b.min(u32::MAX as u64) as u32) {
-                            "minimal" => "low",
-                            effort => effort,
-                        },
-                    )
+                    t.get("budget_tokens")
+                        .and_then(|v| v.as_u64())
+                        .map(|budget| effort_from_budget(budget.min(u32::MAX as u64) as u32))
                 }),
                 Some("adaptive") => Some(explicit_effort.unwrap_or("high")),
                 _ => None, // disabled 或未知：不下发，交由上游默认
@@ -377,7 +374,7 @@ mod tests {
             (
                 json!({"type": "enabled", "budget_tokens": 1024}),
                 Value::Null,
-                Some("low"),
+                Some("minimal"),
             ),
             (
                 json!({"type": "enabled", "budget_tokens": 16384}),
@@ -393,6 +390,16 @@ mod tests {
                 json!({"type": "enabled", "budget_tokens": 4294967296u64}),
                 Value::Null,
                 Some("max"),
+            ),
+            (
+                json!({"type": "enabled", "budget_tokens": u64::MAX}),
+                Value::Null,
+                Some("max"),
+            ),
+            (
+                json!({"type": "enabled", "budget_tokens": 1024}),
+                json!({"effort": " \t "}),
+                Some("minimal"),
             ),
             (json!({"type": "enabled"}), Value::Null, None),
             (
@@ -438,7 +445,9 @@ mod tests {
         let ctx = ReqCtx::new("b9163a8e", Protocol::Anthropic);
         let endpoint =
             ProviderEndpoint::new("mock", Protocol::OpenAiChat, "http://localhost", "test-key");
-        for (output_config, expected) in [(json!({"effort": "max"}), "max"), (Value::Null, "low")] {
+        for (output_config, expected) in
+            [(json!({"effort": "max"}), "max"), (Value::Null, "minimal")]
+        {
             let req = AnthropicAdapter
                 .to_core_request(
                     &ctx,

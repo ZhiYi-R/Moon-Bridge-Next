@@ -18,7 +18,7 @@
 //!   但 `payload` 更新为该次返回——脚本常在失败时也带回诊断上下文。
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -31,14 +31,12 @@ use moonbridge_store::{
 };
 use serde_json::{json, Value};
 
+pub use crate::balance_http::BalanceNetworkPolicy;
 use crate::parse_script_ref;
 use crate::ScriptRef;
 
 /// 单次查询的整体超时（含脚本加载 + `MB.query` 执行）。
 const QUERY_TIMEOUT: Duration = Duration::from_secs(45);
-
-/// `mb.http.request` 未显式指定超时时的兜底（与网关侧插件子请求同口径）。
-const HTTP_FALLBACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 调度器扫描周期：每轮挑出到期卡片串行执行。
 pub const SCHEDULE_TICK: Duration = Duration::from_secs(30);
@@ -51,46 +49,23 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
-/// 余额脚本的宿主桥：只提供 `mb.http.request`。
-///
-/// 刻意不复用 [`crate::bridge::GatewayBridge`]——后者持有 db/registry/上游客户端，与
-/// 网关生命周期强耦合。`provider_invoke` 直接拒绝：余额脚本没有跨 provider 编排场景。
+/// 余额脚本的宿主桥：只提供受网络策略约束的 `mb.http.request`。
 struct BalanceBridge {
-    client: reqwest::Client,
+    network_policy: BalanceNetworkPolicy,
+    base_url: String,
+    network_error: Arc<Mutex<Option<String>>>,
 }
 
 #[async_trait]
 impl HostBridge for BalanceBridge {
     async fn http_request(&self, req: HttpRequest) -> Result<HttpResponse, String> {
-        let method = reqwest::Method::from_bytes(req.method.to_uppercase().as_bytes())
-            .map_err(|e| e.to_string())?;
-        let mut builder = self.client.request(method, &req.url);
-        for (k, v) in &req.headers {
-            builder = builder.header(k.as_str(), v.as_str());
+        let result = self.network_policy.request(&self.base_url, req).await;
+        if let Err(error) = &result {
+            if let Ok(mut network_error) = self.network_error.lock() {
+                *network_error = Some(error.clone());
+            }
         }
-        if let Some(body) = &req.body {
-            builder = builder.json(body);
-        }
-        // 总是施加超时：脚本未指定时用兜底值，避免单个上游挂起吃满整体预算。
-        let timeout_ms = req
-            .timeout_ms
-            .unwrap_or(HTTP_FALLBACK_TIMEOUT.as_millis() as u64);
-        builder = builder.timeout(Duration::from_millis(timeout_ms));
-        let resp = builder.send().await.map_err(|e| e.to_string())?;
-        let status = resp.status().as_u16();
-        let headers: Vec<(String, String)> = resp
-            .headers()
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-            .collect();
-        let text = resp.text().await.map_err(|e| e.to_string())?;
-        // 上游返回 JSON 时自动展开为 Lua table，脚本可直接 `r.body.xxx`
-        let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
-        Ok(HttpResponse {
-            status,
-            headers,
-            body,
-        })
+        result
     }
 
     async fn provider_invoke(
@@ -103,52 +78,28 @@ impl HostBridge for BalanceBridge {
     }
 }
 
-/// 余额查询共用的出站客户端（进程级单例）。
-///
-/// 与网关上游客户端分开：余额查询直连（与目录拉取同口径），不套 egress 代理，
-/// 也不参与网关启停；单次请求的超时由 [`BalanceBridge`] 逐次施加。
-///
-/// 两个宿主都在每次请求/每次调度时才构造引擎（管理状态里不持有引擎），故客户端
-/// 必须进程级共享——否则每个请求都新建一套连接池，连接无法复用。
-fn shared_client() -> reqwest::Client {
-    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(30))
-                .build()
-                .expect("构建余额查询 HTTP 客户端失败")
-        })
-        .clone()
-}
-
-/// 余额查询引擎：持库句柄、脚本根目录与出站客户端。
+/// 余额查询引擎：持库句柄、脚本根目录与出站网络策略。
 #[derive(Clone)]
 pub struct BalanceEngine {
     db: Arc<Database>,
     /// 脚本根目录：`script_ref` 里相对 `.lua` 归一到此处，绝对路径必须落在其内。
     /// `None` 时不做包含性校验（CLI/测试场景，与插件加载侧同语义）。
     plugins_dir: Option<PathBuf>,
-    client: reqwest::Client,
+    network_policy: BalanceNetworkPolicy,
 }
 
 impl BalanceEngine {
-    /// 构造引擎（出站客户端取进程级共享实例）。
     pub fn new(db: Arc<Database>, plugins_dir: Option<PathBuf>) -> Self {
-        Self::new_with_client(db, plugins_dir, shared_client())
-    }
-
-    /// 以指定出站客户端构造引擎（测试可注入）。
-    pub fn new_with_client(
-        db: Arc<Database>,
-        plugins_dir: Option<PathBuf>,
-        client: reqwest::Client,
-    ) -> Self {
         BalanceEngine {
             db,
             plugins_dir,
-            client,
+            network_policy: BalanceNetworkPolicy::from_environment(None),
         }
+    }
+
+    pub fn with_network_policy(mut self, network_policy: BalanceNetworkPolicy) -> Self {
+        self.network_policy = network_policy;
+        self
     }
 
     /// 覆写脚本根目录（宿主在启动时钉住与插件同一套 `plugins_dir`；测试也可用）。
@@ -161,75 +112,75 @@ impl BalanceEngine {
     ///
     /// key 列表解析失败（如 Provider 引用失效）时落一行 `key_index = 0` 的错误结果
     /// （label 空），并剪掉其余残留行——看板上呈现为单张错误卡。
-    pub async fn run_card(&self, card: &BalanceCard) -> Vec<BalanceKeyResult> {
+    pub async fn run_card(
+        &self,
+        card: &BalanceCard,
+    ) -> moonbridge_store::Result<Vec<BalanceKeyResult>> {
         let now = now_unix();
-        let (keys, provider_name) = match self.resolve_keys(card) {
+        let (keys, provider_name) = match self.resolve_keys(card)? {
             Ok(v) => v,
             Err(message) => {
-                let result = self.engine_error_result(&card.key, 0, message, now);
+                let result = self.engine_error_result(&card.key, 0, message, now)?;
                 let kr = BalanceKeyResult {
                     key_index: 0,
                     key_label: String::new(),
                     result,
                 };
-                self.store_key_result(&card.key, &kr);
-                if let Err(e) = self.db.prune_balance_results(&card.key, 1) {
-                    tracing::error!(card = %card.key, error = %e, "清理余额残留结果失败");
-                }
-                return vec![kr];
+                self.store_key_result(&card.key, &kr)?;
+                self.db.prune_balance_results(&card.key, 1)?;
+                return Ok(vec![kr]);
             }
         };
         let mut out = Vec::with_capacity(keys.len());
         for (idx, key) in keys.iter().enumerate() {
             out.push(
                 self.run_key(card, idx as i64, key, &provider_name, now)
-                    .await,
+                    .await?,
             );
         }
-        // key 变少后剪掉旧 key 的残留行，看板不再展示它们。
-        if let Err(e) = self.db.prune_balance_results(&card.key, keys.len() as i64) {
-            tracing::error!(card = %card.key, error = %e, "清理余额残留结果失败");
-        }
-        out
+        self.db
+            .prune_balance_results(&card.key, keys.len() as i64)?;
+        Ok(out)
     }
 
     /// 刷新一张卡片并回传视图（供 REST/IPC）。`key_index` 为 `Some` 时只重跑该 key
-    /// （越界或 key 列表解析失败时不动作，直接回读现状）；`None` 时整卡全量重跑。
+    /// （越界或 Provider 引用失效时不动作，直接回读现状）；数据库失败始终上抛。
     pub async fn refresh_card(
         &self,
         card: &BalanceCard,
         key_index: Option<i64>,
-    ) -> BalanceCardView {
+    ) -> moonbridge_store::Result<BalanceCardView> {
         match key_index {
             None => {
-                self.run_card(card).await;
+                self.run_card(card).await?;
             }
             Some(idx) => {
-                if let Ok((keys, provider_name)) = self.resolve_keys(card) {
+                if let Ok((keys, provider_name)) = self.resolve_keys(card)? {
                     if idx >= 0 {
                         if let Some(key) = keys.get(idx as usize).cloned() {
                             self.run_key(card, idx, &key, &provider_name, now_unix())
-                                .await;
+                                .await?;
                         }
                     }
                 }
             }
         }
-        view_of(&self.db, &card.key)
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| BalanceCardView {
+        Ok(
+            view_of(&self.db, &card.key)?.unwrap_or_else(|| BalanceCardView {
                 card: card.clone(),
                 results: Vec::new(),
-            })
+            }),
+        )
     }
 
-    /// 试运行一张卡片（dry-run，供编辑表单的「测试拉取」预览）：逐 key 执行脚本并
-    /// 返回本次结果数组，但**不写库、不读历史结果**——引擎级失败时 `payload` 为
-    /// None，错误原样呈现给预览面板，不影响线上展示的最后成功值。
+    /// 试运行一张卡片：不写库、不读历史结果，所有失败仅返回预览结果。
     pub async fn test_card(&self, card: &BalanceCard) -> Vec<BalanceKeyResult> {
         let now = now_unix();
-        let (keys, provider_name) = match self.resolve_keys(card) {
+        let resolved = self
+            .resolve_keys(card)
+            .map_err(|e| e.to_string())
+            .and_then(|v| v);
+        let (keys, provider_name) = match resolved {
             Ok(v) => v,
             Err(message) => {
                 return vec![BalanceKeyResult {
@@ -265,25 +216,19 @@ impl BalanceEngine {
         out
     }
 
-    /// 串行刷新全部**启用**卡片，返回刷新后**全部**卡片的视图（含未启用的，顺序同
-    /// `list_balance_cards`，前端可直接整体替换列表状态）。
-    ///
-    /// 串行是刻意的：这些卡片往往共用少数几个上游与 API Key，并发打配额接口
-    /// 容易触发限流。
-    pub async fn refresh_all(&self) -> Vec<BalanceCardView> {
+    /// 串行刷新全部启用卡片，返回全部卡片视图；数据库失败中断刷新并上抛。
+    pub async fn refresh_all(&self) -> moonbridge_store::Result<Vec<BalanceCardView>> {
         for card in self
             .db
-            .list_balance_cards()
-            .unwrap_or_default()
+            .list_balance_cards()?
             .into_iter()
             .filter(|c| c.enabled)
         {
-            self.run_card(&card).await;
+            self.run_card(&card).await?;
         }
-        list_views(&self.db).unwrap_or_default()
+        list_views(&self.db)
     }
 
-    /// 执行单个 key 的查询并落库，返回该 key 的结果。
     async fn run_key(
         &self,
         card: &BalanceCard,
@@ -291,20 +236,19 @@ impl BalanceEngine {
         key: &str,
         provider_name: &str,
         now: i64,
-    ) -> BalanceKeyResult {
+    ) -> moonbridge_store::Result<BalanceKeyResult> {
         let ctx = Self::ctx_for(card, key, provider_name);
-        // 脚本返回 table 时一律更新 payload（业务 error 也更新）；引擎级失败保留旧值。
         let result = match self.query(card, &ctx).await {
             Ok(ret) => Self::from_script_return(&ret, now),
-            Err(message) => self.engine_error_result(&card.key, key_index, message, now),
+            Err(message) => self.engine_error_result(&card.key, key_index, message, now)?,
         };
         let kr = BalanceKeyResult {
             key_index,
             key_label: mask_key(key),
             result,
         };
-        self.store_key_result(&card.key, &kr);
-        kr
+        self.store_key_result(&card.key, &kr)?;
+        Ok(kr)
     }
 
     /// 引擎级失败的结果：`payload` 保留该 key 上一次落库的值。
@@ -314,25 +258,22 @@ impl BalanceEngine {
         key_index: i64,
         message: String,
         now: i64,
-    ) -> BalanceResult {
-        let previous = self
-            .db
-            .get_balance_key_result(card_key, key_index)
-            .ok()
-            .flatten();
-        BalanceResult {
+    ) -> moonbridge_store::Result<BalanceResult> {
+        let previous = self.db.get_balance_key_result(card_key, key_index)?;
+        Ok(BalanceResult {
             status: "error".to_string(),
             payload: previous.and_then(|p| p.result.payload),
             error: Some(message),
             queried_at: now,
-        }
+        })
     }
 
-    /// 落库单个 key 的结果（失败仅记日志，不中断整卡执行）。
-    fn store_key_result(&self, card_key: &str, kr: &BalanceKeyResult) {
-        if let Err(e) = self.db.upsert_balance_key_result(card_key, kr) {
-            tracing::error!(card = %card_key, key_index = kr.key_index, error = %e, "余额结果落库失败");
-        }
+    fn store_key_result(
+        &self,
+        card_key: &str,
+        kr: &BalanceKeyResult,
+    ) -> moonbridge_store::Result<()> {
+        self.db.upsert_balance_key_result(card_key, kr)
     }
 
     /// 读取脚本源码：文件脚本经 [`parse_script_ref`] 收敛到 `plugins_dir` 内。
@@ -350,7 +291,10 @@ impl BalanceEngine {
     /// 手动 key 按行解析、去空白并保序去重；非空时不读取 Provider。
     /// 否则从 Provider 端点继承并去重 key，失效引用报错。
     /// 空列表回落为 `[""]`，兼容无需认证的公开查询接口。
-    fn resolve_keys(&self, card: &BalanceCard) -> Result<(Vec<String>, String), String> {
+    fn resolve_keys(
+        &self,
+        card: &BalanceCard,
+    ) -> moonbridge_store::Result<Result<(Vec<String>, String), String>> {
         let mut keys: Vec<String> = Vec::new();
         let mut provider_name = card.provider_label.clone();
         let provider_key = card
@@ -372,15 +316,13 @@ impl BalanceEngine {
             if provider_name.is_empty() {
                 provider_name = provider_key.unwrap_or_default().to_string();
             }
-            return Ok((keys, provider_name));
+            return Ok(Ok((keys, provider_name)));
         }
 
         if let Some(pk) = provider_key {
-            let provider = self
-                .db
-                .get_provider(pk)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("上游服务 {pk} 不存在"))?;
+            let Some(provider) = self.db.get_provider(pk)? else {
+                return Ok(Err(format!("上游服务 {pk} 不存在")));
+            };
             let mut carry = String::new();
             for ep in &provider.endpoints {
                 if !ep.api_key.is_empty() {
@@ -398,7 +340,7 @@ impl BalanceEngine {
         if keys.is_empty() {
             keys.push(String::new());
         }
-        Ok((keys, provider_name))
+        Ok(Ok((keys, provider_name)))
     }
 
     /// 构造单 key 的脚本 ctx：引擎对每个 key 各跑一次脚本，脚本只需按单 key 编写
@@ -417,59 +359,71 @@ impl BalanceEngine {
 
     /// 一次性执行脚本并返回 `MB.query` 的返回值（JSON）。
     async fn query(&self, card: &BalanceCard, ctx: &Value) -> Result<Value, String> {
-        let script = self.read_script(&card.script_ref)?;
-        let bridge = Arc::new(BalanceBridge {
-            client: self.client.clone(),
-        });
-        // 卡片 extra 同时作为 `mb.config`（脚本常在顶层读配置），完整 ctx 由
-        // `MB.query` 参数传入。沙箱 call_timeout 对齐整体超时，让脚本内的死循环/
-        // 长计算由指令计数钩子掐断，外层 tokio 超时兜住加载与锁等待。
-        let limits = SandboxLimits {
-            call_timeout: QUERY_TIMEOUT,
-            ..SandboxLimits::default()
+        let deadline = tokio::time::Instant::now() + QUERY_TIMEOUT;
+        let query = async {
+            let engine = self.clone();
+            let script_ref = card.script_ref.clone();
+            let script = tokio::task::spawn_blocking(move || engine.read_script(&script_ref))
+                .await
+                .map_err(|_| "读取余额脚本失败".to_string())??;
+            let network_error = Arc::new(Mutex::new(None));
+            let bridge = Arc::new(BalanceBridge {
+                network_policy: self.network_policy.clone(),
+                base_url: card.base_url.clone(),
+                network_error: network_error.clone(),
+            });
+            let limits = SandboxLimits {
+                call_timeout: deadline.saturating_duration_since(tokio::time::Instant::now()),
+                ..SandboxLimits::default()
+            };
+            let runtime = LuaRuntime::new_with_limits(
+                &card.key,
+                &script,
+                &card.extra,
+                bridge,
+                SessionStore::new(),
+                limits,
+            )
+            .map_err(|_| "余额脚本加载失败".to_string())?;
+            if tokio::time::Instant::now() >= deadline {
+                return Err("余额脚本查询超时".to_string());
+            }
+            runtime.call_mb_once("query", ctx).await.map_err(|_| {
+                network_error
+                    .lock()
+                    .ok()
+                    .and_then(|mut error| error.take())
+                    .unwrap_or_else(|| "余额脚本执行失败".to_string())
+            })
         };
-        let runtime = LuaRuntime::new_with_limits(
-            &card.key,
-            &script,
-            &card.extra,
-            bridge,
-            SessionStore::new(),
-            limits,
-        )
-        .map_err(|e| e.to_string())?;
-        match tokio::time::timeout(QUERY_TIMEOUT, runtime.call_mb_once("query", ctx)).await {
-            Err(_) => Err(format!("查询超时（{} 秒）", QUERY_TIMEOUT.as_secs())),
-            Ok(Err(e)) => Err(e.to_string()),
-            Ok(Ok(v)) => Ok(v),
-        }
+        tokio::time::timeout_at(deadline, query)
+            .await
+            .map_err(|_| format!("查询超时（{} 秒）", QUERY_TIMEOUT.as_secs()))?
     }
 
-    /// 把脚本返回值转成落库结果。
-    ///
-    /// `status` 缺省视为 `ok`；`message` 仅在失败时作为 `error`（成功时它是摘要文案，
-    /// 留在 payload 里原样透传）。payload 承载脚本返回的**完整** JSON（脚本自定义字段
-    /// 全部原样保留），只把 `quotas` 数组按 [`BalanceQuota`] 归一：脚本按 Lua 习惯写
-    /// `used_percent`/`left_percent`/`used_amount`/`left_amount`/`reset_at`，归一后前端
-    /// 拿到契约里的 camelCase 形状，且 used/left percent 互补值两个都齐（amount 不互补）。
+    /// 只有对象中的显式 `status = "ok"` 视为成功；业务错误更新 payload。
+    /// `quotas` 按 [`BalanceQuota`] 归一化，空数组也是有效结果。
     fn from_script_return(ret: &Value, now: i64) -> BalanceResult {
-        let status = match ret.get("status").and_then(Value::as_str) {
-            None | Some("ok") => "ok",
-            Some(_) => "error",
+        let valid_status = ret
+            .as_object()
+            .and_then(|obj| obj.get("status"))
+            .and_then(Value::as_str);
+        let status = if valid_status == Some("ok") {
+            "ok"
+        } else {
+            "error"
         };
-        let error = match status {
-            "ok" => None,
-            _ => Some(
+        let error = match valid_status {
+            Some("ok") => None,
+            Some("error") => Some(
                 ret.get("message")
                     .and_then(Value::as_str)
                     .unwrap_or("脚本返回错误状态")
                     .to_string(),
             ),
+            _ => Some("余额脚本必须返回包含有效 status（ok/error）的对象".to_string()),
         };
-        let payload = if ret.is_null() {
-            None
-        } else {
-            Some(normalize_quotas(ret))
-        };
+        let payload = ret.is_object().then(|| normalize_quotas(ret));
         BalanceResult {
             status: status.to_string(),
             payload,
@@ -510,6 +464,11 @@ fn normalize_quotas(ret: &Value) -> Value {
     let Some(quotas) = ret.get("quotas") else {
         return ret.clone();
     };
+    if quotas.as_object().is_some_and(|object| object.is_empty()) {
+        let mut out = ret.clone();
+        out["quotas"] = json!([]);
+        return out;
+    }
     let Ok(mut parsed) = serde_json::from_value::<Vec<BalanceQuota>>(quotas.clone()) else {
         return ret.clone();
     };
@@ -583,10 +542,214 @@ pub async fn run_balance_loop(db: Arc<Database>, engine: BalanceEngine, tick: Du
             // 单卡 panic 不得中断调度循环：交给独立 task，panic 收敛为 JoinError
             let engine = engine.clone();
             let key = card.key.clone();
-            let handle = tokio::spawn(async move { engine.run_card(&card).await });
-            if let Err(e) = handle.await {
-                tracing::error!(card = %key, error = %e, "余额卡片执行失败");
+            let mut tasks = tokio::task::JoinSet::new();
+            tasks.spawn(async move { engine.run_card(&card).await });
+            match tasks.join_next().await {
+                Some(Ok(Ok(_))) | None => {}
+                Some(Ok(Err(e))) => {
+                    tracing::error!(card = %key, error = %e, "余额卡片存储失败");
+                }
+                Some(Err(e)) => {
+                    tracing::error!(card = %key, error = %e, "余额卡片执行失败");
+                }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod db_failure_tests {
+    use super::*;
+    use moonbridge_store::{PlaintextKey, StoreError};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct DatabaseDirectory(PathBuf);
+
+    impl DatabaseDirectory {
+        fn execute(&self, sql: &str) {
+            rusqlite::Connection::open(self.0.join("balance.sqlite"))
+                .unwrap()
+                .execute_batch(sql)
+                .unwrap();
+        }
+
+        fn reject_result_writes(&self) {
+            self.execute(
+                "CREATE TRIGGER reject_results BEFORE INSERT ON balance_results
+                 BEGIN SELECT RAISE(ABORT, 'synthetic write failure'); END;",
+            );
+        }
+    }
+
+    impl Drop for DatabaseDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn file_database() -> (DatabaseDirectory, Arc<Database>, BalanceCard) {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "moonbridge-balance-db-failure-{}-{timestamp}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let directory = DatabaseDirectory(directory);
+        let db =
+            Database::open_with_key(directory.0.join("balance.sqlite"), Box::new(PlaintextKey))
+                .unwrap();
+        let card = BalanceCard {
+            key: "stored-card".into(),
+            provider_key: None,
+            display_mode: "auto".into(),
+            api_key: "manual-test-key".into(),
+            base_url: String::new(),
+            provider_label: String::new(),
+            script_ref:
+                "MB = {}\nfunction MB.query(ctx) return { status = 'ok', summary = 'queried' } end"
+                    .into(),
+            interval_secs: 60,
+            enabled: true,
+            extra: json!({}),
+            position: 0,
+            created_at: 0,
+            updated_at: 0,
+        };
+        db.upsert_balance_card(&card).unwrap();
+        let stored = db.get_balance_card(&card.key).unwrap().unwrap();
+        assert_eq!(stored.api_key, card.api_key);
+        assert_eq!(stored.script_ref, card.script_ref);
+        assert!(stored.enabled);
+        assert_eq!(db.list_balance_cards().unwrap().len(), 1);
+        assert!(db.list_balance_results(&card.key).unwrap().is_empty());
+        (directory, Arc::new(db), card)
+    }
+
+    fn assert_sqlite_error(error: StoreError, expected: &str) {
+        match error {
+            StoreError::Db(error) => assert_eq!(error.to_string(), expected),
+            error => panic!("expected SQLite error {expected:?}, got {error:?}"),
+        }
+    }
+
+    async fn assert_query_succeeds(engine: &BalanceEngine, card: &BalanceCard) {
+        let preview = engine.test_card(card).await;
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0].result.status, "ok");
+        assert_eq!(preview[0].result.error, None);
+        assert_eq!(
+            preview[0].result.payload.as_ref().unwrap()["summary"],
+            "queried"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_all_propagates_card_list_failure() {
+        let (directory, db, card) = file_database();
+        let engine = BalanceEngine::new(db.clone(), None);
+        assert_query_succeeds(&engine, &card).await;
+        directory.execute("DROP TABLE balance_cards;");
+        assert_sqlite_error(
+            db.list_balance_cards().unwrap_err(),
+            "no such table: balance_cards",
+        );
+
+        assert_sqlite_error(
+            engine.refresh_all().await.unwrap_err(),
+            "no such table: balance_cards",
+        );
+        assert!(db.list_balance_results(&card.key).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn refresh_card_propagates_card_read_failure() {
+        let (directory, db, card) = file_database();
+        let engine = BalanceEngine::new(db.clone(), None);
+        assert_query_succeeds(&engine, &card).await;
+        directory.execute("DROP TABLE balance_cards;");
+        assert_sqlite_error(
+            db.get_balance_card(&card.key).unwrap_err(),
+            "no such table: balance_cards",
+        );
+
+        assert_sqlite_error(
+            engine.refresh_card(&card, Some(-1)).await.unwrap_err(),
+            "no such table: balance_cards",
+        );
+        assert!(db.list_balance_results(&card.key).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn refresh_card_propagates_result_list_failure() {
+        let (directory, db, card) = file_database();
+        let engine = BalanceEngine::new(db.clone(), None);
+        assert_query_succeeds(&engine, &card).await;
+        directory.execute("DROP TABLE balance_results;");
+        assert_sqlite_error(
+            db.list_balance_results(&card.key).unwrap_err(),
+            "no such table: balance_results",
+        );
+
+        assert_sqlite_error(
+            engine.refresh_card(&card, Some(-1)).await.unwrap_err(),
+            "no such table: balance_results",
+        );
+        assert!(db.get_balance_card(&card.key).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn run_card_propagates_result_write_failure() {
+        let (directory, db, card) = file_database();
+        let engine = BalanceEngine::new(db.clone(), None);
+        assert_query_succeeds(&engine, &card).await;
+        directory.reject_result_writes();
+
+        assert_sqlite_error(
+            engine.run_card(&card).await.unwrap_err(),
+            "synthetic write failure",
+        );
+        assert!(db.list_balance_results(&card.key).unwrap().is_empty());
+
+        directory.execute("DROP TRIGGER reject_results;");
+        let results = engine.run_card(&card).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].result.status, "ok");
+        assert_eq!(db.list_balance_results(&card.key).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_card_propagates_result_write_failure_for_full_and_single_key_refresh() {
+        let (directory, db, card) = file_database();
+        let engine = BalanceEngine::new(db.clone(), None);
+        assert_query_succeeds(&engine, &card).await;
+        directory.reject_result_writes();
+
+        for key_index in [None, Some(0)] {
+            assert_sqlite_error(
+                engine.refresh_card(&card, key_index).await.unwrap_err(),
+                "synthetic write failure",
+            );
+            assert!(db.list_balance_results(&card.key).unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_all_propagates_result_write_failure() {
+        let (directory, db, card) = file_database();
+        let engine = BalanceEngine::new(db.clone(), None);
+        assert_query_succeeds(&engine, &card).await;
+        directory.reject_result_writes();
+
+        assert_sqlite_error(
+            engine.refresh_all().await.unwrap_err(),
+            "synthetic write failure",
+        );
+        assert!(db.list_balance_results(&card.key).unwrap().is_empty());
+        assert_eq!(db.list_balance_cards().unwrap().len(), 1);
     }
 }

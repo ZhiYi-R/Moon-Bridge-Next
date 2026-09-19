@@ -66,9 +66,8 @@ export const useGatewayStore = defineStore("gateway", () => {
     loading.value = true;
     try {
       if (isWebRuntime) {
-        // 服务端重启：进程退出后由外部（docker / systemd / supervisor）拉起
         await gatewayApi.restart();
-        toast.success("网关重启中，几秒后自动恢复");
+        toast.success("正在等待在途请求结束，然后重新启动网关");
         return;
       }
       status.value = await gatewayApi.restart();

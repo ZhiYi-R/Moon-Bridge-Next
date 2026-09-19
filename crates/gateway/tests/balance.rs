@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use axum::routing::post;
 use axum::{Json, Router};
-use moonbridge_gateway::{run_balance_loop, BalanceEngine};
+use moonbridge_gateway::{run_balance_loop, BalanceEngine, BalanceNetworkPolicy};
 use moonbridge_store::{BalanceCard, BalanceKeyResult, Database, Endpoint, Provider};
 use serde_json::{json, Value};
 
@@ -20,6 +20,7 @@ const SCRIPT_OK: &str = r#"
 MB = {}
 function MB.query(ctx)
   return {
+    status = "ok",
     quotas = { { label = "Weekly", used_percent = 43, reset_at = "t" } },
     summary = "s",
   }
@@ -110,7 +111,7 @@ fn assert_close(actual: Option<f64>, expected: f64) {
 async fn run_card_success_normalizes_quotas() {
     let db = Arc::new(Database::open_in_memory().unwrap());
     let c = card("ok", SCRIPT_OK);
-    let results = engine(&db, None).run_card(&c).await;
+    let results = engine(&db, None).run_card(&c).await.unwrap();
     let res = &only(&results).result;
 
     assert_eq!(res.status, "ok");
@@ -144,14 +145,14 @@ async fn engine_failure_keeps_previous_payload() {
     let db = Arc::new(Database::open_in_memory().unwrap());
     let eng = engine(&db, None);
 
-    let results = eng.run_card(&card("keep", SCRIPT_OK)).await;
+    let results = eng.run_card(&card("keep", SCRIPT_OK)).await.unwrap();
     let first = &only(&results).result;
     assert_eq!(first.status, "ok");
     let good = first.payload.clone().expect("首次成功应有 payload");
 
     // 换成抛错脚本重跑：脚本读到但立即失败 → 引擎级失败
     let broken = card("keep", "error(\"上游不可达\")");
-    let results = eng.run_card(&broken).await;
+    let results = eng.run_card(&broken).await.unwrap();
     let res = &only(&results).result;
     assert_eq!(res.status, "error");
     assert!(res.error.as_deref().is_some_and(|e| !e.is_empty()));
@@ -176,7 +177,7 @@ async fn business_error_updates_payload() {
         end
         "#,
     );
-    let results = engine(&db, None).run_card(&c).await;
+    let results = engine(&db, None).run_card(&c).await.unwrap();
     let res = &only(&results).result;
     assert_eq!(res.status, "error");
     assert_eq!(
@@ -199,14 +200,11 @@ async fn missing_query_entry_is_engine_error() {
             "noquery",
             "MB = {}\nfunction MB.other(ctx) return {} end",
         ))
-        .await;
+        .await
+        .unwrap();
     let res = &only(&results).result;
     assert_eq!(res.status, "error");
-    assert!(
-        res.error.as_deref().is_some_and(|e| e.contains("MB.query")),
-        "缺失入口应报出 MB.query: {:?}",
-        res.error
-    );
+    assert_eq!(res.error.as_deref(), Some("余额脚本执行失败"));
     assert_eq!(res.payload, None, "首次失败无可保留的旧 payload");
 }
 
@@ -226,13 +224,18 @@ async fn mb_http_real_roundtrip_complements_percent() {
       if r.status ~= 200 then
         return { status = "error", message = "上游 " .. tostring(r.status) }
       end
-      return { quotas = { { label = "5h", left_percent = r.body.left } } }
+      return { status = "ok", quotas = { { label = "5h", left_percent = r.body.left } } }
     end
     "#;
     let mut c = card("http", script);
     c.base_url = base_url.clone();
 
-    let results = engine(&db, None).run_card(&c).await;
+    let policy = BalanceNetworkPolicy::from_config(vec![base_url], None).unwrap();
+    let results = engine(&db, None)
+        .with_network_policy(policy)
+        .run_card(&c)
+        .await
+        .unwrap();
     let res = &only(&results).result;
     assert_eq!(res.status, "ok", "error: {:?}", res.error);
     let quota = &res.payload.clone().expect("应有 payload")["quotas"][0];
@@ -256,7 +259,8 @@ async fn script_ref_outside_plugins_dir_is_rejected() {
 
     let results = engine(&db, Some(dir.clone()))
         .run_card(&card("escape", outside.to_str().unwrap()))
-        .await;
+        .await
+        .unwrap();
     let res = &only(&results).result;
     assert_eq!(res.status, "error");
     assert!(
@@ -312,6 +316,7 @@ async fn amount_mode_quotas_pass_through_without_percent() {
     MB = {}
     function MB.query(ctx)
       return {
+        status = "ok",
         quotas = {
           { label = "余额", unit = "¥", used_amount = 12.5, left_amount = 37.5 },
           { label = "流量", unit = "GB", used_amount = 3 },
@@ -319,7 +324,10 @@ async fn amount_mode_quotas_pass_through_without_percent() {
       }
     end
     "#;
-    let results = engine(&db, None).run_card(&card("amount", script)).await;
+    let results = engine(&db, None)
+        .run_card(&card("amount", script))
+        .await
+        .unwrap();
     let res = &only(&results).result;
     assert_eq!(res.status, "ok", "error: {:?}", res.error);
 
@@ -372,6 +380,7 @@ async fn provider_card_splits_into_per_key_results() {
     MB = {}
     function MB.query(ctx)
       return {
+        status = "ok",
         quotas = {},
         summary = ctx.key .. "|" .. ctx.keys[1]
           .. "|" .. ctx.base_url
@@ -386,7 +395,7 @@ async fn provider_card_splits_into_per_key_results() {
     c.provider_label = String::new(); // 留空 → 取 Provider key
     c.base_url = "https://quota.example".to_string(); // URL 是卡片自己的可选输入
 
-    let results = engine(&db, None).run_card(&c).await;
+    let results = engine(&db, None).run_card(&c).await.unwrap();
     assert_eq!(results.len(), 2, "去重后的 2 个 key 各拆一行: {results:?}");
 
     let first = &results[0];
@@ -432,14 +441,14 @@ async fn per_key_failure_is_independent() {
       if ctx.key == "sk-beta-00002" then
         error("boom")
       end
-      return { quotas = {}, summary = ctx.key }
+      return { status = "ok", quotas = {}, summary = ctx.key }
     end
     "#;
     let mut c = card("ind", script);
     c.api_key.clear();
     c.provider_key = Some("kimi".to_string());
 
-    let results = engine(&db, None).run_card(&c).await;
+    let results = engine(&db, None).run_card(&c).await.unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].result.status, "ok");
     assert_eq!(
@@ -447,14 +456,10 @@ async fn per_key_failure_is_independent() {
         json!("sk-alpha-0001")
     );
     assert_eq!(results[1].result.status, "error");
-    assert!(
-        results[1]
-            .result
-            .error
-            .as_deref()
-            .is_some_and(|e| e.contains("boom")),
-        "第二个 key 的错误应带脚本消息: {:?}",
-        results[1].result.error
+    assert_eq!(
+        results[1].result.error.as_deref(),
+        Some("余额脚本执行失败"),
+        "执行错误必须脱敏，不返回脚本原始消息"
     );
     assert_eq!(
         results[1].result.payload, None,
@@ -478,7 +483,7 @@ async fn engine_failure_keeps_payload_per_key() {
     c.api_key.clear();
     c.provider_key = Some("kimi".to_string());
 
-    let results = eng.run_card(&c).await;
+    let results = eng.run_card(&c).await.unwrap();
     assert_eq!(results.len(), 2);
     let good0 = results[0].result.payload.clone().expect("key0 首次成功");
     let good1 = results[1].result.payload.clone().expect("key1 首次成功");
@@ -490,13 +495,13 @@ async fn engine_failure_keeps_payload_per_key() {
     MB = {}
     function MB.query(ctx)
       if ctx.key == "sk-beta-00002" then error("boom") end
-      return { quotas = {}, summary = "new-" .. ctx.key }
+      return { status = "ok", quotas = {}, summary = "new-" .. ctx.key }
     end
     "#,
     );
     broken.api_key.clear();
     broken.provider_key = Some("kimi".to_string());
-    let results = eng.run_card(&broken).await;
+    let results = eng.run_card(&broken).await.unwrap();
     assert_eq!(results[0].result.status, "ok");
     assert_eq!(
         results[0].result.payload.as_ref().unwrap()["summary"],
@@ -529,12 +534,12 @@ async fn shrinking_keys_prunes_stale_rows() {
     let mut c = card("prune", SCRIPT_OK);
     c.api_key.clear();
     c.provider_key = Some("kimi".to_string());
-    assert_eq!(eng.run_card(&c).await.len(), 2);
+    assert_eq!(eng.run_card(&c).await.unwrap().len(), 2);
 
     // Provider 删到只剩一个 key：重跑后 idx1 残留行被剪掉
     db.upsert_provider(&provider("kimi", &[("https://a", "sk-alpha-0001")]))
         .unwrap();
-    let results = eng.run_card(&c).await;
+    let results = eng.run_card(&c).await.unwrap();
     assert_eq!(results.len(), 1);
     let rows = db.list_balance_results("prune").unwrap();
     assert_eq!(rows.len(), 1, "残留行应被 prune: {rows:?}");
@@ -557,7 +562,7 @@ async fn refresh_card_with_key_index_reruns_only_that_key() {
     c.api_key.clear();
     c.provider_key = Some("kimi".to_string());
     db.upsert_balance_card(&c).unwrap();
-    eng.run_card(&c).await;
+    eng.run_card(&c).await.unwrap();
 
     // 换脚本：key0 报错、key1 返回新 summary。只刷新 idx0 → idx1 保持旧值
     let mut changed = card(
@@ -566,23 +571,19 @@ async fn refresh_card_with_key_index_reruns_only_that_key() {
     MB = {}
     function MB.query(ctx)
       if ctx.key == "sk-alpha-0001" then error("down") end
-      return { quotas = {}, summary = "changed" }
+      return { status = "ok", quotas = {}, summary = "changed" }
     end
     "#,
     );
     changed.api_key.clear();
     changed.provider_key = Some("kimi".to_string());
-    let view = eng.refresh_card(&changed, Some(0)).await;
+    let view = eng.refresh_card(&changed, Some(0)).await.unwrap();
     assert_eq!(view.results.len(), 2);
     assert_eq!(view.results[0].result.status, "error");
-    assert!(
-        view.results[0]
-            .result
-            .error
-            .as_deref()
-            .is_some_and(|e| e.contains("down")),
-        "idx0 应被重跑成新错误: {:?}",
-        view.results[0].result.error
+    assert_eq!(
+        view.results[0].result.error.as_deref(),
+        Some("余额脚本执行失败"),
+        "idx0 必须重跑为脱敏错误"
     );
     assert_eq!(
         view.results[1].result.status, "ok",
@@ -595,12 +596,12 @@ async fn refresh_card_with_key_index_reruns_only_that_key() {
     );
 
     // 越界 key_index：不动作，视图原样
-    let view = eng.refresh_card(&changed, Some(9)).await;
+    let view = eng.refresh_card(&changed, Some(9)).await.unwrap();
     assert_eq!(view.results.len(), 2);
     assert_eq!(view.results[0].result.status, "error");
 
     // None：整卡重跑，idx1 也更新为新脚本的值
-    let view = eng.refresh_card(&changed, None).await;
+    let view = eng.refresh_card(&changed, None).await.unwrap();
     assert_eq!(view.results[0].result.status, "error");
     assert_eq!(
         view.results[1].result.payload.as_ref().unwrap()["summary"],
@@ -616,7 +617,7 @@ async fn provider_key_missing_is_single_error_row() {
     c.api_key.clear();
     c.provider_key = Some("ghost".to_string());
 
-    let results = engine(&db, None).run_card(&c).await;
+    let results = engine(&db, None).run_card(&c).await.unwrap();
     assert_eq!(results.len(), 1, "解析失败落单行错误结果");
     let kr = &results[0];
     assert_eq!(kr.key_index, 0);
@@ -647,7 +648,7 @@ async fn provider_key_missing_is_single_error_row() {
         },
     )
     .unwrap();
-    let results = engine(&db, None).run_card(&c).await;
+    let results = engine(&db, None).run_card(&c).await.unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(
         db.list_balance_results("ghost").unwrap().len(),
@@ -669,7 +670,7 @@ async fn manual_keys_override_provider_across_query_paths() {
     function MB.query(ctx)
       assert(ctx.key ~= "provider-secret")
       assert(#ctx.keys == 1 and ctx.keys[1] == ctx.key)
-      return { summary = ctx.key .. "|" .. ctx.provider }
+      return { status = "ok", summary = ctx.key .. "|" .. ctx.provider }
     end
     "#;
     let eng = engine(&db, None);
@@ -682,7 +683,7 @@ async fn manual_keys_override_provider_across_query_paths() {
     let preview = eng.test_card(&c).await;
     assert_eq!(preview.len(), 2);
     assert!(db.list_balance_results("manual").unwrap().is_empty());
-    let results = eng.run_card(&c).await;
+    let results = eng.run_card(&c).await.unwrap();
     assert_eq!(results.len(), 2);
     for (idx, key) in ["sk-manual-alpha", "sk-manual-beta"].iter().enumerate() {
         assert_eq!(results[idx].result.status, "ok");
@@ -696,7 +697,7 @@ async fn manual_keys_override_provider_across_query_paths() {
 
     c.provider_key = Some("missing".into());
     db.upsert_balance_card(&c).unwrap();
-    let refreshed = eng.refresh_card(&c, Some(1)).await;
+    let refreshed = eng.refresh_card(&c, Some(1)).await.unwrap();
     assert_eq!(
         refreshed.results[0].result.payload,
         results[0].result.payload
@@ -716,7 +717,7 @@ async fn manual_keys_override_provider_across_query_paths() {
     c.provider_key = None;
     c.provider_label = "manual-label".into();
     db.upsert_balance_card(&c).unwrap();
-    let all = eng.refresh_all().await;
+    let all = eng.refresh_all().await.unwrap();
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].results.len(), 1);
     assert_eq!(
@@ -740,14 +741,14 @@ async fn whitespace_manual_keys_fall_back_to_provider() {
     MB = {}
     function MB.query(ctx)
       assert(ctx.key == "from-provider")
-      return { summary = "provider" }
+      return { status = "ok", summary = "provider" }
     end
     "#,
     );
     c.api_key = " \r\n\t\n ".into();
     c.provider_key = Some("upstream".into());
     let eng = engine(&db, None);
-    for results in [eng.test_card(&c).await, eng.run_card(&c).await] {
+    for results in [eng.test_card(&c).await, eng.run_card(&c).await.unwrap()] {
         assert_eq!(only(&results).result.status, "ok");
         assert_eq!(
             only(&results).result.payload.as_ref().unwrap()["summary"],
@@ -763,13 +764,17 @@ async fn legacy_manual_card_gets_single_element_keys() {
     MB = {}
     function MB.query(ctx)
       return {
+        status = "ok",
         quotas = {},
         summary = tostring(#ctx.keys) .. "/" .. ctx.keys[1]
           .. "/" .. ctx.base_url .. "|" .. ctx.provider,
       }
     end
     "#;
-    let results = engine(&db, None).run_card(&card("legacy", script)).await;
+    let results = engine(&db, None)
+        .run_card(&card("legacy", script))
+        .await
+        .unwrap();
     let kr = only(&results);
     assert_eq!(kr.key_label, "sk…", "短 key 掩码为前 2 位 + …");
     assert_eq!(kr.result.status, "ok", "error: {:?}", kr.result.error);
@@ -788,12 +793,12 @@ async fn empty_manual_key_still_runs_once() {
     let script = r#"
     MB = {}
     function MB.query(ctx)
-      return { quotas = {}, summary = "key=" .. ctx.key .. "/n=" .. tostring(#ctx.keys) }
+      return { status = "ok", quotas = {}, summary = "key=" .. ctx.key .. "/n=" .. tostring(#ctx.keys) }
     end
     "#;
     let mut c = card("nokey", script);
     c.api_key = String::new();
-    let results = engine(&db, None).run_card(&c).await;
+    let results = engine(&db, None).run_card(&c).await.unwrap();
     let kr = only(&results);
     assert_eq!(kr.key_label, "", "空 key 的 label 为空串");
     assert_eq!(kr.result.status, "ok", "error: {:?}", kr.result.error);
@@ -810,6 +815,7 @@ async fn reset_at_accepts_number_and_string() {
     MB = {}
     function MB.query(ctx)
       return {
+        status = "ok",
         quotas = {
           { label = "周窗口", used_percent = 43, reset_at = 1789616942 },
           { label = "月额度", used_percent = 10, reset_at = "每月 1 日" },
@@ -818,7 +824,10 @@ async fn reset_at_accepts_number_and_string() {
       }
     end
     "#;
-    let results = engine(&db, None).run_card(&card("reset", script)).await;
+    let results = engine(&db, None)
+        .run_card(&card("reset", script))
+        .await
+        .unwrap();
     let res = &only(&results).result;
     assert_eq!(res.status, "ok", "error: {:?}", res.error);
     let quotas = res.payload.as_ref().unwrap()["quotas"]
@@ -933,36 +942,87 @@ async fn run_builtin_template(
         format!("http://{addr}/")
     };
     c.extra = extra;
-    let results = engine(&db, None).test_card(&c).await;
+    let policy = BalanceNetworkPolicy::from_config(vec![format!("http://{addr}")], None).unwrap();
+    let results = engine(&db, None)
+        .with_network_policy(policy)
+        .test_card(&c)
+        .await;
     server.abort();
     only(&results).clone()
 }
 
 #[tokio::test]
-async fn new_api_template_uses_account_quota_including_zero() {
-    for (quota, expected) in [(12500000, 1.25), (0, 0.0)] {
+async fn new_api_template_uses_remaining_quota_and_default_dollar_conversion() {
+    for quota in [json!(12500000), json!("12500000")] {
         let result = run_builtin_template(
             "NEW_API",
             200,
-            json!({"data": {"used_quota": quota}}),
+            json!({"data": {"quota": quota, "used_quota": 900000000}}),
             json!({}),
         )
         .await;
         assert_eq!(result.result.status, "ok");
         let payload = result.result.payload.unwrap();
-        assert_eq!(payload["quotas"][0]["unit"], json!("¥"));
-        assert_close(payload["quotas"][0]["leftAmount"].as_f64(), expected);
+        assert_eq!(payload["quotas"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["quotas"][0]["unit"], json!("$"));
+        assert_close(payload["quotas"][0]["leftAmount"].as_f64(), 25.0);
     }
     let result = run_builtin_template(
         "NEW_API",
         200,
-        json!({"data": {"used_quota": "12500000"}}),
-        json!({"quota_per_unit": 500000, "unit": "$"}),
+        json!({"data": {"quota": "12500000"}}),
+        json!({"quota_per_unit": 10000000, "unit": "¥"}),
     )
     .await;
+    assert_eq!(result.result.status, "ok");
     let payload = result.result.payload.unwrap();
-    assert_close(payload["quotas"][0]["leftAmount"].as_f64(), 25.0);
-    assert_eq!(payload["quotas"][0]["unit"], json!("$"));
+    assert_close(payload["quotas"][0]["leftAmount"].as_f64(), 1.25);
+    assert_eq!(payload["quotas"][0]["unit"], json!("¥"));
+}
+
+#[tokio::test]
+async fn new_api_template_nonpositive_quota_is_an_explicit_empty_success() {
+    for quota in [json!(0), json!("0"), json!(-1), json!("-500000")] {
+        let result =
+            run_builtin_template("NEW_API", 200, json!({"data": {"quota": quota}}), json!({}))
+                .await;
+        assert_eq!(result.result.status, "ok");
+        assert_eq!(result.result.error, None);
+        let payload = result.result.payload.unwrap();
+        assert_eq!(payload["summary"], json!("无额度记录"));
+        assert_eq!(payload["quotas"], json!([]));
+    }
+}
+
+#[tokio::test]
+async fn new_api_template_rejects_missing_remaining_quota_and_invalid_conversion() {
+    for data in [
+        json!({"used_quota": 12500000}),
+        json!({"quota": true}),
+        json!({"quota": "nan"}),
+        json!({"quota": "inf"}),
+    ] {
+        let result = run_builtin_template("NEW_API", 200, json!({"data": data}), json!({})).await;
+        assert_eq!(result.result.status, "error");
+        assert_eq!(
+            result.result.error.as_deref(),
+            Some("响应缺少有效的 data.quota")
+        );
+    }
+    for conversion in [json!(0), json!(-1), json!(true), json!("nan"), json!("inf")] {
+        let result = run_builtin_template(
+            "NEW_API",
+            200,
+            json!({"data": {"quota": 500000}}),
+            json!({"quota_per_unit": conversion}),
+        )
+        .await;
+        assert_eq!(result.result.status, "error");
+        assert_eq!(
+            result.result.error.as_deref(),
+            Some("quota_per_unit 必须是大于 0 的有限数字")
+        );
+    }
 }
 
 #[tokio::test]
@@ -1063,7 +1123,7 @@ async fn builtin_templates_report_http_and_schema_errors() {
         ("NEW_API", json!({}), json!({"quota_per_unit": 0})),
         (
             "KIMI_CODING",
-            json!({"usages": {"limit_5h": {"used_ratio": 0}}}),
+            json!({"usages": {"limit_5h": {"used_ratio": -1}, "limit_7d": {"used_ratio": "invalid"}}}),
             json!({}),
         ),
         (
@@ -1161,5 +1221,202 @@ async fn sub2api_template_reports_invalid_key_and_access_errors() {
             .as_str()
             .unwrap()
             .contains(expected));
+    }
+}
+
+#[tokio::test]
+async fn kimi_template_accepts_either_single_valid_window() {
+    for (usages, label, used) in [
+        (json!({"limit_5h": {"used_ratio": 0}}), "5 小时", 0.0),
+        (json!({"limit_7d": {"used_ratio": "0.375"}}), "Weekly", 37.5),
+        (
+            json!({"limit_5h": {"used_ratio": "invalid"}, "limit_7d": {"used_ratio": 0}}),
+            "Weekly",
+            0.0,
+        ),
+        (
+            json!({"limit_5h": {"used_ratio": 0.5}, "limit_7d": {"used_ratio": -1}}),
+            "5 小时",
+            50.0,
+        ),
+    ] {
+        let result =
+            run_builtin_template("KIMI_CODING", 200, json!({"usages": usages}), json!({})).await;
+        assert_eq!(result.result.status, "ok");
+        assert_eq!(result.result.error, None);
+        let payload = result.result.payload.unwrap();
+        let quotas = payload["quotas"].as_array().unwrap();
+        assert_eq!(quotas.len(), 1);
+        assert_eq!(quotas[0]["label"], json!(label));
+        assert_close(quotas[0]["usedPercent"].as_f64(), used);
+        assert_close(quotas[0]["leftPercent"].as_f64(), 100.0 - used);
+    }
+}
+
+#[tokio::test]
+async fn kimi_template_rejects_two_invalid_windows() {
+    for value in [
+        json!(-1),
+        json!(true),
+        json!("nan"),
+        json!("inf"),
+        json!("1e309"),
+        Value::Null,
+    ] {
+        let result = run_builtin_template(
+            "KIMI_CODING",
+            200,
+            json!({"usages": {
+                "limit_5h": {"used_ratio": value.clone()},
+                "limit_7d": {"used_ratio": value}
+            }}),
+            json!({}),
+        )
+        .await;
+        assert_eq!(result.result.status, "error");
+        assert_eq!(
+            result.result.error.as_deref(),
+            Some("响应缺少有效的 usages.limit_5h / limit_7d.used_ratio")
+        );
+    }
+}
+
+#[tokio::test]
+async fn malformed_script_returns_are_errors_in_preview_and_persisted_results() {
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let eng = engine(&db, None);
+    for (index, value) in [
+        "nil",
+        "false",
+        "42",
+        "\"not an object\"",
+        "{1, 2}",
+        "{ summary = \"missing status\" }",
+        "{ status = false }",
+        "{ status = \"unknown\" }",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let c = card(
+            &format!("invalid-{index}"),
+            &format!("MB = {{}}\nfunction MB.query(ctx) return {value} end"),
+        );
+        let preview = eng.test_card(&c).await;
+        assert_eq!(only(&preview).result.status, "error", "{value}");
+        assert!(
+            only(&preview)
+                .result
+                .error
+                .as_deref()
+                .is_some_and(|error| !error.is_empty()),
+            "{value}"
+        );
+        assert!(db.list_balance_results(&c.key).unwrap().is_empty());
+        let persisted = eng.run_card(&c).await.unwrap();
+        assert_eq!(only(&persisted).result.status, "error", "{value}");
+        assert_eq!(only(&persisted).result.error, only(&preview).result.error);
+        assert_eq!(stored(&db, &c.key, 0).result.status, "error");
+    }
+}
+
+#[tokio::test]
+async fn zero_amounts_remain_numeric_zero_without_percent_fields() {
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let c = card(
+        "zero",
+        r#"MB = {}
+function MB.query(ctx)
+  return { status = "ok", quotas = {{ label = "余额", unit = "$", used_amount = 0, left_amount = 0 }} }
+end"#,
+    );
+    let results = engine(&db, None).run_card(&c).await.unwrap();
+    assert_eq!(only(&results).result.status, "ok");
+    for payload in [
+        only(&results).result.payload.clone().unwrap(),
+        stored(&db, "zero", 0).result.payload.unwrap(),
+    ] {
+        let quota = &payload["quotas"][0];
+        assert_close(quota["usedAmount"].as_f64(), 0.0);
+        assert_close(quota["leftAmount"].as_f64(), 0.0);
+        assert!(quota.get("usedPercent").is_none());
+        assert!(quota.get("leftPercent").is_none());
+    }
+}
+
+#[tokio::test]
+async fn default_engine_blocks_local_requests_without_leaking_the_token() {
+    let origin = spawn_mock_quota().await;
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let mut c = card(
+        "blocked",
+        r#"MB = {}
+function MB.query(ctx)
+  mb.http.request({ method = "POST", url = ctx.base_url .. "/quota?token=" .. ctx.key,
+    headers = {{ "Authorization", "Bearer " .. ctx.key }} })
+  return { status = "ok" }
+end"#,
+    );
+    c.base_url = origin;
+    c.api_key = "secret-token-never-in-errors".into();
+    let results = engine(&db, None).test_card(&c).await;
+    let result = &only(&results).result;
+    assert_eq!(result.status, "error");
+    let error = result.error.as_deref().unwrap();
+    assert_eq!(error, "余额 HTTP 请求禁止访问私网或保留地址");
+    assert!(!error.contains(&c.api_key));
+    assert_eq!(result.payload, None);
+}
+
+#[tokio::test]
+async fn proxy_policy_errors_are_explicit_but_lua_errors_stay_redacted() {
+    let proxy = "http://proxy-private-secret@proxy.example:8080";
+    let expected = "余额查询不支持出站代理：无法安全校验代理侧 DNS";
+    let error = BalanceNetworkPolicy::from_config(vec![], Some(proxy.into())).unwrap_err();
+    assert_eq!(error, expected);
+    assert!(!error.contains("proxy-private-secret"));
+
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let eng = engine(&db, None)
+        .with_network_policy(BalanceNetworkPolicy::from_environment(Some(proxy.into())));
+    let mut c = card(
+        "proxy-denied",
+        r#"MB = {}
+function MB.query(ctx)
+  mb.http.request({ method = "GET", url = ctx.base_url .. "/quota?token=" .. ctx.key,
+    headers = {{ "Authorization", "Bearer " .. ctx.key }} })
+  return { status = "ok" }
+end"#,
+    );
+    c.api_key = "private-api-key-never-in-errors".into();
+    let results = eng.test_card(&c).await;
+    let result = &only(&results).result;
+    assert_eq!(result.status, "error");
+    assert_eq!(result.error.as_deref(), Some(expected));
+    assert!(!result.error.as_deref().unwrap().contains(&c.api_key));
+    assert!(!result
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("proxy-private-secret"));
+    assert_eq!(result.payload, None);
+    assert!(db.list_balance_results(&c.key).unwrap().is_empty());
+
+    for (script, expected_error) in [
+        ("error('secret')", "余额脚本加载失败"),
+        (
+            "MB = {}\nfunction MB.query(ctx) error('secret:' .. ctx.key) end",
+            "余额脚本执行失败",
+        ),
+    ] {
+        c.script_ref = script.into();
+        let results = eng.test_card(&c).await;
+        let result = &only(&results).result;
+        assert_eq!(result.status, "error");
+        assert_eq!(result.error.as_deref(), Some(expected_error));
+        assert!(!result.error.as_deref().unwrap().contains("secret"));
+        assert!(!result.error.as_deref().unwrap().contains(&c.api_key));
+        assert_eq!(result.payload, None);
+        assert!(db.list_balance_results(&c.key).unwrap().is_empty());
     }
 }

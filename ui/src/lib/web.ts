@@ -3,19 +3,25 @@
 
 import type { PluginImportOutcome } from "./api";
 
-const TOKEN_KEY = "mb.adminToken";
+let adminToken = "";
 
-/** 管理令牌读取（web 模式专用；Tauri / mock 模式不涉及）。 */
+try {
+  localStorage.removeItem("mb.adminToken");
+} catch {
+  // 禁用存储时仍可使用仅内存中的令牌。
+}
+
+/** 管理令牌仅保存在当前页面内存中，刷新页面后需重新登录。 */
 export function getToken(): string {
-  return localStorage.getItem(TOKEN_KEY) ?? "";
+  return adminToken;
 }
 
 export function setToken(token: string) {
-  localStorage.setItem(TOKEN_KEY, token.trim());
+  adminToken = token.trim();
 }
 
 export function clearToken() {
-  localStorage.removeItem(TOKEN_KEY);
+  adminToken = "";
 }
 
 /** 认证失效事件：收到 401 时派发，App.vue 监听后弹出登录卡片。 */
@@ -124,7 +130,7 @@ export async function webInvoke<T>(cmd: string, args: Record<string, unknown>): 
     case "gateway_stop":
       throw new Error("web 模式不支持启停网关，请使用重启");
     case "gateway_restart":
-      // 202 {"message":"restarting"}，进程 500ms 后退出；状态由调用方轮询刷新
+      // 202 后在原进程内排空请求并重建监听器；状态由调用方轮询刷新。
       await request("POST", "/api/gateway/restart");
       return ok<T>();
     case "gateway_status":

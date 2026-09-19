@@ -71,7 +71,9 @@ fn hex(bytes: &[u8]) -> String {
 ///
 /// 已确认 `plugins/**` 与 crate 内测试均不使用这些名字；LSP 桩
 /// （`plugins/moonbridge.lua`）本就声明「沙箱中 os/io/loadfile/dofile 不可用」。
-const DANGEROUS_GLOBALS: [&str; 6] = ["os", "io", "loadfile", "dofile", "require", "package"];
+const DANGEROUS_GLOBALS: [&str; 7] = [
+    "os", "io", "loadfile", "dofile", "require", "package", "debug",
+];
 
 /// 协程钩子补丁：把宿主装的指令计数/超时钩子传导到插件新建的线程。
 ///

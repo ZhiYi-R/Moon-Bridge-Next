@@ -777,6 +777,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn enabled_minimal_budget_survives_anthropic_roundtrip() {
+        use crate::adapter::ClientAdapter;
+
+        let ctx = ReqCtx::new("minimal-budget", Protocol::Anthropic);
+        let req = AnthropicAdapter
+            .to_core_request(
+                &ctx,
+                json!({
+                    "model": "claude-sonnet-4",
+                    "max_tokens": 4096,
+                    "thinking": {"type": "enabled", "budget_tokens": 1024},
+                    "messages": [{"role": "user", "content": "Hi"}]
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            req.reasoning.as_ref().and_then(|r| r.effort.as_deref()),
+            Some("minimal")
+        );
+        let mut ep = endpoint();
+        ep.extra.insert("thinking_mode".into(), json!("enabled"));
+        let upstream = AnthropicAdapter
+            .from_core_request(&ctx, &req, &ep)
+            .await
+            .unwrap();
+        assert_eq!(upstream.body["thinking"]["type"], "enabled");
+        assert_eq!(upstream.body["thinking"]["budget_tokens"], 1024);
+        assert_eq!(upstream.body["max_tokens"], 4096);
+        assert!(upstream.body.get("output_config").is_none());
+    }
+
+    #[tokio::test]
     async fn builds_anthropic_request() {
         let mut req = CoreRequest::new("claude-sonnet-4");
         req.system.push(ContentBlock::text("You are helpful"));

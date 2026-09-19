@@ -15,7 +15,11 @@ use crate::state::ManagedState;
 
 /// 构造执行引擎（脚本目录与插件脚本走同一套包含性约束）。
 fn engine(state: &ManagedState) -> BalanceEngine {
-    BalanceEngine::new(state.db.clone(), Some(state.paths.plugins_dir.clone()))
+    BalanceEngine::new(state.db.clone(), Some(state.paths.plugins_dir.clone())).with_network_policy(
+        moonbridge_gateway::BalanceNetworkPolicy::from_environment(
+            state.config().gateway.egress_proxy,
+        ),
+    )
 }
 
 /// 列出全部卡片及其最近一次查询结果。
@@ -53,7 +57,7 @@ pub async fn balance_card_refresh(
     key_index: Option<i64>,
 ) -> CmdResult<BalanceCardView> {
     let view = view_of(&state.db, &key)?.ok_or_else(|| format!("余额卡片不存在: {key}"))?;
-    Ok(engine(&state).refresh_card(&view.card, key_index).await)
+    Ok(engine(&state).refresh_card(&view.card, key_index).await?)
 }
 
 /// 串行刷新全部**启用**的卡片，返回刷新后**全部**卡片的列表（与 list 同形）。
@@ -61,7 +65,7 @@ pub async fn balance_card_refresh(
 pub async fn balance_refresh_all(
     state: State<'_, Arc<ManagedState>>,
 ) -> CmdResult<Vec<BalanceCardView>> {
-    Ok(engine(&state).refresh_all().await)
+    Ok(engine(&state).refresh_all().await?)
 }
 
 /// 以表单里的卡片配置 dry-run 一次脚本（**不写库、不要求卡片已保存**），逐 key

@@ -84,7 +84,9 @@ impl Database {
         let rows = stmt.query_map([], row_to_card)?;
         let mut out = Vec::new();
         for r in rows {
-            out.push(r?);
+            let mut card = r?;
+            card.api_key = self.enc.decrypt(&card.api_key)?;
+            out.push(card);
         }
         Ok(out)
     }
@@ -97,7 +99,10 @@ impl Database {
         ))?;
         let mut rows = stmt.query_map(params![key], row_to_card)?;
         match rows.next() {
-            Some(Ok(c)) => Ok(Some(c)),
+            Some(Ok(mut c)) => {
+                c.api_key = self.enc.decrypt(&c.api_key)?;
+                Ok(Some(c))
+            }
             Some(Err(e)) => Err(e.into()),
             None => Ok(None),
         }
@@ -122,7 +127,9 @@ impl Database {
         let rows = stmt.query_map(params![now], row_to_card)?;
         let mut out = Vec::new();
         for r in rows {
-            out.push(r?);
+            let mut card = r?;
+            card.api_key = self.enc.decrypt(&card.api_key)?;
+            out.push(card);
         }
         Ok(out)
     }
@@ -157,7 +164,7 @@ impl Database {
                 updated_at=excluded.updated_at",
             params![
                 card.key,
-                card.api_key,
+                self.enc.encrypt(&card.api_key)?,
                 card.base_url,
                 card.provider_label,
                 card.script_ref,

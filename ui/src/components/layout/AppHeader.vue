@@ -1,16 +1,33 @@
 <script setup lang="ts">
 import { Minus, RotateCw, Square, X } from "lucide-vue-next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { useRoute } from "vue-router";
 
 import Badge from "@/components/ui/Badge.vue";
 import Switch from "@/components/ui/Switch.vue";
+import { useConfirm } from "@/composables/useConfirm";
 import { isTauriRuntime, usingMock } from "@/lib/api";
 import { useGatewayStore } from "@/stores/gateway";
 
 const route = useRoute();
 const gateway = useGatewayStore();
+const { confirm } = useConfirm();
+const confirmingRestart = ref(false);
+
+async function restartGateway() {
+  if (confirmingRestart.value || gateway.loading) return;
+  confirmingRestart.value = true;
+  try {
+    if (await confirm({
+      title: "重启网关",
+      message: "重启将暂时中断网关服务，确认继续？",
+      confirmText: "重启",
+    })) await gateway.restart();
+  } finally {
+    confirmingRestart.value = false;
+  }
+}
 
 const title = computed(() => (route.meta.title as string) ?? "");
 
@@ -71,8 +88,8 @@ const controlCls =
         v-else
         class="flex h-7 w-9 items-center justify-center rounded-md border border-input text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
         title="重启网关（服务进程由外部托管，重启后自动恢复）"
-        :disabled="gateway.loading"
-        @click="gateway.restart()"
+        :disabled="gateway.loading || confirmingRestart"
+        @click="restartGateway"
       >
         <RotateCw class="size-3.5" :class="gateway.loading ? 'animate-spin' : ''" />
       </button>

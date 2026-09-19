@@ -269,6 +269,10 @@ mod tests {
             config: std::sync::Arc::new(
                 std::sync::RwLock::new(crate::config::AppConfig::default()),
             ),
+            persisted_config: std::sync::Arc::new(std::sync::RwLock::new(
+                crate::config::AppConfig::default(),
+            )),
+            lifecycle: std::sync::Arc::new(crate::lifecycle::Lifecycle::default()),
             admin_token: std::sync::Arc::new("t".to_string()),
             catalog: reqwest::Client::new(),
         };

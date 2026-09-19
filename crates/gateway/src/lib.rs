@@ -14,7 +14,10 @@
 //!
 //! 依赖方向：gateway → core, protocol, plugin, store。
 
+pub mod auth;
 pub mod balance;
+pub mod balance_http;
+pub use balance_http::BalanceNetworkPolicy;
 pub mod bridge;
 pub mod config;
 pub mod dispatch;

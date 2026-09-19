@@ -48,7 +48,7 @@ Moon Bridge Next 是一个本地 LLM 网关，把客户端和上游模型服务�
 
 ### 访问控制
 
-网关可为自身入口配置访问令牌（`auth_token`），配置后客户端的 POST 请求须携带 `Authorization: Bearer <token>`。`GET /health` 与 `GET /v1/models` 刻意保持公开（模型目录不视为敏感，便于探活与监控无凭据拉取）。未配置时不做入口校验，适用于仅监听本机回环地址的默认场景。
+桌面网关可为自身入口配置访问令牌（`auth_token`），配置后客户端的 POST 请求须携带 `Authorization: Bearer <token>`。`GET /health` 与 `GET /v1/models` 继续保持公开，这是既有行为。桌面模式未配置令牌时不做入口校验，仅适用于回环监听；Web 模式必须配置独立的管理令牌和网关令牌。
 
 ### 桌面应用
 
@@ -58,9 +58,23 @@ Moon Bridge Next 是一个本地 LLM 网关，把客户端和上游模型服务�
 
 不带桌面的服务器场景可用无头服务端 `moonbridge-server`：同一端口同时提供 LLM 网关、`/api/*` 管理 REST API 与前端页面的静态托管——浏览器打开地址、填入 admin token 即可使用与桌面端相同的管理界面。
 
-- 启动必须显式提供 admin token（`--admin-token` 或环境变量 `MOONBRIDGE_ADMIN_TOKEN`）；它同时是 LLM 入口与 `/api/*` 的 Bearer token，只驻留内存、不写入配置文件。
-- 提供多阶段 `Dockerfile`（构建前端 + 编译服务端 + slim 运行时，uid 10001），`deploy/soul/` 有 docker compose 部署样例；容器内「重启网关」等价于进程退出，依赖 restart 策略复活。
-- 公网暴露时建议前置反向代理（TLS 终止），并妥善保管 token。
+- 管理令牌由 `--admin-token` / `MOONBRIDGE_ADMIN_TOKEN` 提供，仅用于管理 API，不保存、不回显。网关令牌由 `--gateway-token` / `MOONBRIDGE_GATEWAY_TOKEN` 或既有配置提供，不能为空，也不能与管理令牌相同。
+- 从旧版共享令牌升级时，将旧值放入 `MOONBRIDGE_GATEWAY_TOKEN`，另生成不同的管理令牌；模型客户端无需改 key，浏览器改用新管理令牌登录。Web 登录令牌仅保存在页面内存，刷新需重新登录；页面提供 CSP 防护。
+- 管理 API 读取配置时 `authToken` 为 `null`；保存配置传 `null` 或空值保留既有网关令牌，只有显式更新才持久化新网关令牌。无关配置保存不会将环境变量覆盖值写入配置。
+- 提供多阶段 `Dockerfile`（构建前端 + 编译服务端 + slim 运行时，uid 10001），`deploy/soul/` 有 docker compose 部署样例。「重启网关」在进程内优雅排空请求、执行生命周期钩子后重新监听，不依赖 supervisor；状态显示实际绑定地址。每代网关只有一个余额调度器，重启取消旧任务。
+- 公网暴露时建议前置反向代理（TLS 终止），并分别保管两种令牌。
+
+### 凭据存储与升级备份
+
+默认文件数据库对 Provider 与余额查询凭据统一使用 AES-GCM 加密，V13 在事务中迁移旧数据与加密元数据。密钥文件默认位于 `<db>.key`，服务端可用 `--key-file` / `MOONBRIDGE_KEY_FILE` 指定。Unix 文件权限为 `0600`；Windows 使用当前用户 DPAPI 包装密钥，恢复受该账户绑定限制。已有加密数据缺少密钥或密钥错误时拒绝打开，不回退为明文。
+
+备份必须同时保留数据库和密钥文件。升级前另存数据库备份：旧镜像不能直接回滚使用新加密数据库，回退须恢复升级前数据库及其匹配的凭据材料。前端在编辑或查询时仍可能处理凭据，加密保护的是上述字段的静态存储，并非整个数据库、配置或 trace。
+
+### 余额查询安全边界
+
+余额脚本的 HTTP 请求仅可访问同源或明确授权的 origin，默认拒绝私网与云元数据地址。确需访问私网时，在启动环境设置 `MOONBRIDGE_BALANCE_PRIVATE_ORIGINS` 为精确 origin 的 JSON 数组（例如 `["https://balance.internal.example:8443"]`），不能通过卡片 `extra` 自行放行；元数据地址始终禁止。请求不使用系统代理、不跟随重定向，并钉住已校验的 DNS 地址；响应解压后最多 1 MiB，单次 HTTP 最长 30 秒、整张卡片最长 45 秒。
+
+显式配置 `egressProxy` 时，余额 HTTP 会明确报不支持代理，不会静默直连；网关推理请求仍支持代理。脚本返回 `nil` 或非法 `status` 均视为错误。new-api 模板按当前 `data.quota / 500000` 计算美元余额，不使用 `used_quota` 代替余额；Kimi 模板允许仅一个配额窗口可用。
 
 ## 使用方式
 

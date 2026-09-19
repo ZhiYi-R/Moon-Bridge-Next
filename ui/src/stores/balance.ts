@@ -28,17 +28,24 @@ export const useBalanceStore = defineStore("balance", () => {
     refreshingKeys.value = next;
   }
 
-  async function list() {
-    if (!loaded.value) loading.value = true;
-    try {
-      cards.value = await balanceApi.list();
-      loaded.value = true;
-      error.value = null;
-    } catch (e) {
-      error.value = errMsg(e);
-    } finally {
-      loading.value = false;
-    }
+  let listRequest: Promise<void> | null = null;
+
+  function list(): Promise<void> {
+    if (listRequest) return listRequest;
+    loading.value = true;
+    listRequest = (async () => {
+      try {
+        cards.value = await balanceApi.list();
+        loaded.value = true;
+        error.value = null;
+      } catch (e) {
+        error.value = errMsg(e);
+      } finally {
+        loading.value = false;
+        listRequest = null;
+      }
+    })();
+    return listRequest;
   }
 
   /** 保存卡片：后端返回 null，故以本地副本原地更新（保留已有查询结果）。 */
@@ -58,7 +65,7 @@ export const useBalanceStore = defineStore("balance", () => {
     error.value = null;
   }
 
-  /** 刷新卡片：传 keyIndex 只重跑该 key（旋转粒度细化到单张拆分卡）。 */
+  /** 刷新卡片：传 keyIndex 只重跑该 key，旋转标记细化到 key 行。 */
   async function refreshOne(key: string, keyIndex?: number) {
     const mark = keyIndex === undefined ? key : `${key}#${keyIndex}`;
     markRefreshing(mark, true);

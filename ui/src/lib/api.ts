@@ -388,11 +388,11 @@ export interface BalanceResult {
   queriedAt: number;
 }
 
-/** 单个 key 的查询结果：多 key 卡片按 key 拆行，前端逐 key 渲染一张卡。 */
+/** 单个 key 的查询结果：多 key 卡片按 key 拆行，前端在同一卡片内逐 key 渲染。 */
 export interface BalanceKeyResult extends BalanceResult {
   /** key 在卡片解析结果中的序号（0 起）。 */
   keyIndex: number;
-  /** 掩码后的 key 展示标签（如 `sk-kim…LXyw`）；无 key 时为空串。前端只认它，不接触 key 原文。 */
+  /** 查询结果使用掩码标签（如 `sk-kim…LXyw`）；卡片编辑仍会接触原始 key。 */
   keyLabel: string;
 }
 

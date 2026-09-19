@@ -89,8 +89,8 @@ impl AppConfig {
         }
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("读取配置文件失败: {}", path.display()))?;
-        let cfg: AppConfig = toml::from_str(&text)
-            .with_context(|| format!("解析配置文件失败: {}", path.display()))?;
+        let cfg: AppConfig =
+            toml::from_str(&text).map_err(|_| anyhow::anyhow!("解析配置文件失败"))?;
         Ok(cfg)
     }
 

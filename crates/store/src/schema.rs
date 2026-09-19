@@ -265,6 +265,15 @@ const MIGRATIONS: &[Migration] = &[
         version: 12,
         sql: V12,
     },
+    Migration {
+        version: 13,
+        sql: "CREATE TABLE encryption_metadata (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            scheme TEXT NOT NULL,
+            verifier TEXT NOT NULL
+        );
+        INSERT INTO encryption_metadata (id, scheme, verifier) VALUES (1, 'plaintext', '');",
+    },
 ];
 
 /// 对连接执行 migration（幂等）。
@@ -276,19 +285,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         );",
     )?;
 
-    let current: i32 = conn.query_row(
-        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-        [],
-        |r| r.get(0),
-    )?;
-
     for m in MIGRATIONS {
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        let current = current_version(&tx)?;
         if m.version > current {
-            // 每个版本整体包在一个事务里（SQLite 的 DDL 支持事务）：多语句
-            // migration（如 V3 建表+搬数据+删列）中途失败会整体回滚、版本号
-            // 不落，下次启动可干净重试；裸 execute_batch 会留下半成品 schema，
-            // 重跑即报「duplicate column / no such column」，DB 永久损坏。
-            let tx = conn.unchecked_transaction()?;
             tx.execute_batch(m.sql)?;
             tx.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (?1, ?2)",
@@ -296,6 +297,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             )?;
             tx.commit()?;
             tracing::info!(version = m.version, "已应用数据库 migration");
+        } else {
+            tx.commit()?;
         }
     }
     Ok(())

@@ -1,8 +1,7 @@
 //! `/api/*` 管理 REST API 的 HTTP 级集成测试。
 //!
-//! 全部走内存 Router + `tower::ServiceExt::oneshot`：不绑定真实端口，也不触碰
-//! `POST /api/gateway/restart`（该 handler 会 spawn 一个 500ms 后
-//! `std::process::exit(0)` 的任务，在测试进程内调用会杀掉整个 test harness）。
+//! 全部走内存 Router + `tower::ServiceExt::oneshot`，由 fixture 显式标记监听状态。
+//! 不绑定真实端口；重启请求只验证生命周期状态，不验证实际监听器重建。
 //!
 //! 每个测试用「进程 pid + tag」隔离的临时目录（不引入 tempfile 依赖，与
 //! `src-tauri/src/state.rs` 的测试模式一致），`Harness` 析构时清理。
@@ -31,6 +30,8 @@ struct Harness {
     db: Arc<Database>,
     paths: AppPaths,
     config: Arc<RwLock<AppConfig>>,
+    persisted_config: Arc<RwLock<AppConfig>>,
+    lifecycle: Arc<moonbridge_server::lifecycle::Lifecycle>,
     dir: PathBuf,
 }
 
@@ -39,7 +40,18 @@ impl Harness {
         Self::with_config(tag, AppConfig::default())
     }
 
-    fn with_config(tag: &str, config: AppConfig) -> Self {
+    fn with_config(tag: &str, mut config: AppConfig) -> Self {
+        config
+            .gateway
+            .auth_token
+            .get_or_insert_with(|| "fixture-gateway-token".into());
+        Self::with_configs(tag, config.clone(), config)
+    }
+
+    fn with_configs(tag: &str, config: AppConfig, persisted: AppConfig) -> Self {
+        let gateway_token = config.gateway.auth_token.as_deref().unwrap();
+        assert!(!gateway_token.trim().is_empty());
+        assert_ne!(gateway_token.trim(), TOKEN);
         let dir = std::env::temp_dir().join(format!(
             "moonbridge-server-http-{}-{tag}",
             std::process::id()
@@ -47,12 +59,19 @@ impl Harness {
         let _ = std::fs::remove_dir_all(&dir);
         let paths = AppPaths::resolve(dir.join("config"), dir.join("data"));
         paths.ensure_dirs().unwrap();
+        persisted.save(&paths.config_file).unwrap();
         let config = Arc::new(RwLock::new(config));
+        let persisted_config = Arc::new(RwLock::new(persisted));
+        let lifecycle = Arc::new(moonbridge_server::lifecycle::Lifecycle::default());
+        assert!(lifecycle.begin_start());
+        lifecycle.listening("127.0.0.1:43210".parse().unwrap());
         let db = Arc::new(Database::open_in_memory().unwrap());
         let state = AdminState {
             db: db.clone(),
             paths: paths.clone(),
             config: config.clone(),
+            persisted_config: persisted_config.clone(),
+            lifecycle: lifecycle.clone(),
             admin_token: Arc::new(TOKEN.to_string()),
             catalog: reqwest::Client::new(),
         };
@@ -62,6 +81,8 @@ impl Harness {
             db,
             paths,
             config,
+            persisted_config,
+            lifecycle,
             dir,
         }
     }
@@ -197,6 +218,141 @@ async fn auth_rejects_missing_and_wrong_token() {
     let (status, body) = h.get("/api/settings").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.is_array(), "设置列表应为数组: {body}");
+}
+
+#[tokio::test]
+async fn auth_requires_a_single_bearer_header() {
+    let h = Harness::new("auth-strict-bearer");
+    for headers in [
+        vec![TOKEN.to_string()],
+        vec![format!("Basic {TOKEN}")],
+        vec![format!("Bearer  {TOKEN}")],
+        vec![format!("Bearer {TOKEN} ")],
+        vec![format!("Bearer {TOKEN}, Bearer {TOKEN}")],
+        vec![format!("Bearer {TOKEN}"), format!("Bearer {TOKEN}")],
+        vec![format!("Bearer {TOKEN}"), "Bearer wrong-token".into()],
+        vec!["Bearer wrong-token".into(), format!("Bearer {TOKEN}")],
+    ] {
+        let mut request = Request::builder().uri("/api/config");
+        for value in headers {
+            request = request.header(header::AUTHORIZATION, value);
+        }
+        let response = h
+            .router
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    for scheme in ["Bearer", "bearer", "BEARER"] {
+        let request = Request::builder()
+            .uri("/api/config")
+            .header(header::AUTHORIZATION, format!("{scheme} {TOKEN}"))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            h.router.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
+}
+
+#[tokio::test]
+async fn unauthorized_config_and_restart_requests_have_no_side_effects() {
+    let mut config = AppConfig::default();
+    config.gateway.auth_token = Some("gateway-only-token".into());
+    let h = Harness::with_config("auth-mutations", config);
+    let before = std::fs::read(&h.paths.config_file).unwrap();
+    let (_, mut update) = h.get("/api/config").await;
+    update["logLevel"] = json!("error");
+    update["gateway"]["authToken"] = json!("injected-gateway-token");
+    for token in [None, Some("wrong-token"), Some("gateway-only-token")] {
+        let (status, raw) = h
+            .raw(
+                Method::PUT,
+                "/api/config",
+                token,
+                Some("application/json"),
+                update.to_string().into_bytes(),
+            )
+            .await;
+        assert_error(status, &parse_json(&raw), StatusCode::UNAUTHORIZED);
+        let (status, raw) = h
+            .raw(
+                Method::POST,
+                "/api/gateway/restart",
+                token,
+                None,
+                Vec::new(),
+            )
+            .await;
+        assert_error(status, &parse_json(&raw), StatusCode::UNAUTHORIZED);
+        assert_eq!(std::fs::read(&h.paths.config_file).unwrap(), before);
+        assert_eq!(h.config.read().unwrap().log_level, "info");
+        assert_eq!(
+            h.config.read().unwrap().gateway.auth_token.as_deref(),
+            Some("gateway-only-token")
+        );
+        assert_eq!(
+            h.lifecycle.snapshot().phase,
+            moonbridge_server::lifecycle::Phase::Running
+        );
+    }
+}
+
+#[tokio::test]
+async fn merged_router_keeps_models_public_and_credentials_separate() {
+    let mut config = AppConfig::default();
+    config.gateway.auth_token = Some("gateway-only-token".into());
+    let mut h = Harness::with_config("auth-merged", config);
+    let state =
+        moonbridge_gateway::bootstrap(h.config.read().unwrap().gateway.clone(), h.db.clone())
+            .unwrap();
+    h.router = h
+        .router
+        .clone()
+        .merge(moonbridge_gateway::server::router(state));
+    for uri in ["/v1/models", "/models"] {
+        for token in [None, Some("wrong-token")] {
+            let (status, raw) = h.raw(Method::GET, uri, token, None, Vec::new()).await;
+            assert_eq!(status, StatusCode::OK, "{raw}");
+            assert!(parse_json(&raw)["data"].is_array());
+        }
+    }
+    let (status, raw) = h
+        .raw(
+            Method::GET,
+            "/api/config",
+            Some("gateway-only-token"),
+            None,
+            Vec::new(),
+        )
+        .await;
+    assert_error(status, &parse_json(&raw), StatusCode::UNAUTHORIZED);
+    for uri in [
+        "/v1/chat/completions",
+        "/v1/responses",
+        "/responses",
+        "/v1/messages",
+    ] {
+        let request = json!({"model": "missing-model", "messages": [{"role": "user", "content": "hello"}], "input": "hello", "max_tokens": 1});
+        let (status, _) = h
+            .raw(
+                Method::POST,
+                uri,
+                Some(TOKEN),
+                Some("application/json"),
+                request.to_string().into_bytes(),
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "管理 token 不应拥有网关权限: {uri}"
+        );
+    }
+    assert_eq!(h.get("/api/config").await.0, StatusCode::OK);
 }
 
 #[tokio::test]
@@ -1014,16 +1170,14 @@ async fn app_info_reports_server_mode_and_paths() {
 }
 
 #[tokio::test]
-async fn gateway_status_is_running_and_follows_config() {
+async fn gateway_status_reports_listener_not_pending_config() {
     let h = Harness::new("gateway-status");
-
     let (status, body) = h.get("/api/gateway/status").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["running"], json!(true));
-    assert_eq!(body["addr"], json!("127.0.0.1:38440"));
+    assert_eq!(body["phase"], json!("running"));
+    assert_eq!(body["addr"], json!("127.0.0.1:43210"));
     assert_eq!(body["error"], Value::Null);
-
-    // 状态读取当前配置，而非启动时的快照
     let mut config = h.config.read().unwrap().clone();
     config.gateway.addr = "0.0.0.0:39999".to_string();
     let (status, _) = h
@@ -1034,56 +1188,240 @@ async fn gateway_status_is_running_and_follows_config() {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
-    let (_, body) = h.get("/api/gateway/status").await;
+    let (status, body) = h.get("/api/gateway/status").await;
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(body["running"], json!(true));
-    assert_eq!(body["addr"], json!("0.0.0.0:39999"));
+    assert_eq!(body["addr"], json!("127.0.0.1:43210"));
+    assert_eq!(h.config.read().unwrap().gateway.addr, "0.0.0.0:39999");
 }
 
-/// 关键安全语义：`PUT /api/config` 落盘时 `authToken` 被强制回填为启动 token，
-/// 攻击者通过 API 传入的 token 绝不写进 `config.toml`。
 #[tokio::test]
-async fn config_put_persists_file_and_pins_boot_token() {
-    let h = Harness::new("config-put");
-    let config_file = h.paths.config_file.clone();
-    assert!(!config_file.exists(), "初始未落盘");
-
-    let mut config = h.config.read().unwrap().clone();
-    config.log_level = "warn".to_string();
-    config.gateway.addr = "127.0.0.1:41234".to_string();
-    config.gateway.auth_token = Some("attacker-token".to_string());
-
-    let (status, body) = h
-        .json(
-            Method::PUT,
-            "/api/config",
-            serde_json::to_value(&config).unwrap(),
-        )
+async fn gateway_restart_coalesces_and_does_not_override_stop() {
+    let h = Harness::new("gateway-restart");
+    for _ in 0..2 {
+        let (status, body) = h
+            .json(Method::POST, "/api/gateway/restart", Value::Null)
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["message"], json!("restarting"));
+    }
+    let (_, body) = h.get("/api/gateway/status").await;
+    assert_eq!(body["phase"], json!("restarting"));
+    assert_eq!(body["running"], json!(false));
+    h.lifecycle.request_stop();
+    let (status, _) = h
+        .json(Method::POST, "/api/gateway/restart", Value::Null)
         .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body, Value::Null);
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let (_, body) = h.get("/api/gateway/status").await;
+    assert_eq!(body["phase"], json!("stopping"));
+    assert_eq!(body["running"], json!(false));
+    assert!(!h.lifecycle.begin_start());
+}
 
-    let text = std::fs::read_to_string(&config_file).expect("PUT /api/config 应落盘 config.toml");
-    assert!(
-        !text.contains("attacker-token"),
-        "攻击者提供的 token 绝不能写盘:\n{text}"
-    );
-    assert!(text.contains(TOKEN), "写盘应为启动 token:\n{text}");
+#[tokio::test]
+async fn config_get_is_redacted_and_round_trip_preserves_separate_tokens() {
+    let mut runtime = AppConfig::default();
+    runtime.gateway.auth_token = Some("environment-gateway-token".into());
+    let mut persisted = AppConfig::default();
+    persisted.gateway.auth_token = Some("persisted-gateway-token".into());
+    let h = Harness::with_configs("config-redacted-roundtrip", runtime, persisted);
+    for token_value in [None, Some(Value::Null), Some(json!("")), Some(json!("   "))] {
+        let (status, mut body) = h.get("/api/config").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["gateway"].get("authToken"), Some(&Value::Null));
+        let text = body.to_string();
+        assert!(!text.contains(TOKEN));
+        assert!(!text.contains("environment-gateway-token"));
+        assert!(!text.contains("persisted-gateway-token"));
+        body["logLevel"] = json!("warn");
+        match token_value {
+            Some(value) => body["gateway"]["authToken"] = value,
+            None => {
+                body["gateway"].as_object_mut().unwrap().remove("authToken");
+            }
+        }
+        let (status, response) = h.json(Method::PUT, "/api/config", body).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response, Value::Null);
+        assert_eq!(
+            h.config.read().unwrap().gateway.auth_token.as_deref(),
+            Some("environment-gateway-token")
+        );
+        assert_eq!(
+            h.persisted_config
+                .read()
+                .unwrap()
+                .gateway
+                .auth_token
+                .as_deref(),
+            Some("persisted-gateway-token")
+        );
+        let reloaded = AppConfig::load_or_default(&h.paths.config_file).unwrap();
+        assert_eq!(reloaded.log_level, "warn");
+        assert_eq!(
+            reloaded.gateway.auth_token.as_deref(),
+            Some("persisted-gateway-token")
+        );
+        let text = std::fs::read_to_string(&h.paths.config_file).unwrap();
+        assert!(!text.contains(TOKEN));
+        assert!(!text.contains("environment-gateway-token"));
+    }
+}
 
-    // 内存中的配置同样被钉住
-    let (status, body) = h.get("/api/config").await;
+#[tokio::test]
+async fn unrelated_config_put_does_not_persist_environment_gateway_token() {
+    let mut runtime = AppConfig::default();
+    runtime.gateway.auth_token = Some("environment-only-token".into());
+    let h = Harness::with_configs("config-environment-only", runtime, AppConfig::default());
+    let (_, mut body) = h.get("/api/config").await;
+    body["logLevel"] = json!("debug");
+    let (status, _) = h.json(Method::PUT, "/api/config", body).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["gateway"]["authToken"], json!(TOKEN));
-    assert_eq!(body["logLevel"], json!("warn"));
-    assert_eq!(body["gateway"]["addr"], json!("127.0.0.1:41234"));
     assert_eq!(
         h.config.read().unwrap().gateway.auth_token.as_deref(),
-        Some(TOKEN)
+        Some("environment-only-token")
     );
+    assert!(AppConfig::load_or_default(&h.paths.config_file)
+        .unwrap()
+        .gateway
+        .auth_token
+        .is_none());
+    let text = std::fs::read_to_string(&h.paths.config_file).unwrap();
+    assert!(!text.contains("environment-only-token"));
+    assert!(!text.contains(TOKEN));
+}
 
-    // 往返可读
-    let reloaded = AppConfig::load_or_default(&config_file).unwrap();
+#[tokio::test]
+async fn config_put_can_explicitly_rotate_gateway_token_but_not_admin_token() {
+    let h = Harness::new("config-put");
+    let (_, mut body) = h.get("/api/config").await;
+    body["logLevel"] = json!("warn");
+    body["gateway"]["addr"] = json!("127.0.0.1:41234");
+    body["gateway"]["authToken"] = json!(" rotated-gateway-token ");
+    let (status, response) = h.json(Method::PUT, "/api/config", body).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response, Value::Null);
+    let reloaded = AppConfig::load_or_default(&h.paths.config_file).unwrap();
     assert_eq!(reloaded.log_level, "warn");
-    assert_eq!(reloaded.gateway.auth_token.as_deref(), Some(TOKEN));
+    assert_eq!(reloaded.gateway.addr, "127.0.0.1:41234");
+    assert_eq!(
+        reloaded.gateway.auth_token.as_deref(),
+        Some("rotated-gateway-token")
+    );
+    assert_eq!(
+        h.config.read().unwrap().gateway.auth_token.as_deref(),
+        Some("rotated-gateway-token")
+    );
+    let (status, body) = h.get("/api/config").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["gateway"].get("authToken"), Some(&Value::Null));
+    assert_eq!(body["logLevel"], json!("warn"));
+    assert_eq!(body["gateway"]["addr"], json!("127.0.0.1:41234"));
+    let before = std::fs::read(&h.paths.config_file).unwrap();
+    for token in [TOKEN.to_string(), format!(" {TOKEN} ")] {
+        let mut rejected = body.clone();
+        rejected["gateway"]["authToken"] = json!(token);
+        let (status, response) = h.json(Method::PUT, "/api/config", rejected).await;
+        assert_error(status, &response, StatusCode::BAD_REQUEST);
+        assert!(!response.to_string().contains(TOKEN));
+        assert_eq!(std::fs::read(&h.paths.config_file).unwrap(), before);
+        assert_eq!(
+            h.config.read().unwrap().gateway.auth_token.as_deref(),
+            Some("rotated-gateway-token")
+        );
+        assert_eq!(
+            h.persisted_config
+                .read()
+                .unwrap()
+                .gateway
+                .auth_token
+                .as_deref(),
+            Some("rotated-gateway-token")
+        );
+    }
+    let (status, _) = h
+        .raw(
+            Method::GET,
+            "/api/config",
+            Some("rotated-gateway-token"),
+            None,
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(h.get("/api/config").await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn invalid_gateway_tokens_reject_the_entire_config_update() {
+    let mut runtime = AppConfig::default();
+    runtime.gateway.auth_token = Some("runtime-private-token".into());
+    let mut persisted = AppConfig::default();
+    persisted.gateway.auth_token = Some("persisted-private-token".into());
+    let h = Harness::with_configs("config-invalid-token", runtime, persisted);
+    let runtime_before = serde_json::to_value(&*h.config.read().unwrap()).unwrap();
+    let persisted_before = serde_json::to_value(&*h.persisted_config.read().unwrap()).unwrap();
+    let disk_before = std::fs::read(&h.paths.config_file).unwrap();
+    let (status, original) = h.get("/api/config").await;
+    assert_eq!(status, StatusCode::OK);
+    for token in [
+        "private secret",
+        "private\tsecret",
+        "private\nsecret",
+        "private\rsecret",
+        "private\0secret",
+        "private\u{1f}secret",
+        "private\u{7f}secret",
+        "private令牌secret",
+        "private\u{a0}secret",
+    ] {
+        let mut update = original.clone();
+        update["gateway"]["authToken"] = json!(token);
+        update["gateway"]["addr"] = json!("127.0.0.1:41234");
+        update["logLevel"] = json!("error");
+        let (status, response) = h.json(Method::PUT, "/api/config", update).await;
+        assert_error(status, &response, StatusCode::BAD_REQUEST);
+        let response = response.to_string();
+        assert!(!response.contains("private"));
+        assert!(!response.contains("secret"));
+        assert!(!response.contains(TOKEN));
+        assert_eq!(
+            serde_json::to_value(&*h.config.read().unwrap()).unwrap(),
+            runtime_before
+        );
+        assert_eq!(
+            serde_json::to_value(&*h.persisted_config.read().unwrap()).unwrap(),
+            persisted_before
+        );
+        assert_eq!(std::fs::read(&h.paths.config_file).unwrap(), disk_before);
+        let (status, current) = h.get("/api/config").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(current, original);
+    }
+}
+
+#[tokio::test]
+async fn failed_config_write_does_not_change_runtime_or_persisted_state() {
+    let mut config = AppConfig::default();
+    config.gateway.auth_token = Some("original-gateway-token".into());
+    let h = Harness::with_config("config-write-failure", config);
+    let (_, mut body) = h.get("/api/config").await;
+    body["gateway"]["authToken"] = json!("uncommitted-gateway-token");
+    body["logLevel"] = json!("error");
+    std::fs::remove_file(&h.paths.config_file).unwrap();
+    std::fs::create_dir(&h.paths.config_file).unwrap();
+    let (status, response) = h.json(Method::PUT, "/api/config", body).await;
+    assert_error(status, &response, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!response.to_string().contains("uncommitted-gateway-token"));
+    for config in [&h.config, &h.persisted_config] {
+        let config = config.read().unwrap();
+        assert_eq!(
+            config.gateway.auth_token.as_deref(),
+            Some("original-gateway-token")
+        );
+        assert_eq!(config.log_level, "info");
+    }
 }
 
 // ───────────────────────── 余额&健康看板 ─────────────────────────
@@ -1093,6 +1431,7 @@ const BALANCE_SCRIPT: &str = r#"
 MB = {}
 function MB.query(ctx)
   return {
+    status = "ok",
     quotas = { { label = "每周窗口", used_percent = 43, reset_at = "t" } },
     summary = "余额正常",
   }
@@ -1248,7 +1587,7 @@ async fn balance_manual_keys_override_provider_via_api() {
     MB = {}
     function MB.query(ctx)
       assert(#ctx.keys == 1 and ctx.keys[1] == ctx.key)
-      return { summary = ctx.key }
+      return { status = "ok", summary = ctx.key }
     end
     "#
     );

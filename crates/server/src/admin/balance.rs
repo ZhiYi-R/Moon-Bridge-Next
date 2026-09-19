@@ -16,7 +16,11 @@ use super::{require, AdminState, ApiError, ApiResult};
 
 /// 构造执行引擎：脚本目录与插件脚本走同一套包含性约束（见 `parse_script_ref`）。
 fn engine(state: &AdminState) -> BalanceEngine {
-    BalanceEngine::new(state.db.clone(), Some(state.paths.plugins_dir.clone()))
+    BalanceEngine::new(state.db.clone(), Some(state.paths.plugins_dir.clone())).with_network_policy(
+        moonbridge_gateway::BalanceNetworkPolicy::from_environment(
+            state.config().gateway.egress_proxy,
+        ),
+    )
 }
 
 /// GET /api/balance/cards
@@ -67,7 +71,7 @@ pub async fn balance_card_refresh(
         .map(|s| s.parse::<i64>())
         .transpose()
         .map_err(|_| ApiError::bad_request("key_index 必须是整数"))?;
-    Ok(Json(engine(&state).refresh_card(&card, key_index).await))
+    Ok(Json(engine(&state).refresh_card(&card, key_index).await?))
 }
 
 /// POST /api/balance/refresh：串行刷新全部**启用**的卡片，返回刷新后**全部**卡片的
@@ -75,7 +79,7 @@ pub async fn balance_card_refresh(
 pub async fn balance_refresh_all(
     State(state): State<AdminState>,
 ) -> ApiResult<Json<Vec<BalanceCardView>>> {
-    Ok(Json(engine(&state).refresh_all().await))
+    Ok(Json(engine(&state).refresh_all().await?))
 }
 
 /// POST /api/balance/test：以请求体里的卡片配置 dry-run 一次脚本（**不写库、不要求

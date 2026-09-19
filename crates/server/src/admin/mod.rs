@@ -15,7 +15,7 @@ pub mod trace;
 use std::sync::{Arc, RwLock};
 
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
@@ -38,8 +38,10 @@ pub struct AdminState {
     pub db: Arc<Database>,
     /// 关键路径集合（trace / 插件脚本包含性校验用）。
     pub paths: AppPaths,
-    /// 引导配置；`PUT /api/config` 与插件启用门控读取它。
+    /// 运行时引导配置，包含只驻留内存的启动覆盖。
     pub config: Arc<RwLock<AppConfig>>,
+    pub persisted_config: Arc<RwLock<AppConfig>>,
+    pub lifecycle: Arc<crate::lifecycle::Lifecycle>,
     /// 管理 API 的 Bearer token（只驻留内存）。
     pub admin_token: Arc<String>,
     /// 目录拉取用 HTTP 客户端（30s 超时，直连不走 egress）。
@@ -47,22 +49,40 @@ pub struct AdminState {
 }
 
 impl AdminState {
-    /// 当前引导配置的快照。
     pub fn config(&self) -> AppConfig {
         self.config.read().unwrap().clone()
     }
 
-    /// 整体替换引导配置并落盘（对齐桌面端 `config_set`）。
-    ///
-    /// `auth_token` 强制为启动参数注入的 admin token：命令行传入的凭据只驻留内存，
-    /// 绝不因管理 API 的整体替换而被回写进 `config.toml`（否则 token 会随文件落盘）。
     pub fn replace_config(&self, mut config: AppConfig) -> anyhow::Result<()> {
-        config.gateway.auth_token = Some((*self.admin_token).clone());
-        let mut guard = self.config.write().unwrap();
-        *guard = config;
-        let snapshot = guard.clone();
-        drop(guard);
-        snapshot.save(&self.paths.config_file)
+        let requested_token = config
+            .gateway
+            .auth_token
+            .take()
+            .map(|token| token.trim().to_string())
+            .filter(|token| !token.is_empty());
+        if let Some(token) = requested_token.as_deref() {
+            if !moonbridge_gateway::auth::token_is_valid(token)
+                || token == self.admin_token.as_str()
+            {
+                anyhow::bail!(
+                    "gateway token 必须是不含空白的可打印 ASCII 字符，且不同于 admin token"
+                );
+            }
+        }
+        let mut runtime = self.config.write().unwrap();
+        let mut persisted = self.persisted_config.write().unwrap();
+        let mut snapshot = config.clone();
+        snapshot.gateway.auth_token = requested_token
+            .clone()
+            .or_else(|| persisted.gateway.auth_token.clone());
+        if snapshot.gateway.auth_token.as_deref() == Some(self.admin_token.as_str()) {
+            snapshot.gateway.auth_token = None;
+        }
+        config.gateway.auth_token = requested_token.or_else(|| runtime.gateway.auth_token.clone());
+        snapshot.save(&self.paths.config_file)?;
+        *persisted = snapshot;
+        *runtime = config;
+        Ok(())
     }
 }
 
@@ -250,13 +270,7 @@ pub fn router(state: AdminState) -> Router {
 
 /// Bearer 认证中间件：`Authorization: Bearer <admin_token>`，失败 401。
 async fn auth(State(state): State<AdminState>, req: Request, next: Next) -> Response {
-    let provided = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let provided = provided.strip_prefix("Bearer ").unwrap_or(provided);
-    if provided != state.admin_token.as_str() {
+    if !moonbridge_gateway::auth::bearer_matches(req.headers(), state.admin_token.as_str()) {
         return ApiError {
             status: StatusCode::UNAUTHORIZED,
             message: "无效或缺失的 Bearer token".to_string(),
@@ -268,33 +282,30 @@ async fn auth(State(state): State<AdminState>, req: Request, next: Next) -> Resp
 
 // ───────────────────────── 网关生命周期 ─────────────────────────
 
-/// 网关运行状态（对齐桌面端 `GatewayStatus`）。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayStatus {
     pub running: bool,
     pub addr: String,
     pub error: Option<String>,
+    pub phase: crate::lifecycle::Phase,
 }
 
-/// 重启网关：服务端与网关同进程，重启即退出进程交给外部（容器 / supervisor）重新拉起。
-async fn gateway_restart() -> impl IntoResponse {
-    tokio::spawn(async {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        std::process::exit(0);
-    });
+async fn gateway_restart(State(state): State<AdminState>) -> impl IntoResponse {
+    state.lifecycle.request_restart();
     (
         StatusCode::ACCEPTED,
         Json(serde_json::json!({ "message": "restarting" })),
     )
 }
 
-/// 网关状态：服务端自身即网关，恒为运行中。
 async fn gateway_status(State(state): State<AdminState>) -> ApiResult<Json<GatewayStatus>> {
+    let snapshot = state.lifecycle.snapshot();
     Ok(Json(GatewayStatus {
-        running: true,
-        addr: state.config().gateway.addr,
-        error: None,
+        running: snapshot.running,
+        addr: snapshot.addr,
+        error: snapshot.error,
+        phase: snapshot.phase,
     }))
 }
 
@@ -327,13 +338,28 @@ async fn app_info(State(state): State<AdminState>) -> ApiResult<Json<AppInfo>> {
 }
 
 async fn config_get(State(state): State<AdminState>) -> ApiResult<Json<AppConfig>> {
-    Ok(Json(state.config()))
+    let mut config = state.config();
+    config.gateway.auth_token = None;
+    Ok(Json(config))
 }
 
 async fn config_set(
     State(state): State<AdminState>,
     Json(config): Json<AppConfig>,
 ) -> ApiResult<Json<Value>> {
+    if let Some(token) = config
+        .gateway
+        .auth_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        if !moonbridge_gateway::auth::token_is_valid(token) || token == state.admin_token.as_str() {
+            return Err(ApiError::bad_request(
+                "gateway token 必须是不含空白的可打印 ASCII 字符，且不同于 admin token",
+            ));
+        }
+    }
     state.replace_config(config)?;
     Ok(Json(Value::Null))
 }

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { Pencil, Plus, RefreshCw, Trash2 } from "lucide-vue-next";
-import { computed, onActivated, onMounted, reactive, ref } from "vue";
+import { computed, onActivated, onMounted, reactive, ref, watch } from "vue";
 
+import BalanceScriptGuide from "@/components/balance/BalanceScriptGuide.vue";
 import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
 import Card from "@/components/ui/Card.vue";
@@ -18,7 +19,7 @@ import { BALANCE_TEMPLATES, DEFAULT_BALANCE_SCRIPT, type BalanceTemplate } from 
 import { cn, formatTime } from "@/lib/utils";
 import { useBalanceStore } from "@/stores/balance";
 
-/** 新建卡片与文件脚本站位用的默认内联脚本（模板库的「通用百分比」）。 */
+/** 新建卡片的默认内联脚本（模板库的「通用百分比」）。 */
 const DEFAULT_SCRIPT = DEFAULT_BALANCE_SCRIPT;
 
 /** 显示样式选项（卡片快捷切换与编辑表单同源）。 */
@@ -100,11 +101,11 @@ function hasPercent(q: BalanceQuota): boolean {
   return typeof q.usedPercent === "number" || typeof q.leftPercent === "number";
 }
 
-/** 该条在该展示样式下是否走金额口径：auto 看有没有 usedAmount，percent/amount 由卡片强制。 */
+/** 自动模式识别任一金额字段，包括零余额。 */
 function isAmountMode(mode: DisplayMode, q: BalanceQuota): boolean {
   if (mode === "amount") return true;
   if (mode === "percent") return false;
-  return typeof q.usedAmount === "number";
+  return typeof q.usedAmount === "number" || typeof q.leftAmount === "number";
 }
 
 /** 金额文案「消耗 x{unit} · 余额 y{unit}」；used/left 都缺时返回 null。
@@ -233,35 +234,20 @@ function cardBindingText(c: BalanceCardView): string {
   const count = manualKeys(c.apiKey).length;
   const target = count > 0
     ? `${c.providerKey ? `${c.providerKey} · ` : ""}手动 Key（${count} 个）`
-    : c.providerKey || "无 Key 查询";
+    : c.providerKey || "未配置 Key";
   const url = (c.baseUrl ?? "").trim();
   return url ? `${target} · ${url}` : target;
 }
 
-/** 一张配置卡展开成逐 key 的渲染行：有结果时每个 key 一行（拆成独立卡片展示），
- *  从未查询过时补一行 `result: null` 的「未查询」占位卡。 */
-interface CardRow {
-  card: BalanceCardView;
-  result: BalanceKeyResult | null;
-}
-
-function rowsOf(c: BalanceCardView): CardRow[] {
-  if (c.results.length === 0) return [{ card: c, result: null }];
-  return c.results.map((result) => ({ card: c, result }));
-}
-
 /** 单 key 刷新的旋转标记（与 store 的粒度口径一致）。 */
-function refreshMark(c: BalanceCardView, r: BalanceKeyResult | null): string {
-  return r ? `${c.key}#${r.keyIndex}` : c.key;
+function refreshMark(c: BalanceCardView, r: BalanceKeyResult): string {
+  return `${c.key}#${r.keyIndex}`;
 }
 
 // ── 加载与查询 ──
 
 onMounted(() => store.list());
-// 路由缓存复用：有数据时静默刷新，不闪整页 loading
-onActivated(() => {
-  if (store.loaded) store.list();
-});
+onActivated(() => store.list());
 
 async function refreshAll() {
   error.value = null;
@@ -285,6 +271,7 @@ async function refreshOne(key: string, keyIndex?: number) {
 // ── 编辑 ──
 
 function newCard() {
+  invalidatePreview();
   isNew.value = true;
   Object.assign(form, {
     key: "",
@@ -310,6 +297,7 @@ function newCard() {
 function editCard(key: string) {
   const c = store.cards.find((x) => x.key === key);
   if (!c) return;
+  invalidatePreview();
   isNew.value = false;
   // scriptRef 为 .lua 路径时走文件引用；存脚本原文时填入内联编辑器
   const isPath = c.scriptRef.trim().toLowerCase().endsWith(".lua");
@@ -322,7 +310,7 @@ function editCard(key: string) {
     intervalSecs: c.intervalSecs,
     enabled: c.enabled,
     scriptRef: isPath ? c.scriptRef : "",
-    inlineScript: isPath ? DEFAULT_SCRIPT : c.scriptRef,
+    inlineScript: isPath ? "" : c.scriptRef,
     extraText: JSON.stringify(c.extra ?? {}, null, 2),
   });
   error.value = null;
@@ -338,7 +326,7 @@ async function closeModal() {
   if (await guardClose()) editing.value = false;
 }
 
-// ── 新建卡片的模板填充：选中即把脚本与建议默认值（URL/额外参数/间隔）填入表单 ──
+// ── 模板填充：切换到内联脚本并填入建议默认值 ──
 const templateId = ref("");
 
 const templateOptions = BALANCE_TEMPLATES.map((t) => ({ value: t.id, label: t.label }));
@@ -347,11 +335,12 @@ const selectedTemplate = computed<BalanceTemplate | undefined>(() =>
   BALANCE_TEMPLATES.find((t) => t.id === templateId.value),
 );
 
-/** 应用模板：覆盖脚本编辑区，并填入模板自带的建议表单值（未携带的字段不动）。 */
+/** 应用模板：切换到内联来源，并填入建议表单值（未携带的字段不动）。 */
 function applyTemplate(id: string) {
   templateId.value = id;
   const t = selectedTemplate.value;
   if (!t) return;
+  form.scriptRef = "";
   form.inlineScript = t.script;
   if (t.baseUrl !== undefined) form.baseUrl = t.baseUrl;
   if (t.extraText !== undefined) form.extraText = t.extraText;
@@ -376,42 +365,61 @@ function testLocalError(message: string) {
   ];
 }
 
-async function runTest() {
-  formError.value = null;
+let previewRequestId = 0;
+
+function invalidatePreview() {
+  previewRequestId += 1;
   testResult.value = null;
-  const scriptRef = form.scriptRef.trim() || form.inlineScript;
+  testing.value = false;
+}
+
+watch([() => JSON.stringify(form), editing], invalidatePreview, { flush: "sync" });
+
+async function runTest() {
+  invalidatePreview();
+  if (!editing.value) return;
+  const requestId = previewRequestId;
+  const input = { ...form };
+  const inputSnapshot = JSON.stringify(input);
+  const isCurrent = () => editing.value
+    && requestId === previewRequestId
+    && JSON.stringify(form) === inputSnapshot;
+  formError.value = null;
+  const scriptRef = input.scriptRef.trim() || input.inlineScript;
   if (!scriptRef.trim()) return testLocalError("请先填写脚本路径或内联脚本");
-  if (!form.providerKey.trim() && formManualKeys.value.length === 0) {
+  const keys = manualKeys(input.apiKey);
+  if (!input.providerKey.trim() && keys.length === 0) {
     return testLocalError("请填写手动 API Key 或选择上游服务");
   }
   let extra: unknown;
   try {
-    extra = JSON.parse(form.extraText || "{}");
+    extra = JSON.parse(input.extraText || "{}");
   } catch {
     return testLocalError("额外参数不是合法 JSON");
   }
-  const existing = store.cards.find((c) => c.key === form.key.trim());
+  const existing = store.cards.find((c) => c.key === input.key.trim());
   testing.value = true;
   try {
-    testResult.value = await balanceApi.test({
-      key: form.key.trim() || "preview",
-      providerKey: form.providerKey.trim() || null,
-      displayMode: form.displayMode,
-      apiKey: formManualKeys.value.join("\n"),
-      baseUrl: form.baseUrl.trim(),
+    const result = await balanceApi.test({
+      key: input.key.trim() || "preview",
+      providerKey: input.providerKey.trim() || null,
+      displayMode: input.displayMode,
+      apiKey: keys.join("\n"),
+      baseUrl: input.baseUrl.trim(),
       providerLabel: "",
       scriptRef,
-      intervalSecs: Number(form.intervalSecs) || 0,
-      enabled: form.enabled,
+      intervalSecs: Number(input.intervalSecs) || 0,
+      enabled: input.enabled,
       extra,
       position: existing?.position ?? 0,
       createdAt: existing?.createdAt ?? 0,
       updatedAt: 0,
     });
+    if (isCurrent()) testResult.value = result;
   } catch (e) {
-    testLocalError(errMsg(e));
+    if (isCurrent()) testLocalError(errMsg(e));
   } finally {
-    testing.value = false;
+    if (isCurrent()) testing.value = false;
   }
 }
 
@@ -517,10 +525,14 @@ async function remove(key: string) {
 <template>
   <div class="flex h-full min-h-0 flex-col gap-4">
     <div
-      v-if="error"
+      v-if="error || store.error"
+      role="alert"
       class="shrink-0 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive"
     >
-      {{ error }}
+      <p>{{ error || store.error }}</p>
+      <Button v-if="store.error" class="mt-2" variant="outline" size="sm" :disabled="store.loading" @click="error = null; store.list()">
+        {{ store.loading ? "加载中…" : "重试加载" }}
+      </Button>
     </div>
 
     <!-- 页头操作 -->
@@ -541,169 +553,102 @@ async function remove(key: string) {
 
     <!-- 空态：引导 + 示例脚本 -->
     <div
-      v-else-if="store.cards.length === 0"
+      v-else-if="store.loaded && !store.error && store.cards.length === 0"
       class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
     >
       <p>还没有余额卡片。手动填写 API Key 或引用上游服务，用 Lua 脚本查询额度并按间隔自动刷新。</p>
       <Button class="mt-4" size="sm" @click="newCard">
         <Plus class="size-4" /> 使用示例脚本新建
       </Button>
+      <BalanceScriptGuide class="mt-4" />
     </div>
 
     <!-- 卡片：按上游服务 key 分组（旧卡遗留展示名兜底） -->
-    <section v-else class="space-y-5">
+    <section v-else-if="store.cards.length > 0" class="space-y-5">
+      <BalanceScriptGuide />
       <div v-for="g in groups" :key="g.label">
         <div class="mb-2 flex items-baseline gap-2">
           <h3 class="text-sm font-medium">{{ g.label }}</h3>
           <span class="text-xs text-muted-foreground">
-            · {{ g.cards.reduce((n, c) => n + Math.max(c.results.length, 1), 0) }}
+            · {{ g.cards.length }} 张卡片
           </span>
         </div>
         <div class="grid gap-4 grid-cols-[repeat(auto-fill,minmax(21rem,1fr))]">
           <template v-for="c in g.cards" :key="c.key">
-            <Card
-              v-for="row in rowsOf(c)"
-              :key="`${c.key}#${row.result?.keyIndex ?? -1}`"
-              class="flex min-w-0 flex-col"
-            >
-            <div class="card-header flex-row items-center justify-between space-y-0">
-              <div class="flex min-w-0 items-center gap-2">
-                <span class="shrink-0 text-xs text-muted-foreground">Key</span>
-                <Badge variant="outline" class="max-w-[12rem] truncate font-mono" :title="c.key">
-                  {{ c.key }}
-                </Badge>
-                <Badge
-                  v-if="row.result?.keyLabel"
-                  variant="secondary"
-                  class="max-w-[10rem] truncate font-mono"
-                  :title="`API Key ${row.result.keyLabel}（掩码展示，原文不落库）`"
-                >
-                  {{ row.result.keyLabel }}
-                </Badge>
-              </div>
-              <Badge v-if="!row.result" variant="secondary" class="shrink-0">未查询</Badge>
-              <Badge
-                v-else
-                :variant="row.result.status === 'ok' ? 'success' : 'destructive'"
-                class="shrink-0"
-              >
-                {{ row.result.status === "ok" ? "正常" : "异常" }}
-              </Badge>
-            </div>
-
-            <div class="card-content space-y-2">
-              <div class="truncate text-xs text-muted-foreground" :title="cardBindingText(c)">
-                {{ cardBindingText(c) }}
-              </div>
-
-              <!-- 工具行：显示样式切换 + 该 key 刷新（从标题行挪出，避免拥挤重叠） -->
-              <div class="flex items-center justify-between gap-2">
-                <div class="flex items-center rounded-md border p-0.5">
-                  <button
-                    v-for="m in DISPLAY_MODES"
-                    :key="m.value"
-                    type="button"
-                    :title="`显示样式：${m.label}`"
-                    :class="
-                      cn(
-                        'rounded px-1.5 py-0.5 text-[11px] transition-colors',
-                        c.displayMode === m.value
-                          ? 'bg-accent text-accent-foreground'
-                          : 'text-muted-foreground hover:bg-accent/60',
-                      )
-                    "
-                    @click="setDisplayMode(c, m.value)"
-                  >
-                    {{ m.label }}
-                  </button>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="size-7"
-                  title="立即查询该 key"
-                  :disabled="store.refreshingKeys.has(refreshMark(c, row.result))"
-                  @click="refreshOne(c.key, row.result?.keyIndex)"
-                >
-                  <RefreshCw
-                    class="size-3.5"
-                    :class="store.refreshingKeys.has(refreshMark(c, row.result)) ? 'animate-spin' : ''"
-                  />
-                </Button>
-              </div>
-
-              <!-- 配额进度条组 -->
-              <div v-if="row.result?.payload?.quotas?.length" class="space-y-2 pt-1">
-                <div v-for="(q, i) in row.result.payload.quotas" :key="i">
-                  <div class="flex items-center justify-between text-xs">
-                    <span class="truncate">{{ q.label }}</span>
-                    <span class="shrink-0 text-muted-foreground tabular-nums">
-                      {{ quotaLine(c.displayMode, q) }}
-                    </span>
-                  </div>
-                  <div
-                    v-if="quotaBarPercent(c.displayMode, q) !== null"
-                    class="mt-1 h-2 w-full overflow-hidden rounded-full bg-muted"
-                  >
-                    <div
-                      class="h-full rounded-full bg-primary"
-                      :style="{ width: (quotaBarPercent(c.displayMode, q) ?? 0) + '%' }"
-                    ></div>
-                  </div>
-                  <div v-if="resetText(q)" class="mt-0.5 text-[11px] text-muted-foreground">
-                    重置 {{ resetText(q) }}
+            <Card class="flex min-w-0 flex-col">
+              <div class="card-header space-y-2">
+                <div class="flex items-center justify-between gap-2">
+                  <Badge variant="outline" class="max-w-[12rem] truncate font-mono" :title="c.key">{{ c.key }}</Badge>
+                  <div class="flex items-center gap-1">
+                    <Button variant="ghost" size="icon" class="size-7" title="编辑卡片" @click="editCard(c.key)">
+                      <Pencil class="size-3.5" />
+                    </Button>
+                    <Button variant="ghost" size="icon" class="size-7" title="删除卡片" @click="remove(c.key)">
+                      <Trash2 class="size-3.5 text-destructive" />
+                    </Button>
                   </div>
                 </div>
+                <div class="truncate text-xs text-muted-foreground" :title="cardBindingText(c)">{{ cardBindingText(c) }}</div>
+                <div class="flex items-center justify-between gap-2">
+                  <div class="flex items-center rounded-md border p-0.5">
+                    <button
+                      v-for="m in DISPLAY_MODES"
+                      :key="m.value"
+                      type="button"
+                      :title="`显示样式：${m.label}`"
+                      :class="cn('rounded px-1.5 py-0.5 text-[11px] transition-colors', c.displayMode === m.value ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:bg-accent/60')"
+                      @click="setDisplayMode(c, m.value)"
+                    >{{ m.label }}</button>
+                  </div>
+                  <span class="text-[11px] text-muted-foreground">{{ intervalText(c.intervalSecs) }}</span>
+                  <Badge v-if="!c.enabled" variant="secondary">停用</Badge>
+                </div>
               </div>
-
-              <!-- 无 quotas 但载荷有内容：折叠展示 JSON -->
-              <details
-                v-else-if="row.result?.payload && hasPayloadBody(row.result.payload)"
-                class="pt-1"
-              >
-                <summary class="cursor-pointer text-xs text-muted-foreground">查看返回内容</summary>
-                <pre
-                  class="scrollbar-thin mt-1 max-h-40 overflow-auto rounded border bg-muted/40 p-2 font-mono text-[11px]"
-                >{{ payloadJson(row.result.payload) }}</pre>
-              </details>
-
-              <!-- 异常：显示 error / message，旧 quotas 仍在上方展示 -->
-              <div v-if="row.result?.status === 'error'" class="text-xs text-destructive">
-                {{ row.result.error || row.result.payload?.message || "查询失败" }}
+              <div class="card-content divide-y">
+                <div v-if="c.results.length === 0" class="flex items-center justify-between py-3">
+                  <span class="text-xs text-muted-foreground">尚未查询</span>
+                  <Button variant="ghost" size="icon" class="size-7" title="查询卡片" :disabled="store.refreshingAll || store.refreshingKeys.has(c.key)" @click="refreshOne(c.key)">
+                    <RefreshCw class="size-3.5" :class="store.refreshingKeys.has(c.key) ? 'animate-spin' : ''" />
+                  </Button>
+                </div>
+                <div v-for="result in c.results" :key="result.keyIndex" class="space-y-2 py-3">
+                  <div class="flex items-center justify-between gap-2">
+                    <Badge variant="secondary" class="max-w-[10rem] truncate font-mono" :title="`API Key ${result.keyLabel}（掩码）`">{{ result.keyLabel || `Key ${result.keyIndex + 1}` }}</Badge>
+                    <div class="flex items-center gap-2">
+                      <Badge :variant="result.status === 'ok' ? 'success' : 'destructive'">{{ result.status === "ok" ? "正常" : "异常" }}</Badge>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        class="size-7"
+                        title="立即查询该 key"
+                        :disabled="store.refreshingAll || store.refreshingKeys.has(c.key) || store.refreshingKeys.has(refreshMark(c, result))"
+                        @click="refreshOne(c.key, result.keyIndex)"
+                      >
+                        <RefreshCw class="size-3.5" :class="store.refreshingKeys.has(refreshMark(c, result)) ? 'animate-spin' : ''" />
+                      </Button>
+                    </div>
+                  </div>
+                  <div v-if="result.payload?.quotas?.length" class="space-y-2 pt-1">
+                    <div v-for="(q, i) in result.payload.quotas" :key="i">
+                      <div class="flex items-center justify-between text-xs">
+                        <span class="truncate">{{ q.label }}</span>
+                        <span class="shrink-0 text-muted-foreground tabular-nums">{{ quotaLine(c.displayMode, q) }}</span>
+                      </div>
+                      <div v-if="quotaBarPercent(c.displayMode, q) !== null" class="mt-1 h-2 w-full overflow-hidden rounded-full bg-muted">
+                        <div class="h-full rounded-full bg-primary" :style="{ width: (quotaBarPercent(c.displayMode, q) ?? 0) + '%' }"></div>
+                      </div>
+                      <div v-if="resetText(q)" class="mt-0.5 text-[11px] text-muted-foreground">重置 {{ resetText(q) }}</div>
+                    </div>
+                  </div>
+                  <details v-else-if="result.payload && hasPayloadBody(result.payload)" class="pt-1">
+                    <summary class="cursor-pointer text-xs text-muted-foreground">查看返回内容</summary>
+                    <pre class="scrollbar-thin mt-1 max-h-40 overflow-auto rounded border bg-muted/40 p-2 font-mono text-[11px]">{{ payloadJson(result.payload) }}</pre>
+                  </details>
+                  <div v-if="result.status === 'error'" class="text-xs text-destructive">{{ result.error || result.payload?.message || "查询失败" }}</div>
+                  <div v-if="result.payload?.summary" class="text-xs text-muted-foreground">{{ result.payload.summary }}</div>
+                  <div class="text-[11px] text-muted-foreground">上次查询 {{ formatTime(result.queriedAt) }}</div>
+                </div>
               </div>
-
-              <div v-if="row.result?.payload?.summary" class="text-xs text-muted-foreground">
-                {{ row.result.payload.summary }}
-              </div>
-            </div>
-
-            <div
-              class="mt-auto flex shrink-0 items-center justify-between gap-2 border-t px-5 py-2 text-[11px] text-muted-foreground"
-            >
-              <span>{{ row.result ? `上次查询 ${formatTime(row.result.queriedAt)}` : "尚未查询" }}</span>
-              <div class="flex items-center gap-2">
-                <span>{{ intervalText(c.intervalSecs) }}</span>
-                <Badge v-if="!c.enabled" variant="secondary">停用</Badge>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="size-6"
-                  title="编辑"
-                  @click="editCard(c.key)"
-                >
-                  <Pencil class="size-3" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="size-6"
-                  title="删除"
-                  @click="remove(c.key)"
-                >
-                  <Trash2 class="size-3 text-destructive" />
-                </Button>
-              </div>
-            </div>
             </Card>
           </template>
         </div>
@@ -728,9 +673,8 @@ async function remove(key: string) {
         </div>
       </template>
       <div class="grid gap-4">
-        <!-- 模板填充（仅新建）：选中即填入脚本与建议的 URL/额外参数/间隔 -->
-        <div v-if="isNew" class="space-y-1.5 rounded-md border border-dashed p-3">
-          <Label>从模板填充（可选）</Label>
+        <div class="space-y-1.5 rounded-md border border-dashed p-3">
+          <Label>应用模板（覆盖脚本并切换到内联来源）</Label>
           <Select
             :model-value="templateId"
             :options="templateOptions"
@@ -832,71 +776,18 @@ async function remove(key: string) {
         </div>
 
         <div class="space-y-1.5">
-          <Label for="bc-script">脚本引用</Label>
+          <Label for="bc-script">脚本文件路径（可选）</Label>
           <Input id="bc-script" v-model="form.scriptRef" placeholder="如 balance_openai.lua" />
           <p class="text-xs text-muted-foreground">
-            填 .lua 路径（插件目录内）或留空用下方内联脚本；内联时脚本原文直接存入脚本引用。
+            当前来源：{{ form.scriptRef.trim() ? "文件引用（插件目录内的 .lua 文件）" : "内联脚本" }}。
+            清空路径后必须填写内联脚本，不会自动套用默认脚本。
           </p>
         </div>
 
-        <!-- 脚本编写指南：默认收起，避免弹窗过长 -->
-        <details class="rounded-md border">
-          <summary class="cursor-pointer px-3 py-2 text-sm font-medium">脚本编写指南</summary>
-          <div class="space-y-3 border-t px-3 py-3 text-xs leading-relaxed">
-            <div class="space-y-1">
-              <p class="font-medium">一、输入参数 ctx</p>
-              <ul class="space-y-0.5 text-muted-foreground">
-                <li><code class="font-mono">ctx.name</code>：卡片名（key）</li>
-                <li><code class="font-mono">ctx.key</code>：本次查询的 API Key</li>
-                <li>
-                  <code class="font-mono">ctx.keys</code>：当前 key 的单元素数组（= [ctx.key]）。
-                  <span class="text-foreground">上游服务有多个 key 时，引擎会对每个 key 各跑一次脚本并拆成多张卡片展示，脚本只需按单个 key 编写</span>
-                </li>
-                <li>
-                  <code class="font-mono">ctx.base_url</code>：卡片上填写的查询 URL（可选；
-                  没填时是空字符串，脚本需自己处理 URL）
-                </li>
-                <li><code class="font-mono">ctx.provider</code>：上游服务 key</li>
-                <li>
-                  <code class="font-mono">ctx.extra</code>：卡片「额外参数 JSON」的解码值
-                </li>
-              </ul>
-            </div>
+        <BalanceScriptGuide />
 
-            <div class="space-y-1">
-              <p class="font-medium">二、返回值契约</p>
-              <p class="text-muted-foreground">
-                返回一个 table，宿主序列化为 JSON 落库。常用字段：<code class="font-mono">status</code>（ok/error，缺省 ok）、<code class="font-mono">message</code>（失败原因）、<code class="font-mono">summary</code>（一句话摘要）、<code class="font-mono">quotas</code>（配额条数组，条数与 label 完全自定义）。
-              </p>
-              <p class="text-muted-foreground">
-                每条 quota 两种口径各给一个字段即可（quota 里用 snake_case；前端 camelCase 由引擎转换，自定义额外字段原样保留）：
-              </p>
-              <pre
-                class="scrollbar-thin overflow-auto rounded border bg-muted/40 p-2 font-mono text-[11px]"
-              >{ label = "Weekly", used_percent = 43, reset_at = "2026/9/21 13:02" }
-{ label = "余额", unit = "¥", used_amount = 12.5, left_amount = 37.5 }</pre>
-              <p class="text-muted-foreground">
-                百分比口径的 used_percent / left_percent 互补，给一个即可；金额口径同理给 used_amount / left_amount。
-                reset_at 可给展示字符串，或 unix 秒数字（前端会格式化为本地时间）。
-              </p>
-              <p class="text-muted-foreground">
-                脚本首行必须是 <code class="font-mono">MB = {}</code>，否则宿主取不到入口；HTTP 头写成
-                <code class="font-mono">&#123;&#123; "authorization", "Bearer " .. key &#125;&#125;</code>
-                的数组形式；上游返回 JSON 时 <code class="font-mono">r.body</code> 已是 table，可直接取字段。
-              </p>
-            </div>
-
-            <div class="space-y-1">
-              <p class="font-medium">三、额外参数 JSON</p>
-              <p class="text-muted-foreground">
-                表单下方那段 JSON，脚本用 <code class="font-mono">ctx.extra.字段名</code> 读取。用途是让同一段脚本服务多张卡时按卡差异化（例如不同阈值/币种）；没有需要就留空 <code class="font-mono">{}</code>。
-              </p>
-            </div>
-          </div>
-        </details>
-
-        <div class="flex min-h-0 flex-col space-y-1.5">
-          <Label>内联脚本</Label>
+        <div v-if="!form.scriptRef.trim()" class="flex min-h-0 flex-col space-y-1.5">
+          <Label>内联脚本（必填）</Label>
           <CodeEditor v-model="form.inlineScript" height="14rem" />
         </div>
         <div class="flex min-h-0 flex-col space-y-1.5">
@@ -937,7 +828,6 @@ async function remove(key: string) {
                   {{ formatTime(r.queriedAt) }}
                 </span>
               </div>
-              <p v-if="r.error" class="text-xs text-destructive">{{ r.error }}</p>
               <pre
                 v-if="r.payload"
                 class="scrollbar-thin max-h-48 overflow-auto rounded border bg-muted/40 p-2 font-mono text-[11px]"

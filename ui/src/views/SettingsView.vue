@@ -8,7 +8,7 @@ import Input from "@/components/ui/Input.vue";
 import Label from "@/components/ui/Label.vue";
 import Select from "@/components/ui/Select.vue";
 import { useToast } from "@/composables/useToast";
-import { appApi, errMsg, type AppConfig, type AppInfo } from "@/lib/api";
+import { appApi, errMsg, isWebRuntime, type AppConfig, type AppInfo } from "@/lib/api";
 import { useGatewayStore } from "@/stores/gateway";
 
 const gateway = useGatewayStore();
@@ -155,13 +155,14 @@ async function save(restart = false) {
             <Select v-model="form.logLevel" :options="logOptions" />
           </div>
           <div class="space-y-1.5">
-            <Label for="s-token">Bearer Token</Label>
+            <Label for="s-token">网关调用 Token</Label>
             <Input
               id="s-token"
               v-model="form.gateway.authToken"
               type="password"
-              placeholder="留空则不鉴权"
+              :placeholder="isWebRuntime ? '留空保留当前调用 Token' : '留空则不鉴权'"
             />
+            <p v-if="isWebRuntime" class="text-xs text-muted-foreground">不回显已有凭据；填写新值并重启后生效，不影响管理台 Token。启动环境覆盖需同步更新。</p>
           </div>
           <div class="space-y-1.5">
             <Label for="s-proxy">出站代理</Label>
