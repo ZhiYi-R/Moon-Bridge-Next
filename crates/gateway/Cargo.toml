@@ -34,6 +34,8 @@ chrono = { workspace = true }
 url = { workspace = true }
 once_cell = { workspace = true }
 parking_lot = { workspace = true }
+dirs = { workspace = true }
+rand = "0.8"
 hmac = { workspace = true }
 sha2 = { workspace = true }
 

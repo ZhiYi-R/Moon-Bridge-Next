@@ -1245,7 +1245,9 @@ async fn e2e_serve_pairs_plugin_init_and_shutdown() {
         Arc::new(Database::open_in_memory().unwrap()),
         Arc::new(builtin_registry()),
         spy.clone(),
+        None,
         reqwest::Client::new(),
+        moonbridge_gateway::oauth::CallbackRegistry::new(),
     );
 
     // 200ms 后给出优雅关闭信号
