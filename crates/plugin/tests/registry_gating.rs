@@ -38,13 +38,22 @@ async fn runtime_hides_debug_and_rejects_sethook() {
         r#"
         assert(debug == nil)
         assert(_G.debug == nil)
+        assert(load == nil)
+        assert(loadstring == nil)
         assert(not pcall(function() debug.sethook() end))
         MB = {}
         function MB.query(ctx)
             assert(debug == nil)
             assert(_G.debug == nil)
+            assert(load == nil)
+            assert(loadstring == nil)
             local ok = pcall(function() debug.sethook() end)
-            return { debug_missing = debug == nil, sethook_available = ok }
+            return {
+                debug_missing = debug == nil,
+                sethook_available = ok,
+                load_missing = load == nil,
+                loadstring_missing = loadstring == nil,
+            }
         end
         "#,
         &serde_json::json!({}),

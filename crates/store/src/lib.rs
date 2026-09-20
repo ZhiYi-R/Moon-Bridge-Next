@@ -165,7 +165,10 @@ impl Database {
         let (scheme, verifier) = Self::encryption_state(conn)?;
         let legacy = scheme == "plaintext";
         if !legacy && (scheme != enc.scheme() || enc.decrypt(&verifier)? != VERIFIER) {
-            return Err(StoreError::Encryption("数据库主密钥不匹配".into()));
+            return Err(StoreError::Encryption(
+                "数据库主密钥不匹配：当前密钥无法解密此库。请确认 --key-file / MOONBRIDGE_KEY_FILE 指向加密该库时所用的同一密钥文件（默认为数据库同目录下的 .key）；若密钥已丢失，或数据库来自他机/旧备份而未带上对应密钥，则无法打开，需用原密钥恢复。"
+                    .into(),
+            ));
         }
         if legacy && enc.scheme() == "plaintext" && legacy_provider_key.is_none() {
             return Ok(());

@@ -73,6 +73,13 @@ impl BalanceNetworkPolicy {
         })
     }
 
+    /// 策略是否因配置问题被整体禁用（配置了出站代理，或私网白名单非法）。
+    /// 一旦禁用，[`Self::request`] 会以该原因拒绝每一次查询——宿主应在启动时检查
+    /// 并告警，否则余额看板会"静默全红"，只能从逐卡错误里反推根因。
+    pub fn denied_reason(&self) -> Option<&str> {
+        self.denied_reason.as_deref()
+    }
+
     pub(crate) async fn request(
         &self,
         base_url: &str,

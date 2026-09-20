@@ -69,10 +69,13 @@ fn hex(bytes: &[u8]) -> String {
 /// 光删 `require` 也不够：`package.searchers` 的元素本身就能返回**可执行 loader**
 /// （等价 `loadfile`）。故连 `require` 与整个 `package` 表一并移除。
 ///
-/// 已确认 `plugins/**` 与 crate 内测试均不使用这些名字；LSP 桩
+/// `load`/`loadstring` 一并移除：切断运行时把字符串编译成代码的能力（纵深防御，
+/// 配合已移除的 `debug` 杜绝重新取得执行钩子 / 原生 loader 的路径）。
+///
+/// 已确认 `plugins/**`、余额模板与 crate 内测试均不使用这些名字；LSP 桩
 /// （`plugins/moonbridge.lua`）本就声明「沙箱中 os/io/loadfile/dofile 不可用」。
-const DANGEROUS_GLOBALS: [&str; 7] = [
-    "os", "io", "loadfile", "dofile", "require", "package", "debug",
+const DANGEROUS_GLOBALS: [&str; 9] = [
+    "os", "io", "loadfile", "dofile", "require", "package", "debug", "load", "loadstring",
 ];
 
 /// 协程钩子补丁：把宿主装的指令计数/超时钩子传导到插件新建的线程。

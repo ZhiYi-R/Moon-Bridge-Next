@@ -7,12 +7,14 @@ import Card from "@/components/ui/Card.vue";
 import Input from "@/components/ui/Input.vue";
 import Label from "@/components/ui/Label.vue";
 import Select from "@/components/ui/Select.vue";
+import { useConfirm } from "@/composables/useConfirm";
 import { useToast } from "@/composables/useToast";
 import { appApi, errMsg, isWebRuntime, type AppConfig, type AppInfo } from "@/lib/api";
 import { useGatewayStore } from "@/stores/gateway";
 
 const gateway = useGatewayStore();
 const toast = useToast();
+const { confirm } = useConfirm();
 const info = ref<AppInfo | null>(null);
 const error = ref<string | null>(null);
 
@@ -110,6 +112,14 @@ function payload(): AppConfig {
 const saving = ref(false);
 
 async function save(restart = false) {
+  if (restart) {
+    const ok = await confirm({
+      title: "保存并重启网关",
+      message: "重启将暂时中断网关服务，确认保存并重启？",
+      confirmText: "保存并重启",
+    });
+    if (!ok) return;
+  }
   saving.value = true;
   try {
     await appApi.setConfig(payload());

@@ -499,8 +499,9 @@ camelCase 契约，前端 `call()` 分发层据此在 IPC 与 REST 间透明切�
   及与 percent 之间均不做互补互推；None 字段不序列化）；`reset_at` 接受展示字符串或
   unix 秒数字（归一为字符串，前端对纯数字按本地时间格式化——沙箱无 os 库，脚本拿到
   毫秒时间戳只能除 1000 后给数字）；脚本自定义字段原样保留在 payload。
-- **内置脚本模板**（`ui/src/lib/balanceTemplates.ts`）：新建卡片时可从模板填充脚本与建议
-  默认值（查询 URL/额外参数/间隔）。模板按各服务真实接口编写：通用百分比/金额骨架 +
+- **内置脚本模板**（`ui/src/lib/balanceTemplates.ts`）：新建或编辑卡片时可从模板填充脚本与建议
+  默认值（查询 URL/额外参数/间隔）；应用模板会覆盖当前编辑中的脚本并切换到内联来源
+  （弹窗内已明示「覆盖脚本并切换到内联来源」）。模板按各服务真实接口编写：通用百分比/金额骨架 +
   new-api（`/api/user/self`，当前 `data.quota / 500000` 作美元余额，不用 `used_quota`
   代替余额）、DeepSeek、Moonshot/Kimi 开放平台、SiliconFlow、
   OpenRouter（credits + key 限额双接口）、智谱 GLM Coding Plan（裸 key 鉴权 + Bearer 回退）、
@@ -510,7 +511,7 @@ camelCase 契约，前端 `call()` 分发层据此在 IPC 与 REST 间透明切�
   月上限默认 70；5H/Weekly 的 used/cap 金额与毫秒 resetAt，单位默认空）、Claude Code
   订阅（OAuth usage 接口）、Sub2API（Bearer `GET /v1/usage`；优先 `quota.remaining`，
   再回退 `balance` / `remaining`，附带 `rate_limits` 的周期剩余额度，单位 $；站点 URL
-  自动去尾斜杠及 `/v1`）。模板不携带账户密钥，也不覆盖已保存卡片的脚本。
+  自动去尾斜杠及 `/v1`）。模板不携带账户密钥；应用模板只覆盖当前编辑中卡片的脚本，不改动其它已保存卡片。
 - **弹窗错误反馈**：新增/编辑表单的校验、保存失败和测试拉取错误显示在弹窗标题下，
   通过 Modal 的可选 `notice` 插槽置于滚动内容区外，始终可见；多 Key 错误保留掩码标签，
   支持脚本 `payload.message`，详情仍在测试预览。页面级刷新/删除错误独立展示。

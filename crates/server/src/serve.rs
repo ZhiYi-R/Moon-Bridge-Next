@@ -24,6 +24,10 @@ use crate::lifecycle::Lifecycle;
 
 const CATALOG_TIMEOUT_SECS: u64 = 30;
 
+/// 收到 drain 信号（重启 / 停止）后，等待在途连接自然收尾的上限；超时则强制关闭。
+/// axum 的 graceful shutdown 本身无上限，一个卡住的长连 SSE 流会让重启 / SIGTERM 永久挂起。
+const DRAIN_GRACE: Duration = Duration::from_secs(30);
+
 pub async fn run(opts: ServerOpts) -> Result<()> {
     let (paths, app_config, persisted_config) = prepare(&opts)?;
     let db = match &opts.key_file {
@@ -77,13 +81,20 @@ async fn serve_generations(web_dir: &Path, admin_state: AdminState) -> Result<()
         }
         merged = merged.layer(middleware::from_fn(security_headers));
         gateway_state.hooks.init_all().await;
+        let balance_policy = moonbridge_gateway::BalanceNetworkPolicy::from_environment(
+            gateway_state.config.egress_proxy.clone(),
+        );
+        if let Some(reason) = balance_policy.denied_reason() {
+            tracing::warn!(
+                reason,
+                "余额看板已整体禁用：每次查询都会失败。请检查 gateway.egress_proxy 与 MOONBRIDGE_BALANCE_PRIVATE_ORIGINS 配置"
+            );
+        }
         let balance_engine = moonbridge_gateway::BalanceEngine::new(
             admin_state.db.clone(),
             Some(admin_state.paths.plugins_dir.clone()),
         )
-        .with_network_policy(moonbridge_gateway::BalanceNetworkPolicy::from_environment(
-            gateway_state.config.egress_proxy.clone(),
-        ));
+        .with_network_policy(balance_policy);
         let balance_scheduler = moonbridge_gateway::spawn_balance_scheduler(
             admin_state.db.clone(),
             balance_engine,
@@ -92,9 +103,24 @@ async fn serve_generations(web_dir: &Path, admin_state: AdminState) -> Result<()
         lifecycle.listening(local_addr);
         tracing::info!(addr = %local_addr, "Moon Bridge Next 服务端已启动");
         let shutdown = lifecycle.clone();
-        let served = axum::serve(listener, merged)
-            .with_graceful_shutdown(async move { shutdown.wait_for_drain().await })
-            .await;
+        let server = axum::serve(listener, merged)
+            .with_graceful_shutdown(async move { shutdown.wait_for_drain().await });
+        // 兜底：drain 信号到达后给在途连接 DRAIN_GRACE 收尾，超时则丢弃 server future
+        // （关闭监听与剩余连接）。否则一个卡住的长连 SSE 流会让重启 / SIGTERM 永久挂起。
+        let force = lifecycle.clone();
+        let served = tokio::select! {
+            result = server => result,
+            _ = async {
+                force.wait_for_drain().await;
+                tokio::time::sleep(DRAIN_GRACE).await;
+            } => {
+                tracing::warn!(
+                    grace_secs = DRAIN_GRACE.as_secs(),
+                    "优雅 drain 超时，强制关闭剩余在途连接"
+                );
+                Ok(())
+            }
+        };
         lifecycle.drained();
         balance_scheduler.abort();
         let _ = balance_scheduler.await;

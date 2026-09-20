@@ -79,6 +79,12 @@ pub fn run() {
             let balance_policy = moonbridge_gateway::BalanceNetworkPolicy::from_environment(
                 state.config().gateway.egress_proxy,
             );
+            if let Some(reason) = balance_policy.denied_reason() {
+                tracing::warn!(
+                    reason,
+                    "余额看板已整体禁用：每次查询都会失败。请检查 gateway.egress_proxy 与 MOONBRIDGE_BALANCE_PRIVATE_ORIGINS 配置"
+                );
+            }
             tauri::async_runtime::spawn(async move {
                 let engine = moonbridge_gateway::BalanceEngine::new(
                     balance_db.clone(),

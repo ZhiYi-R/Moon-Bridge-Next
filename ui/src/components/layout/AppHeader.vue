@@ -87,7 +87,7 @@ const controlCls =
       <button
         v-else
         class="flex h-7 w-9 items-center justify-center rounded-md border border-input text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
-        title="重启网关（服务进程由外部托管，重启后自动恢复）"
+        title="重启网关（在线热重启，连接会短暂中断）"
         :disabled="gateway.loading || confirmingRestart"
         @click="restartGateway"
       >
