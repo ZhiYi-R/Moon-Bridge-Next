@@ -72,6 +72,26 @@ pub fn run() {
             let auto_start = state.config().auto_start;
             app.manage(state.clone());
 
+            // 余额看板定时调度：与网关启停无关，应用启动即常驻。经
+            // `tauri::async_runtime` 进入 tokio 运行时后再起常驻任务。
+            let balance_db = state.db.clone();
+            let balance_plugins = Some(state.paths.plugins_dir.clone());
+            let balance_policy = moonbridge_gateway::BalanceNetworkPolicy::from_environment(
+                state.config().gateway.egress_proxy,
+            );
+            tauri::async_runtime::spawn(async move {
+                let engine = moonbridge_gateway::BalanceEngine::new(
+                    balance_db.clone(),
+                    balance_plugins.clone(),
+                )
+                .with_network_policy(balance_policy);
+                let _balance_scheduler = moonbridge_gateway::spawn_balance_scheduler(
+                    balance_db,
+                    engine,
+                    balance_plugins,
+                );
+            });
+
             // 系统托盘
             tray::create_tray(app.handle())?;
 
@@ -131,6 +151,13 @@ pub fn run() {
             // Usage
             commands::usage::usage_query,
             commands::usage::usage_summary,
+            // Balance（余额&健康看板）
+            commands::balance::balance_card_list,
+            commands::balance::balance_card_save,
+            commands::balance::balance_card_delete,
+            commands::balance::balance_card_refresh,
+            commands::balance::balance_refresh_all,
+            commands::balance::balance_card_test,
             // Trace
             commands::trace::trace_list,
             commands::trace::trace_read,

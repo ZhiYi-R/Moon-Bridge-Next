@@ -727,4 +727,70 @@ mod tests {
         assert_eq!(model_for(&reg, &s2).await, "2", "其它会话不得被波及");
         assert_eq!(model_for(&reg, &none).await, "2", "None 桶不得被波及");
     }
+
+    /// `call_mb_once`：入口缺失必须报错，而不是静默返回 `null` 让调用方以为查询成功。
+    #[tokio::test]
+    async fn call_mb_once_missing_entry_is_error() {
+        let rt = load(
+            "noquery",
+            r#"
+            MB = { version = "0.1.0", capabilities = { "core" } }
+            function MB.on_request(ctx, req) return req end
+            "#,
+        );
+        let err = rt
+            .call_mb_once("query", &json!({}))
+            .await
+            .expect_err("未定义 MB.query 应报错");
+        let msg = err.to_string();
+        assert!(msg.contains("MB.query"), "错误消息应指明缺失入口: {msg}");
+    }
+
+    /// `call_mb_once`：Lua `nil` 转成 JSON `null`（调用方按「脚本没给结果」处理）。
+    #[tokio::test]
+    async fn call_mb_once_nil_becomes_null() {
+        let rt = load(
+            "nilret",
+            r#"
+            MB = { version = "0.1.0", capabilities = { "core" } }
+            function MB.query(ctx) return nil end
+            "#,
+        );
+        let ret = rt
+            .call_mb_once("query", &json!({"key": "k"}))
+            .await
+            .unwrap();
+        assert_eq!(ret, serde_json::Value::Null);
+    }
+
+    /// `call_mb_once`：入参 JSON → Lua table、table 返回值 → JSON 往返，含中文与嵌套结构。
+    #[tokio::test]
+    async fn call_mb_once_roundtrips_table_json() {
+        let rt = load(
+            "roundtrip",
+            r#"
+            MB = { version = "0.1.0", capabilities = { "core" } }
+            function MB.query(ctx)
+              return {
+                quotas = {
+                  { label = "5 小时窗口", used_percent = 43, reset_at = "t" },
+                  { label = "每周", left_percent = 57.5 },
+                },
+                summary = "余额正常，剩余：" .. tostring(ctx.key),
+                nested = { deep = { 1, 2, { ok = true } } },
+              }
+            end
+            "#,
+        );
+        let ret = rt
+            .call_mb_once("query", &json!({"key": "sk-中文"}))
+            .await
+            .unwrap();
+        assert_eq!(ret["quotas"][0]["label"], json!("5 小时窗口"));
+        // Lua 整数经 JSON 往返可能是 Int 或 Float，比数值而非 JSON 字面形状
+        assert_eq!(ret["quotas"][0]["used_percent"].as_f64(), Some(43.0));
+        assert_eq!(ret["quotas"][1]["left_percent"].as_f64(), Some(57.5));
+        assert_eq!(ret["summary"], json!("余额正常，剩余：sk-中文"));
+        assert_eq!(ret["nested"]["deep"][2]["ok"], json!(true));
+    }
 }

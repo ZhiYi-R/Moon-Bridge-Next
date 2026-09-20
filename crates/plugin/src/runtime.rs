@@ -190,6 +190,30 @@ impl LuaRuntime {
         Ok(())
     }
 
+    /// 以全局 `MB.<name>` 函数为入口执行一次调用：JSON 入参、JSON 出参。
+    ///
+    /// 面向「不进插件注册表的一次性脚本」（余额卡片查询）：脚本加载、`mb.*` 宿主
+    /// API、沙箱配额与协程钩子路径完全复用本运行时，只是入口名由调用方指定
+    /// （如 `query`），返回值交调用方按自己的契约解释。脚本未定义该入口即报错；
+    /// 返回 `nil` 得到 `Value::Null`，返回不可序列化之物（函数/线程等）同样报错，
+    /// 而不是静默降级成 `null` 把问题藏到落库之后。
+    pub async fn call_mb_once(
+        &self,
+        name: &str,
+        ctx: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let lua = self.lua.lock().await;
+        let f = mb_fn(&lua, name)
+            .ok_or_else(|| PluginError::Config(format!("脚本未定义 MB.{name}")))?;
+        let args = lua.to_value(ctx)?;
+        self.budget.begin(self.limits.call_timeout);
+        let ret: LuaValue = self.call_hook(&lua, f, args).await?;
+        match ret {
+            LuaValue::Nil => Ok(serde_json::Value::Null),
+            other => Ok(lua.from_value(other)?),
+        }
+    }
+
     // ── Core IR 语义层 ──────────────────────────────────────────────
 
     /// on_request：修改 CoreRequest。

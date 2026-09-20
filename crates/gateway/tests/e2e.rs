@@ -1267,6 +1267,82 @@ async fn e2e_serve_pairs_plugin_init_and_shutdown() {
     );
 }
 
+/// 配置 auth_token 后，探活和模型目录保持公开，推理入口要求 Bearer。
+#[tokio::test]
+async fn e2e_health_and_models_are_public_with_auth_configured() {
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let cfg = GatewayConfig {
+        auth_token: Some("secret-token".into()),
+        ..GatewayConfig::default()
+    };
+    let state = bootstrap(cfg, db).unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, server::router(state)).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+
+    let health = client
+        .get(format!("http://{addr}/health"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(health.status(), 200);
+    let models_url = format!("http://{addr}/v1/models");
+    assert_eq!(client.get(&models_url).send().await.unwrap().status(), 200);
+    for authorization in [
+        "secret-token",
+        "Basic secret-token",
+        "Bearer wrong",
+        "Bearer ",
+    ] {
+        let response = client
+            .get(&models_url)
+            .header("authorization", authorization)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            200,
+            "公开模型列表不受鉴权影响：{authorization:?}"
+        );
+    }
+    let models = client
+        .get(&models_url)
+        .bearer_auth("secret-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(models.status(), 200);
+
+    // 受保护面：POST 入口无 token / 错 token 一律 401
+    let url = format!("http://{addr}/v1/chat/completions");
+    let body = json!({ "model": "x", "messages": [{ "role": "user", "content": "hi" }] });
+    let r = client.post(&url).json(&body).send().await.unwrap();
+    assert_eq!(r.status(), 401, "POST 入口无 token 必须 401");
+    let r = client
+        .post(&url)
+        .bearer_auth("wrong")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401, "POST 入口错 token 必须 401");
+    // 正确 token 应通过鉴权（后续路由解析失败返回非 401，证明已过 check_auth）
+    let r = client
+        .post(&url)
+        .bearer_auth("secret-token")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(r.status(), 401, "正确 token 应通过鉴权");
+}
+
 /// 回归：插件短路直答不得绕过审计——usage 落库 + trace 落盘都要有。
 /// 历史缺陷是这些路径直接 return，插件代答的请求在用量与 Traces 页完全不可见。
 #[tokio::test]

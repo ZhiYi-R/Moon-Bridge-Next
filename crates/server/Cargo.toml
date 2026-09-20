@@ -1,0 +1,41 @@
+[package]
+name = "moonbridge-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Moon Bridge Next — 服务端二进制（LLM 网关 + 管理 API + 前端静态托管）"
+
+[lib]
+name = "moonbridge_server"
+doctest = false
+
+[[bin]]
+name = "moonbridge-server"
+path = "src/main.rs"
+
+[dependencies]
+# 内部 crate（依赖方向：server → gateway, store）
+moonbridge-store = { workspace = true }
+moonbridge-gateway = { workspace = true }
+
+# HTTP 服务与静态托管
+axum = { workspace = true }
+tower-http = { workspace = true, features = ["fs"] }
+
+# 基础设施
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+dirs = { workspace = true }
+
+[dev-dependencies]
+# `ServiceExt::oneshot`：在内存 Router 上直接派发请求，不绑定真实端口
+tower = { workspace = true, features = ["util"] }

@@ -1,0 +1,13 @@
+.git
+target
+**/target
+node_modules
+**/node_modules
+ui/dist
+deploy
+docs
+*.md
+.github
+src-tauri/icons
+src-tauri/target
+backups

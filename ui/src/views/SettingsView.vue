@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ChevronDown } from "lucide-vue-next";
-import { onMounted, reactive, ref } from "vue";
+import { onActivated, onMounted, reactive, ref } from "vue";
 
 import Button from "@/components/ui/Button.vue";
 import Card from "@/components/ui/Card.vue";
@@ -8,7 +8,7 @@ import Input from "@/components/ui/Input.vue";
 import Label from "@/components/ui/Label.vue";
 import Select from "@/components/ui/Select.vue";
 import { useToast } from "@/composables/useToast";
-import { appApi, errMsg, type AppConfig, type AppInfo } from "@/lib/api";
+import { appApi, errMsg, isWebRuntime, type AppConfig, type AppInfo } from "@/lib/api";
 import { useGatewayStore } from "@/stores/gateway";
 
 const gateway = useGatewayStore();
@@ -58,19 +58,40 @@ const gwOpen = ref(true);
 const infoOpen = ref(false);
 
 onMounted(async () => {
+  await load();
+});
+
+// keep-alive 下切回本页：仅刷新只读的应用信息；配置表单保留未保存编辑，不回读覆盖
+let activated = false;
+onActivated(() => {
+  if (activated) void loadInfo();
+  activated = true;
+});
+
+/** 应用信息展示：只读、失败忽略。 */
+async function loadInfo() {
   try {
-    const c = await appApi.getConfig();
+    info.value = await appApi.info();
+  } catch {
+    // 忽略：仅展示用途
+  }
+}
+
+async function load() {
+  try {
+    // 配置与应用信息互相独立：并行拉取，避免串行两跳
+    const [c, i] = await Promise.all([appApi.getConfig(), appApi.info()]);
     form.gateway = { ...c.gateway };
     form.logLevel = c.logLevel;
     form.autoStart = c.autoStart;
     const bu = bytesToUnit(c.gateway.maxBodyBytes);
     bodyValue.value = bu.v;
     bodyUnit.value = bu.unit;
-    info.value = await appApi.info();
+    info.value = i;
   } catch (e) {
     error.value = errMsg(e);
   }
-});
+}
 
 function payload(): AppConfig {
   const n = Number(bodyValue.value);
@@ -134,13 +155,14 @@ async function save(restart = false) {
             <Select v-model="form.logLevel" :options="logOptions" />
           </div>
           <div class="space-y-1.5">
-            <Label for="s-token">Bearer Token</Label>
+            <Label for="s-token">网关调用 Token</Label>
             <Input
               id="s-token"
               v-model="form.gateway.authToken"
               type="password"
-              placeholder="留空则不鉴权"
+              :placeholder="isWebRuntime ? '留空保留当前调用 Token' : '留空则不鉴权'"
             />
+            <p v-if="isWebRuntime" class="text-xs text-muted-foreground">不回显已有凭据；填写新值并重启后生效，不影响管理台 Token。启动环境覆盖需同步更新。</p>
           </div>
           <div class="space-y-1.5">
             <Label for="s-proxy">出站代理</Label>
@@ -217,6 +239,10 @@ async function save(restart = false) {
         <div class="flex justify-between gap-4">
           <span class="text-muted-foreground">版本</span>
           <span class="font-mono">{{ info?.version ?? "—" }}</span>
+        </div>
+        <div v-if="info?.mode" class="flex justify-between gap-4">
+          <span class="text-muted-foreground">运行模式</span>
+          <span class="font-mono">{{ info.mode }}</span>
         </div>
         <div class="flex justify-between gap-4">
           <span class="text-muted-foreground">数据库</span>

@@ -171,20 +171,21 @@ impl ClientAdapter for AnthropicAdapter {
             req.tool_choice = parse_tool_choice(tc);
         }
 
-        // thinking 配置 → req.reasoning（官方形态：enabled+budget_tokens /
-        // adaptive+output_config.effort；不传则上游按默认行为处理）
+        // enabled/adaptive 均优先使用显式 effort；enabled 缺省时才按预算反推。
         if let Some(t) = raw.get("thinking").and_then(|v| v.as_object()) {
+            let explicit_effort = raw
+                .get("output_config")
+                .and_then(|o| o.get("effort"))
+                .and_then(|e| e.as_str())
+                .map(str::trim)
+                .filter(|e| !e.is_empty());
             let effort = match t.get("type").and_then(|v| v.as_str()) {
-                Some("enabled") => t
-                    .get("budget_tokens")
-                    .and_then(|v| v.as_u64())
-                    .map(|b| effort_from_budget(b as u32)),
-                Some("adaptive") => Some(
-                    raw.get("output_config")
-                        .and_then(|o| o.get("effort"))
-                        .and_then(|e| e.as_str())
-                        .unwrap_or("high"),
-                ),
+                Some("enabled") => explicit_effort.or_else(|| {
+                    t.get("budget_tokens")
+                        .and_then(|v| v.as_u64())
+                        .map(|budget| effort_from_budget(budget.min(u32::MAX as u64) as u32))
+                }),
+                Some("adaptive") => Some(explicit_effort.unwrap_or("high")),
                 _ => None, // disabled 或未知：不下发，交由上游默认
             };
             if let Some(effort) = effort {
@@ -349,6 +350,128 @@ mod tests {
             req.reasoning.as_ref().and_then(|r| r.effort.as_deref()),
             Some("low")
         );
+    }
+
+    #[tokio::test]
+    async fn thinking_effort_precedence_and_fallbacks() {
+        let ctx = ReqCtx::new("effort", Protocol::Anthropic);
+        for (thinking, output_config, expected) in [
+            (
+                json!({"type": "enabled", "budget_tokens": 1024}),
+                json!({"effort": "max"}),
+                Some("max"),
+            ),
+            (
+                json!({"type": "enabled", "budget_tokens": 32768}),
+                json!({"effort": "low"}),
+                Some("low"),
+            ),
+            (
+                json!({"type": "enabled"}),
+                json!({"effort": " high "}),
+                Some("high"),
+            ),
+            (
+                json!({"type": "enabled", "budget_tokens": 1024}),
+                Value::Null,
+                Some("minimal"),
+            ),
+            (
+                json!({"type": "enabled", "budget_tokens": 16384}),
+                json!({"effort": "  "}),
+                Some("high"),
+            ),
+            (
+                json!({"type": "enabled", "budget_tokens": 8192}),
+                json!({"effort": 42}),
+                Some("medium"),
+            ),
+            (
+                json!({"type": "enabled", "budget_tokens": 4294967296u64}),
+                Value::Null,
+                Some("max"),
+            ),
+            (
+                json!({"type": "enabled", "budget_tokens": u64::MAX}),
+                Value::Null,
+                Some("max"),
+            ),
+            (
+                json!({"type": "enabled", "budget_tokens": 1024}),
+                json!({"effort": " \t "}),
+                Some("minimal"),
+            ),
+            (json!({"type": "enabled"}), Value::Null, None),
+            (
+                json!({"type": "adaptive"}),
+                json!({"effort": "max"}),
+                Some("max"),
+            ),
+            (json!({"type": "adaptive"}), Value::Null, Some("high")),
+            (
+                json!({"type": "adaptive"}),
+                json!({"effort": ""}),
+                Some("high"),
+            ),
+            (json!({"type": "disabled"}), json!({"effort": "max"}), None),
+            (json!({"type": "unknown"}), json!({"effort": "max"}), None),
+            (Value::Null, Value::Null, None),
+        ] {
+            let req = AnthropicAdapter
+                .to_core_request(
+                    &ctx,
+                    json!({
+                        "model": "claude",
+                        "thinking": thinking,
+                        "output_config": output_config,
+                        "messages": [{"role": "user", "content": "Hi"}]
+                    }),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                req.reasoning.as_ref().and_then(|r| r.effort.as_deref()),
+                expected,
+                "thinking={thinking}, output_config={output_config}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn enabled_effort_survives_conversion_to_chat() {
+        use crate::adapter::{ProviderAdapter, ProviderEndpoint};
+        use crate::adapters::openai_chat::OpenAiChatAdapter;
+
+        let ctx = ReqCtx::new("b9163a8e", Protocol::Anthropic);
+        let endpoint =
+            ProviderEndpoint::new("mock", Protocol::OpenAiChat, "http://localhost", "test-key");
+        for (output_config, expected) in
+            [(json!({"effort": "max"}), "max"), (Value::Null, "minimal")]
+        {
+            let req = AnthropicAdapter
+                .to_core_request(
+                    &ctx,
+                    json!({
+                        "model": "deepseek/deepseek-v4.1-flash",
+                        "max_tokens": 128000,
+                        "stream": true,
+                        "thinking": {"type": "enabled", "budget_tokens": 1024},
+                        "output_config": output_config,
+                        "messages": [{"role": "user", "content": "Hi"}]
+                    }),
+                )
+                .await
+                .unwrap();
+            let upstream = OpenAiChatAdapter
+                .from_core_request(&ctx, &req, &endpoint)
+                .await
+                .unwrap();
+            assert_eq!(upstream.body["reasoning_effort"], expected);
+            assert_eq!(upstream.body["max_completion_tokens"], 128000);
+            assert_eq!(upstream.body["stream"], true);
+            assert!(upstream.body.get("thinking").is_none());
+            assert!(upstream.body.get("output_config").is_none());
+        }
     }
 
     #[tokio::test]

@@ -31,6 +31,109 @@ impl HostBridge for DummyBridge {
     }
 }
 
+#[tokio::test]
+async fn runtime_hides_debug_and_rejects_sethook() {
+    let runtime = LuaRuntime::new(
+        "debug-probe",
+        r#"
+        assert(debug == nil)
+        assert(_G.debug == nil)
+        assert(not pcall(function() debug.sethook() end))
+        MB = {}
+        function MB.query(ctx)
+            assert(debug == nil)
+            assert(_G.debug == nil)
+            local ok = pcall(function() debug.sethook() end)
+            return { debug_missing = debug == nil, sethook_available = ok }
+        end
+        "#,
+        &serde_json::json!({}),
+        Arc::new(DummyBridge),
+        SessionStore::new(),
+    )
+    .unwrap();
+    let result = runtime
+        .call_mb_once("query", &serde_json::json!({}))
+        .await
+        .unwrap();
+    assert_eq!(result["debug_missing"], true);
+    assert_eq!(result["sethook_available"], false);
+}
+
+#[tokio::test]
+async fn debug_cannot_disable_runtime_budget() {
+    const CHILD: &str = "MOONBRIDGE_DEBUG_BUDGET_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "debug_cannot_disable_runtime_budget",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "budget regression child failed: {status}");
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("Lua loop escaped its execution budget");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    let limits = SandboxLimits {
+        max_instructions: 10_000,
+        instruction_step: 100,
+        call_timeout: std::time::Duration::from_secs(5),
+        ..SandboxLimits::default()
+    };
+    let load_error = LuaRuntime::new_with_limits(
+        "top-level-loop",
+        "assert(debug == nil); pcall(function() debug.sethook() end); while true do end",
+        &serde_json::json!({}),
+        Arc::new(DummyBridge),
+        SessionStore::new(),
+        limits.clone(),
+    )
+    .err()
+    .expect("top-level loop must exhaust its budget");
+    assert!(
+        load_error.to_string().contains("指令数超过上限"),
+        "{load_error}"
+    );
+
+    for body in [
+        "while true do end",
+        "coroutine.wrap(function() while true do end end)()",
+    ] {
+        let script = format!(
+            "MB = {{}}; function MB.query(ctx) assert(debug == nil); \
+             pcall(function() debug.sethook() end); {body} end"
+        );
+        let runtime = LuaRuntime::new_with_limits(
+            "hook-loop",
+            &script,
+            &serde_json::json!({}),
+            Arc::new(DummyBridge),
+            SessionStore::new(),
+            limits.clone(),
+        )
+        .unwrap();
+        let error = runtime
+            .call_mb_once("query", &serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("指令数超过上限"), "{error}");
+    }
+}
+
 const PROBE_SCRIPT: &str = r#"
 MB = {
   version = "0.1.0",

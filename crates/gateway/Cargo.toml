@@ -34,3 +34,8 @@ chrono = { workspace = true }
 url = { workspace = true }
 once_cell = { workspace = true }
 parking_lot = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+rusqlite = { workspace = true }

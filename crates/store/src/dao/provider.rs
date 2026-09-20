@@ -44,7 +44,7 @@ impl Database {
         let mut out = Vec::new();
         for r in rows {
             let mut e = r?;
-            e.api_key = self.enc.decrypt(&e.api_key);
+            e.api_key = self.enc.decrypt(&e.api_key)?;
             out.push(e);
         }
         Ok(out)
@@ -114,7 +114,7 @@ impl Database {
             params![p.key],
         )?;
         for (idx, e) in p.endpoints.iter().enumerate() {
-            let enc = self.enc.encrypt(&e.api_key);
+            let enc = self.enc.encrypt(&e.api_key)?;
             tx.execute(
                 "INSERT INTO provider_endpoints (provider_key,idx,protocol,base_url,api_key_enc) VALUES (?1,?2,?3,?4,?5)",
                 params![p.key, idx as i64, e.protocol, e.base_url, enc],
