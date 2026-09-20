@@ -1,22 +1,26 @@
 <script setup lang="ts">
-import { Pencil, Plus, RefreshCw, Trash2 } from "lucide-vue-next";
+import { ChevronDown, HelpCircle, Pencil, Plus, RefreshCw, Trash2, Wallet } from "lucide-vue-next";
 import { computed, onActivated, onMounted, reactive, ref, watch } from "vue";
 
 import BalanceScriptGuide from "@/components/balance/BalanceScriptGuide.vue";
+import Alert from "@/components/ui/Alert.vue";
 import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
-import Card from "@/components/ui/Card.vue";
 import CodeEditor from "@/components/ui/CodeEditor.vue";
+import EmptyState from "@/components/ui/EmptyState.vue";
 import Input from "@/components/ui/Input.vue";
 import Label from "@/components/ui/Label.vue";
 import Modal from "@/components/ui/Modal.vue";
+import SegmentedControl from "@/components/ui/SegmentedControl.vue";
 import Select from "@/components/ui/Select.vue";
 import Switch from "@/components/ui/Switch.vue";
+import Pagination from "@/components/ui/Pagination.vue";
+import { useAutoPageSize } from "@/composables/useAutoPageSize";
 import { useConfirm } from "@/composables/useConfirm";
 import { useToast } from "@/composables/useToast";
-import { errMsg, balanceApi, providerApi, type BalanceCard, type BalanceCardView, type BalanceKeyResult, type BalanceQuota, type DisplayMode, type Provider } from "@/lib/api";
+import { errMsg, balanceApi, providerApi, usageApi, type BalanceCard, type BalanceCardView, type BalanceKeyResult, type BalancePayload, type BalanceQuota, type DisplayMode, type Provider, type ProviderCost } from "@/lib/api";
 import { BALANCE_TEMPLATES, DEFAULT_BALANCE_SCRIPT, type BalanceTemplate } from "@/lib/balanceTemplates";
-import { cn, formatTime } from "@/lib/utils";
+import { formatCost, formatTime } from "@/lib/utils";
 import { useBalanceStore } from "@/stores/balance";
 
 /** 新建卡片的默认内联脚本（模板库的「通用百分比」）。 */
@@ -38,6 +42,14 @@ const formError = ref<string | null>(null);
 const editing = ref(false);
 const isNew = ref(false);
 const busy = ref(false);
+const guideOpen = ref(false);
+
+/** 卡片配额的显示状态：收起为文字，展开为环形图（默认收起）。 */
+const chartOpen = ref<Record<string, boolean>>({});
+
+function toggleChart(key: string) {
+  chartOpen.value[key] = !chartOpen.value[key];
+}
 
 interface Form {
   key: string;
@@ -84,12 +96,6 @@ async function guardClose(): Promise<boolean> {
 
 // ── 展示辅助 ──
 
-function quotaUsed(q: BalanceQuota): number {
-  if (typeof q.usedPercent === "number") return q.usedPercent;
-  if (typeof q.leftPercent === "number") return 100 - q.leftPercent;
-  return 0;
-}
-
 function quotaLeft(q: BalanceQuota): number {
   if (typeof q.leftPercent === "number") return q.leftPercent;
   if (typeof q.usedPercent === "number") return 100 - q.usedPercent;
@@ -101,9 +107,9 @@ function hasPercent(q: BalanceQuota): boolean {
   return typeof q.usedPercent === "number" || typeof q.leftPercent === "number";
 }
 
-/** 自动模式识别任一金额字段，包括零余额。 */
+/** 金额口径判定：强制金额模式也只对「有金额字段」的配额生效；
+ *  纯百分比配额一律回退按百分比渲染（数据兜底优先于显示模式）。 */
 function isAmountMode(mode: DisplayMode, q: BalanceQuota): boolean {
-  if (mode === "amount") return true;
   if (mode === "percent") return false;
   return typeof q.usedAmount === "number" || typeof q.leftAmount === "number";
 }
@@ -118,20 +124,24 @@ function amountLine(q: BalanceQuota): string | null {
   return parts.length > 0 ? parts.join(" · ") : null;
 }
 
-/** 百分比文案「已用 x% · 剩余 y%」；两个百分比都缺时返回 null。 */
-function percentLine(q: BalanceQuota): string | null {
-  return hasPercent(q)
-    ? `${quotaUsed(q).toFixed(0)}% · 剩余 ${quotaLeft(q).toFixed(0)}%`
-    : null;
+/** 悬停详情行：百分比口径补剩余（已用比在环心）；金额口径逐项列消耗与余额。 */
+function quotaDetailLines(mode: DisplayMode, q: BalanceQuota): string[] {
+  if (isAmountMode(mode, q)) return amountLine(q)?.split(" · ") ?? ["—"];
+  return hasPercent(q) ? [`剩余 ${quotaLeft(q).toFixed(0)}%`] : ["—"];
 }
 
-/** 配额行文案：缺该口径所需字段时显示「—」。 */
-function quotaLine(mode: DisplayMode, q: BalanceQuota): string {
-  return (isAmountMode(mode, q) ? amountLine(q) : percentLine(q)) ?? "—";
+/** 悬停完整提示：详情行 + 重置时间，一行串起。 */
+function quotaDetailText(mode: DisplayMode, q: BalanceQuota): string {
+  const lines = quotaDetailLines(mode, q);
+  const reset = resetText(q);
+  if (reset) lines.push(`重置 ${reset}`);
+  return lines.join(" · ");
 }
 
-/** 进度条比例：缺该口径所需字段时返回 null（不渲染进度条）。 */
-function quotaBarPercent(mode: DisplayMode, q: BalanceQuota): number | null {
+const RING_C = 2 * Math.PI * 15.5;
+
+/** 环形图比例：缺该口径所需字段时返回 null（不渲染环形图）。 */
+function quotaRingPercent(mode: DisplayMode, q: BalanceQuota): number | null {
   const clamp = (v: number) => Math.min(100, Math.max(0, v));
   if (isAmountMode(mode, q)) {
     if (typeof q.usedAmount !== "number" || typeof q.leftAmount !== "number") return null;
@@ -143,34 +153,77 @@ function quotaBarPercent(mode: DisplayMode, q: BalanceQuota): number | null {
   return null;
 }
 
-/** 间隔文案：0 表示关闭定时。 */
-function intervalText(secs: number): string {
-  if (!secs) return "定时关闭";
-  if (secs < 3600) return `每 ${Math.round(secs / 60)} 分钟`;
-  return `每 ${(secs / 3600).toFixed(secs % 3600 === 0 ? 0 : 1)} 小时`;
+const DISPLAY_MODE_LABEL: Record<DisplayMode, string> = { auto: "自动", percent: "百分比", amount: "金额" };
+
+/** 上次查询的短格式：当天只给时分秒，跨天补月/日；完整时间在 title。 */
+function shortTime(sec: number): string {
+  if (!sec) return "—";
+  const d = new Date(sec * 1000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  const today = new Date();
+  return d.toDateString() === today.toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
 }
 
-/** 重置时间文案：纯数字串视为 unix 秒（契约允许脚本给数字，沙箱无 os 库无法自行
- *  格式化）转为本地时间；其余字符串原样展示。 */
+/** 重置时间文案：纯数字串视为 unix 秒（脚本可以直接给数字，沙箱里没有 os 库，
+ *  没法自己格式化时间）转为本地时间；其余字符串原样展示。 */
 function resetText(q: BalanceQuota): string {
   const v = q.resetAt;
   if (v === null || v === undefined || v === "") return "";
   return /^\d{9,11}$/.test(v) ? formatTime(Number(v)) : v;
 }
 
-/** 无 quotas 时的回退展示：载荷去掉空字段后的 pretty JSON。 */
-function payloadJson(payload: Record<string, unknown>): string {
-  const rest: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(payload)) {
-    if (v === null || v === undefined) continue;
-    rest[k] = v;
+/** 值压成一行给人看：字符串原样，数组逐项顿号分隔，对象展开成「键：值」分号连接。 */
+function scalarText(v: unknown): string {
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  if (Array.isArray(v)) return v.map(scalarText).join("、");
+  if (typeof v === "object" && v !== null) {
+    return Object.entries(v as Record<string, unknown>)
+      .map(([k, val]) => `${k}：${scalarText(val)}`)
+      .join("；");
   }
-  return JSON.stringify(rest, null, 2);
+  return String(v);
 }
 
-/** 载荷除空字段外是否还有内容（决定要不要折叠展示 JSON）。 */
-function hasPayloadBody(payload: Record<string, unknown>): boolean {
-  return Object.values(payload).some((v) => v !== null && v !== undefined);
+/** 查询结果里除配额（画成进度条/环形图）、失败原因和说明（逐 key 重复的样板文本）外的字段，按「字段名：值」逐行给出。 */
+function payloadLines(payload: Record<string, unknown>): { label: string; value: string }[] {
+  const lines: { label: string; value: string }[] = [];
+  for (const [k, v] of Object.entries(payload)) {
+    if (v === null || v === undefined || k === "quotas" || k === "message" || k === "summary") continue;
+    lines.push({ label: k, value: scalarText(v) });
+  }
+  return lines;
+}
+
+/** 无界计数：只有 usedAmount，无剩余量/百分比/重置窗口——是计数器不是配额，列表不展示。 */
+function isBareCounter(q: BalanceQuota): boolean {
+  return (
+    typeof q.usedAmount === "number" &&
+    q.leftAmount == null &&
+    q.usedPercent == null &&
+    q.leftPercent == null &&
+    (q.resetAt == null || q.resetAt === "")
+  );
+}
+
+/** 表格实际展示的配额行：剔除无界计数。 */
+function visibleQuotas(payload: BalancePayload | null | undefined): BalanceQuota[] {
+  return (payload?.quotas ?? []).filter((q) => !isBareCounter(q));
+}
+
+/** 配额的一行文字：百分比、金额、重置时间合并成一句话；缩略场景传 withReset=false（重置时间仍在 title）。 */
+function quotaText(q: BalanceQuota, withReset = true): string {
+  const parts: string[] = [];
+  if (typeof q.usedPercent === "number") parts.push(`已用 ${q.usedPercent.toFixed(0)}%`);
+  else if (typeof q.leftPercent === "number") parts.push(`剩余 ${quotaLeft(q).toFixed(0)}%`);
+  if (typeof q.usedAmount === "number") parts.push(`消耗 ${q.usedAmount}${q.unit ?? ""}`);
+  if (typeof q.leftAmount === "number") parts.push(`余额 ${q.leftAmount}${q.unit ?? ""}`);
+  if (withReset) {
+    const reset = resetText(q);
+    if (reset) parts.push(`重置 ${reset}`);
+  }
+  return parts.join(" · ") || "—";
 }
 
 /** 卡片分组键：上游服务 key 优先，旧卡遗留的展示名兜底，再落「未分组」并排最后；
@@ -193,6 +246,9 @@ const groups = computed(() => {
       return a.label.localeCompare(b.label, "zh");
     });
 });
+
+/** 拍平的卡片序列：沿用分组排序（未分组垫底、组名中文序、组内按 position），网格不再按组分行。 */
+const flatCards = computed(() => groups.value.flatMap((g) => g.cards));
 
 // ── 上游服务候选：卡片引用 provider.key，表单下拉即取其列表 ──
 
@@ -229,7 +285,7 @@ const selectedProviderSummary = computed(() =>
   selectedProvider.value ? providerSummary(selectedProvider.value) : "",
 );
 
-/** 卡片副标题只展示 Key 来源，不展示密钥原文。 */
+/** 卡片 key 徽标的悬停补充：Key 来源，不展示密钥原文。 */
 function cardBindingText(c: BalanceCardView): string {
   const count = manualKeys(c.apiKey).length;
   const target = count > 0
@@ -239,10 +295,136 @@ function cardBindingText(c: BalanceCardView): string {
   return url ? `${target} · ${url}` : target;
 }
 
-/** 单 key 刷新的旋转标记（与 store 的粒度口径一致）。 */
-function refreshMark(c: BalanceCardView, r: BalanceKeyResult): string {
-  return `${c.key}#${r.keyIndex}`;
+/** 组行 key 数：已查询按结果数，否则按手动 key 数兜底。 */
+function keyCount(c: BalanceCardView): number {
+  return c.results.length || manualKeys(c.apiKey).length;
 }
+
+/** 卡片最近一次查询时刻（跨 key 取 max）。 */
+function cardLastQuery(c: BalanceCardView): number {
+  let m = 0;
+  for (const r of c.results) if (r.queriedAt > m) m = r.queriedAt;
+  return m;
+}
+
+// ── 分页：按卡片组整组分页，容量随可视高度自适应（估算行高留余量防溢出） ──
+const page = ref(1);
+const tableScroll = ref<HTMLElement | null>(null);
+const { availHeight } = useAutoPageSize(tableScroll, page);
+
+/** 卡片块的估算高度（px）：组行 + 各 key 行；配额/附加字段按行高累加，展开态按环形图行高。 */
+function estCardHeight(c: BalanceCardView): number {
+  const GROUP = 32;
+  const EMPTY = 37;
+  const KEY_BASE = 25;
+  const QUOTA_LINE = 19;
+  const RING = 96;
+  let h = GROUP;
+  if (c.results.length === 0) return h + EMPTY;
+  for (const r of c.results) {
+    if (chartOpen.value[c.key]) {
+      h += KEY_BASE + (visibleQuotas(r.payload).length ? RING : QUOTA_LINE);
+      continue;
+    }
+    const lines = visibleQuotas(r.payload).length + payloadLines(r.payload ?? {}).length;
+    h += KEY_BASE + Math.max(1, lines) * QUOTA_LINE;
+  }
+  return h;
+}
+
+/** 每页容纳的卡片：累计估算高度不超实测可用高度；单卡超高时独占一页（内部滚动兜底）。 */
+const pages = computed<BalanceCardView[][]>(() => {
+  const avail = availHeight.value * 0.94;
+  const out: BalanceCardView[][] = [];
+  let cur: BalanceCardView[] = [];
+  let h = 0;
+  for (const c of flatCards.value) {
+    const ch = estCardHeight(c);
+    if (cur.length && h + ch > avail) {
+      out.push(cur);
+      cur = [];
+      h = 0;
+    }
+    cur.push(c);
+    h += ch;
+  }
+  if (cur.length) out.push(cur);
+  return out;
+});
+const pageCount = computed(() => Math.max(1, pages.value.length));
+const pagedCards = computed(() => pages.value[page.value - 1] ?? []);
+const totalKeys = computed(() => flatCards.value.reduce((n, c) => n + Math.max(1, c.results.length), 0));
+watch(pageCount, (n) => {
+  if (page.value > n) page.value = n;
+});
+
+// ── 本地等值额度：按配额窗口汇总 usage_records 中该 provider 的实际消耗 ──
+const localCosts = ref(new Map<number, Map<string, ProviderCost>>());
+const costBaseSec = ref(0);
+
+/** 配额窗口起点（unix 秒）：时长从标签推断（N 小时 / 周 / 月 / 日），末端优先取
+ *  resetAt，缺省用当前时刻；起点对齐到分钟以合并各卡近似窗口。无法推断返回 null。 */
+function quotaSince(q: BalanceQuota, nowSec: number): number | null {
+  const label = q.label ?? "";
+  let secs = 0;
+  const hours = /(\d+(?:\.\d+)?)\s*小时/.exec(label);
+  if (hours) secs = Number(hours[1]) * 3600;
+  else if (/周|星期|week/i.test(label)) secs = 7 * 86400;
+  else if (/月|month/i.test(label)) secs = 30 * 86400;
+  else if (/[日天]|daily/i.test(label)) secs = 86400;
+  if (!secs) return null;
+  return Math.floor(((parseResetSec(q.resetAt) ?? nowSec) - secs) / 60) * 60;
+}
+
+/** resetAt 可能是 unix 秒数字串或可读时间串，两种都试解析。 */
+function parseResetSec(v: string | null | undefined): number | null {
+  if (!v) return null;
+  if (/^\d{9,11}$/.test(v)) return Number(v);
+  const t = Date.parse(v);
+  return Number.isNaN(t) ? null : Math.floor(t / 1000);
+}
+
+/** 收集全部配额的窗口起点，按 provider 拉取本地消耗（去重后每个窗口一次查询）。 */
+async function loadLocalCosts() {
+  const now = Math.floor(Date.now() / 1000);
+  costBaseSec.value = now;
+  const sinces = new Set<number>();
+  for (const c of flatCards.value)
+    for (const r of c.results)
+      for (const q of r.payload?.quotas ?? []) {
+        const s = quotaSince(q, now);
+        if (s !== null) sinces.add(s);
+      }
+  const map = new Map<number, Map<string, ProviderCost>>();
+  await Promise.all(
+    [...sinces].map(async (s) => {
+      const rows = await usageApi.costByProvider(s).catch(() => [] as ProviderCost[]);
+      map.set(s, new Map(rows.map((r) => [r.providerKey, r])));
+    }),
+  );
+  localCosts.value = map;
+}
+
+/** 该配额窗口内此 provider 的本地消耗；配额无窗口或卡片无 provider 时返回 null。 */
+function localStat(c: BalanceCardView, q: BalanceQuota): ProviderCost | null {
+  if (!c.providerKey) return null;
+  const s = quotaSince(q, costBaseSec.value);
+  if (s === null) return null;
+  return localCosts.value.get(s)?.get(c.providerKey) ?? { providerKey: c.providerKey, cost: 0, requests: 0 };
+}
+
+/** 本地消耗文案：零值压成 $0，避免 $0.0000 这类四位小数噪音。 */
+function localStatText(c: BalanceCardView, q: BalanceQuota): string | null {
+  const s = localStat(c, q);
+  if (!s) return null;
+  return `本地 ${s.cost > 0 ? formatCost(s.cost) : "$0"}`;
+}
+
+// 查询结果刷新（queriedAt 变化）后重拉本地统计；卡片列表加载完成也会触发。
+watch(
+  () => flatCards.value.map((c) => c.results.map((r) => r.queriedAt).join(",")).join("|"),
+  () => void loadLocalCosts(),
+);
 
 // ── 加载与查询 ──
 
@@ -259,10 +441,10 @@ async function refreshAll() {
   }
 }
 
-async function refreshOne(key: string, keyIndex?: number) {
+async function refreshOne(key: string) {
   error.value = null;
   try {
-    await store.refreshOne(key, keyIndex);
+    await store.refreshOne(key);
   } catch (e) {
     error.value = errMsg(e);
   }
@@ -423,38 +605,6 @@ async function runTest() {
   }
 }
 
-/** 卡片上的快捷切换：乐观改显示样式并落库，失败回滚（不加 toast）。 */
-async function setDisplayMode(c: BalanceCardView, mode: DisplayMode) {
-  if (c.displayMode === mode) return;
-  const prev = c.displayMode;
-  c.displayMode = mode;
-  error.value = null;
-  try {
-    await store.save(toCardInput(c));
-  } catch (e) {
-    c.displayMode = prev;
-    error.value = errMsg(e);
-  }
-}
-
-/** 视图 → 保存入参：只带卡片配置字段，查询结果不进 payload。 */
-function toCardInput(c: BalanceCardView): BalanceCard {
-  return {
-    key: c.key,
-    providerKey: c.providerKey,
-    displayMode: c.displayMode,
-    apiKey: c.apiKey,
-    baseUrl: c.baseUrl,
-    providerLabel: c.providerLabel,
-    scriptRef: c.scriptRef,
-    intervalSecs: c.intervalSecs,
-    enabled: c.enabled,
-    extra: c.extra,
-    position: c.position,
-    createdAt: c.createdAt,
-    updatedAt: c.updatedAt,
-  };
-}
 
 async function save(andQuery: boolean) {
   formError.value = null;
@@ -524,19 +674,18 @@ async function remove(key: string) {
 
 <template>
   <div class="flex h-full min-h-0 flex-col gap-4">
-    <div
-      v-if="error || store.error"
-      role="alert"
-      class="shrink-0 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive"
-    >
+    <Alert v-if="error || store.error" class="shrink-0">
       <p>{{ error || store.error }}</p>
       <Button v-if="store.error" class="mt-2" variant="outline" size="sm" :disabled="store.loading" @click="error = null; store.list()">
         {{ store.loading ? "加载中…" : "重试加载" }}
       </Button>
-    </div>
+    </Alert>
 
     <!-- 页头操作 -->
     <div class="flex shrink-0 items-center justify-end gap-2">
+      <Button variant="ghost" size="icon" class="size-8" title="脚本编写指南" @click="guideOpen = true">
+        <HelpCircle class="size-4" />
+      </Button>
       <Button variant="outline" size="sm" :disabled="store.refreshingAll" @click="refreshAll">
         <RefreshCw class="size-4" :class="store.refreshingAll ? 'animate-spin' : ''" />
         一键刷新
@@ -544,116 +693,177 @@ async function remove(key: string) {
       <Button size="sm" @click="newCard"><Plus class="size-4" /> 新增卡片</Button>
     </div>
 
-    <div
-      v-if="store.loading && store.cards.length === 0"
-      class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
-    >
-      加载中…
-    </div>
+    <EmptyState v-if="store.loading && store.cards.length === 0">加载中…</EmptyState>
 
     <!-- 空态：引导 + 示例脚本 -->
-    <div
+    <EmptyState
       v-else-if="store.loaded && !store.error && store.cards.length === 0"
-      class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
+      :icon="Wallet"
     >
       <p>还没有余额卡片。手动填写 API Key 或引用上游服务，用 Lua 脚本查询额度并按间隔自动刷新。</p>
-      <Button class="mt-4" size="sm" @click="newCard">
-        <Plus class="size-4" /> 使用示例脚本新建
-      </Button>
+      <div class="mt-4">
+        <Button size="sm" @click="newCard">
+          <Plus class="size-4" /> 使用示例脚本新建
+        </Button>
+      </div>
       <BalanceScriptGuide class="mt-4" />
-    </div>
+    </EmptyState>
 
-    <!-- 卡片：按上游服务 key 分组（旧卡遗留展示名兜底） -->
-    <section v-else-if="store.cards.length > 0" class="space-y-5">
-      <BalanceScriptGuide />
-      <div v-for="g in groups" :key="g.label">
-        <div class="mb-2 flex items-baseline gap-2">
-          <h3 class="text-sm font-medium">{{ g.label }}</h3>
-          <span class="text-xs text-muted-foreground">
-            · {{ g.cards.length }} 张卡片
-          </span>
-        </div>
-        <div class="grid gap-4 grid-cols-[repeat(auto-fill,minmax(21rem,1fr))]">
-          <template v-for="c in g.cards" :key="c.key">
-            <Card class="flex min-w-0 flex-col">
-              <div class="card-header space-y-2">
-                <div class="flex items-center justify-between gap-2">
-                  <Badge variant="outline" class="max-w-[12rem] truncate font-mono" :title="c.key">{{ c.key }}</Badge>
-                  <div class="flex items-center gap-1">
-                    <Button variant="ghost" size="icon" class="size-7" title="编辑卡片" @click="editCard(c.key)">
-                      <Pencil class="size-3.5" />
-                    </Button>
-                    <Button variant="ghost" size="icon" class="size-7" title="删除卡片" @click="remove(c.key)">
-                      <Trash2 class="size-3.5 text-destructive" />
-                    </Button>
-                  </div>
+    <!-- 余额表：卡片为组行，key 为数据行；配额内联细进度条，组行展开切环形图 -->
+    <div v-else-if="store.cards.length > 0" class="flex min-h-0 flex-1 flex-col">
+      <section ref="tableScroll" class="scrollbar-thin min-h-0 flex-1 overflow-auto">
+      <table class="w-full text-center text-sm">
+        <thead class="thead-sticky">
+          <tr class="border-b text-muted-foreground">
+            <th class="py-2 font-medium">Key</th>
+            <th class="py-2 font-medium">配额</th>
+            <th class="py-2 font-medium">状态</th>
+            <th class="py-2 font-medium">上次查询</th>
+            <th class="py-2 font-medium">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template v-for="c in pagedCards" :key="c.key">
+            <!-- 卡片组行：元信息与卡级操作对齐到列位 -->
+            <tr class="border-b bg-muted/30">
+              <td class="py-1.5">
+                <div class="flex min-w-0 items-center justify-center gap-1.5">
+                  <button
+                    type="button"
+                    class="shrink-0 rounded-sm p-0.5 text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    :title="chartOpen[c.key] ? '收起环形图' : '展开环形图'"
+                    @click="toggleChart(c.key)"
+                  >
+                    <ChevronDown
+                      class="size-3.5 transition-transform"
+                      :class="chartOpen[c.key] ? '' : '-rotate-90'"
+                    />
+                  </button>
+                  <span class="font-mono text-xs font-medium" :title="`${c.key} · ${cardBindingText(c)}`">{{ c.key }}</span>
+                  <span class="truncate text-xs text-muted-foreground">{{ cardBindingText(c) }}</span>
                 </div>
-                <div class="truncate text-xs text-muted-foreground" :title="cardBindingText(c)">{{ cardBindingText(c) }}</div>
-                <div class="flex items-center justify-between gap-2">
-                  <div class="flex items-center rounded-md border p-0.5">
-                    <button
-                      v-for="m in DISPLAY_MODES"
-                      :key="m.value"
-                      type="button"
-                      :title="`显示样式：${m.label}`"
-                      :class="cn('rounded px-1.5 py-0.5 text-[11px] transition-colors', c.displayMode === m.value ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:bg-accent/60')"
-                      @click="setDisplayMode(c, m.value)"
-                    >{{ m.label }}</button>
-                  </div>
-                  <span class="text-[11px] text-muted-foreground">{{ intervalText(c.intervalSecs) }}</span>
-                  <Badge v-if="!c.enabled" variant="secondary">停用</Badge>
-                </div>
-              </div>
-              <div class="card-content divide-y">
-                <div v-if="c.results.length === 0" class="flex items-center justify-between py-3">
-                  <span class="text-xs text-muted-foreground">尚未查询</span>
-                  <Button variant="ghost" size="icon" class="size-7" title="查询卡片" :disabled="store.refreshingAll || store.refreshingKeys.has(c.key)" @click="refreshOne(c.key)">
+              </td>
+              <td class="py-1.5 text-xs text-muted-foreground">
+                {{ keyCount(c) ? `${keyCount(c)} 个 key · ` : "" }}{{ DISPLAY_MODE_LABEL[c.displayMode] }}
+              </td>
+              <td class="py-1.5"><Badge v-if="!c.enabled" variant="secondary">停用</Badge></td>
+              <td class="py-1.5 text-xs tabular-nums text-muted-foreground">{{ shortTime(cardLastQuery(c)) }}</td>
+              <td class="py-1.5">
+                <div class="flex items-center justify-center gap-0.5">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    class="size-7"
+                    title="查询整卡"
+                    :disabled="store.refreshingAll || store.refreshingKeys.has(c.key)"
+                    @click="refreshOne(c.key)"
+                  >
                     <RefreshCw class="size-3.5" :class="store.refreshingKeys.has(c.key) ? 'animate-spin' : ''" />
                   </Button>
+                  <Button variant="ghost" size="icon" class="size-7" title="编辑卡片" @click="editCard(c.key)">
+                    <Pencil class="size-3.5" />
+                  </Button>
+                  <Button variant="ghost" size="icon" class="size-7" title="删除卡片" @click="remove(c.key)">
+                    <Trash2 class="size-3.5 text-destructive" />
+                  </Button>
                 </div>
-                <div v-for="result in c.results" :key="result.keyIndex" class="space-y-2 py-3">
-                  <div class="flex items-center justify-between gap-2">
-                    <Badge variant="secondary" class="max-w-[10rem] truncate font-mono" :title="`API Key ${result.keyLabel}（掩码）`">{{ result.keyLabel || `Key ${result.keyIndex + 1}` }}</Badge>
-                    <div class="flex items-center gap-2">
-                      <Badge :variant="result.status === 'ok' ? 'success' : 'destructive'">{{ result.status === "ok" ? "正常" : "异常" }}</Badge>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        class="size-7"
-                        title="立即查询该 key"
-                        :disabled="store.refreshingAll || store.refreshingKeys.has(c.key) || store.refreshingKeys.has(refreshMark(c, result))"
-                        @click="refreshOne(c.key, result.keyIndex)"
+              </td>
+            </tr>
+            <!-- 未查询占位行 -->
+            <tr v-if="c.results.length === 0" class="border-b">
+              <td class="py-2 font-mono text-xs text-muted-foreground">—</td>
+              <td class="py-2 text-xs text-muted-foreground">尚未查询</td>
+              <td></td>
+              <td></td>
+              <td></td>
+            </tr>
+            <!-- key 数据行 -->
+            <tr v-for="result in c.results" :key="result.keyIndex" class="border-b transition-colors hover:bg-accent/40">
+              <td class="py-2 font-mono text-xs" :title="`API Key ${result.keyLabel}（掩码）`">{{ result.keyLabel || `Key ${result.keyIndex + 1}` }}</td>
+              <td class="py-2">
+                <!-- 收起：配额行内细进度条 + 文本；展开：环形图 -->
+                <div v-if="!chartOpen[c.key]" class="flex flex-col items-center gap-0.5">
+                  <div class="grid grid-cols-[4rem_3.5rem_auto_5.5rem] items-center gap-x-1.5 gap-y-0.5 text-xs">
+                    <template v-for="(q, i) in visibleQuotas(result.payload)" :key="`q${i}`">
+                      <span class="truncate text-right text-muted-foreground" :title="`${q.label}：${quotaDetailText(c.displayMode, q)}`">{{ q.label }}</span>
+                      <span
+                        v-if="quotaRingPercent(c.displayMode, q) !== null"
+                        class="inline-block h-1.5 w-14 overflow-hidden rounded-full bg-muted"
+                        :title="`${q.label}：${quotaDetailText(c.displayMode, q)}`"
                       >
-                        <RefreshCw class="size-3.5" :class="store.refreshingKeys.has(refreshMark(c, result)) ? 'animate-spin' : ''" />
-                      </Button>
-                    </div>
+                        <span class="block h-full bg-primary" :style="{ width: quotaRingPercent(c.displayMode, q) + '%' }" />
+                      </span>
+                      <span v-else />
+                      <span class="tabular-nums" :title="`${q.label}：${quotaDetailText(c.displayMode, q)}`">{{ quotaText(q, false) }}</span>
+                      <span
+                        v-if="localStat(c, q)"
+                        class="truncate text-right text-muted-foreground tabular-nums"
+                        :title="`本地统计：跟随配额窗口的实际消耗 · ${localStat(c, q)!.requests} 次请求`"
+                      >{{ localStatText(c, q) }}</span>
+                      <span v-else />
+                    </template>
+                    <template v-for="(line, i) in payloadLines(result.payload ?? {})" :key="`p${i}`">
+                      <span class="truncate text-right text-muted-foreground">{{ line.label }}</span>
+                      <span class="col-span-3 tabular-nums">{{ line.value }}</span>
+                    </template>
                   </div>
-                  <div v-if="result.payload?.quotas?.length" class="space-y-2 pt-1">
-                    <div v-for="(q, i) in result.payload.quotas" :key="i">
-                      <div class="flex items-center justify-between text-xs">
-                        <span class="truncate">{{ q.label }}</span>
-                        <span class="shrink-0 text-muted-foreground tabular-nums">{{ quotaLine(c.displayMode, q) }}</span>
-                      </div>
-                      <div v-if="quotaBarPercent(c.displayMode, q) !== null" class="mt-1 h-2 w-full overflow-hidden rounded-full bg-muted">
-                        <div class="h-full rounded-full bg-primary" :style="{ width: (quotaBarPercent(c.displayMode, q) ?? 0) + '%' }"></div>
-                      </div>
-                      <div v-if="resetText(q)" class="mt-0.5 text-[11px] text-muted-foreground">重置 {{ resetText(q) }}</div>
-                    </div>
-                  </div>
-                  <details v-else-if="result.payload && hasPayloadBody(result.payload)" class="pt-1">
-                    <summary class="cursor-pointer text-xs text-muted-foreground">查看返回内容</summary>
-                    <pre class="scrollbar-thin mt-1 max-h-40 overflow-auto rounded border bg-muted/40 p-2 font-mono text-[11px]">{{ payloadJson(result.payload) }}</pre>
-                  </details>
                   <div v-if="result.status === 'error'" class="text-xs text-destructive">{{ result.error || result.payload?.message || "查询失败" }}</div>
-                  <div v-if="result.payload?.summary" class="text-xs text-muted-foreground">{{ result.payload.summary }}</div>
-                  <div class="text-[11px] text-muted-foreground">上次查询 {{ formatTime(result.queriedAt) }}</div>
+                  <div
+                    v-if="result.status === 'ok' && !visibleQuotas(result.payload).length && !payloadLines(result.payload ?? {}).length"
+                    class="text-xs text-muted-foreground"
+                  >—</div>
                 </div>
-              </div>
-            </Card>
+                <div v-else-if="visibleQuotas(result.payload).length" class="flex flex-wrap items-start justify-center gap-x-3 gap-y-2">
+                  <template v-for="(q, i) in visibleQuotas(result.payload)" :key="i">
+                    <div
+                      v-if="quotaRingPercent(c.displayMode, q) !== null"
+                      class="flex w-20 shrink-0 flex-col items-center gap-1 text-center"
+                      :title="`${q.label}：${quotaDetailText(c.displayMode, q)}`"
+                    >
+                      <div class="relative size-11 shrink-0">
+                        <svg viewBox="0 0 36 36" class="size-full -rotate-90">
+                          <circle cx="18" cy="18" r="15.5" fill="none" stroke-width="3" class="stroke-muted" />
+                          <circle
+                            cx="18" cy="18" r="15.5" fill="none" stroke-width="3" stroke-linecap="round"
+                            class="stroke-primary transition-[stroke-dashoffset] duration-500"
+                            :stroke-dasharray="RING_C"
+                            :stroke-dashoffset="RING_C * (1 - (quotaRingPercent(c.displayMode, q) ?? 0) / 100)"
+                          />
+                        </svg>
+                        <div class="absolute inset-0 flex items-center justify-center text-[10px] font-semibold tabular-nums">
+                          {{ (quotaRingPercent(c.displayMode, q) ?? 0).toFixed(0) }}%
+                        </div>
+                      </div>
+                      <div class="w-full truncate text-[11px]">{{ q.label }}</div>
+                      <div v-if="localStat(c, q)" class="w-full truncate text-[10px] text-muted-foreground tabular-nums">
+                        {{ localStatText(c, q) }}
+                      </div>
+                    </div>
+                    <div
+                      v-else
+                      class="flex min-h-16 w-20 shrink-0 items-center justify-center text-center"
+                      :title="`${q.label}：${quotaDetailText(c.displayMode, q)}`"
+                    >
+                      <div class="w-full truncate text-[11px] text-muted-foreground">{{ q.label }}</div>
+                    </div>
+                  </template>
+                </div>
+                <div v-else class="text-xs text-muted-foreground">—</div>
+              </td>
+              <td class="py-2">
+                <Badge :variant="result.status === 'ok' ? 'success' : 'destructive'">{{ result.status === "ok" ? "正常" : "异常" }}</Badge>
+              </td>
+              <td class="py-2 text-xs tabular-nums text-muted-foreground" :title="formatTime(result.queriedAt)">{{ shortTime(result.queriedAt) }}</td>
+              <td class="py-2" />
+            </tr>
           </template>
-        </div>
+        </tbody>
+      </table>
+      </section>
+      <div v-if="pageCount > 1" class="shrink-0 border-t pt-3">
+        <Pagination v-model:page="page" :page-count="pageCount" :total="totalKeys" />
       </div>
-    </section>
+    </div>
 
     <!-- 新增 / 编辑弹窗：单列纵向布局，只上下滚动 -->
     <Modal
@@ -664,13 +874,12 @@ async function remove(key: string) {
       @close="editing = false"
     >
       <template v-if="modalErrors.length" #notice>
-        <div
-          role="alert"
+        <Alert
           aria-live="assertive"
-          class="scrollbar-thin mx-5 mt-3 max-h-28 overflow-y-auto rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive"
+          class="scrollbar-thin mx-5 mt-3 max-h-28 overflow-y-auto"
         >
           <p v-for="(message, index) in modalErrors" :key="index" class="whitespace-pre-wrap break-words">{{ message }}</p>
-        </div>
+        </Alert>
       </template>
       <div class="grid gap-4">
         <div class="space-y-1.5 rounded-md border border-dashed p-3">
@@ -694,7 +903,6 @@ async function remove(key: string) {
             placeholder="如 anthropic-official"
             :disabled="!isNew"
           />
-          <p class="text-xs text-muted-foreground">卡片的唯一标识，同时作为脚本 ctx.name</p>
         </div>
 
         <div class="space-y-1.5">
@@ -705,9 +913,6 @@ async function remove(key: string) {
           </p>
           <p v-else-if="providers.length === 0" class="text-xs text-muted-foreground">
             还没有上游服务，可直接填写下方 API Key。
-          </p>
-          <p class="text-xs text-muted-foreground">
-            手动 Key 为空时，使用该服务端点的 Key（去重保序，留空继承前一个非空 Key）；否则仅用于分组，不引用服务的 Key。
           </p>
         </div>
 
@@ -723,9 +928,6 @@ async function remove(key: string) {
             placeholder="填写一个 Key，或换行输入 Key 列表"
             class="flex w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           ></textarea>
-          <p class="text-xs text-muted-foreground">
-            手动填写后只使用这些 Key，不混入上游服务的 Key；忽略空行和重复值，每个 Key 单独查询。
-          </p>
           <p v-if="formManualKeys.length > 0" class="text-xs text-muted-foreground">
             当前使用 {{ formManualKeys.length }} 个手动 Key；清空后恢复上游服务引用。
           </p>
@@ -734,38 +936,21 @@ async function remove(key: string) {
         <div class="space-y-1.5">
           <Label for="bc-url">查询 URL（可选）</Label>
           <Input id="bc-url" v-model="form.baseUrl" placeholder="如 https://api.example.com" />
-          <p class="text-xs text-muted-foreground">
-            配额接口的基准地址，脚本里用 ctx.base_url 读取；留空则脚本需自己处理 URL
-          </p>
         </div>
 
         <div class="space-y-1.5">
           <Label>显示样式</Label>
-          <div class="flex items-center rounded-md border p-0.5">
-            <button
-              v-for="m in DISPLAY_MODES"
-              :key="m.value"
-              type="button"
-              :class="
-                cn(
-                  'flex-1 rounded px-2 py-1 text-xs transition-colors',
-                  form.displayMode === m.value
-                    ? 'bg-accent text-accent-foreground'
-                    : 'text-muted-foreground hover:bg-accent/60',
-                )
-              "
-              @click="form.displayMode = m.value"
-            >
-              {{ m.label }}
-            </button>
-          </div>
-          <p class="text-xs text-muted-foreground">自动 = 按脚本返回的字段判断；强制口径缺字段时显示「—」</p>
+          <SegmentedControl
+            :model-value="form.displayMode"
+            :options="DISPLAY_MODES"
+            fill
+            @update:model-value="(v) => (form.displayMode = v as DisplayMode)"
+          />
         </div>
 
         <div class="space-y-1.5">
           <Label for="bc-interval">查询间隔（秒）</Label>
           <Input id="bc-interval" v-model="form.intervalSecs" type="number" min="0" />
-          <p class="text-xs text-muted-foreground">0 = 关闭定时；小于 60 秒会按 60 秒计</p>
         </div>
 
         <div class="space-y-1.5">
@@ -778,10 +963,6 @@ async function remove(key: string) {
         <div class="space-y-1.5">
           <Label for="bc-script">脚本文件路径（可选）</Label>
           <Input id="bc-script" v-model="form.scriptRef" placeholder="如 balance_openai.lua" />
-          <p class="text-xs text-muted-foreground">
-            当前来源：{{ form.scriptRef.trim() ? "文件引用（插件目录内的 .lua 文件）" : "内联脚本" }}。
-            清空路径后必须填写内联脚本，不会自动套用默认脚本。
-          </p>
         </div>
 
         <BalanceScriptGuide />
@@ -828,10 +1009,17 @@ async function remove(key: string) {
                   {{ formatTime(r.queriedAt) }}
                 </span>
               </div>
-              <pre
-                v-if="r.payload"
-                class="scrollbar-thin max-h-48 overflow-auto rounded border bg-muted/40 p-2 font-mono text-[11px]"
-              >{{ JSON.stringify(r.payload, null, 2) }}</pre>
+              <div v-if="r.payload?.quotas?.length" class="space-y-0.5">
+                <div v-for="(q, i) in r.payload.quotas" :key="i" class="text-xs">
+                  {{ q.label }}：{{ quotaText(q) }}
+                </div>
+              </div>
+              <div v-if="r.payload && payloadLines(r.payload).length" class="space-y-0.5">
+                <div v-for="(line, i) in payloadLines(r.payload)" :key="i" class="text-xs">
+                  <span class="text-muted-foreground">{{ line.label }}</span>
+                  {{ line.value }}
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -845,6 +1033,11 @@ async function remove(key: string) {
           {{ busy ? "保存中…" : "保存" }}
         </Button>
       </template>
+    </Modal>
+
+    <!-- 脚本编写指南：页头问号按钮弹出 -->
+    <Modal :open="guideOpen" title="脚本编写指南" @close="guideOpen = false">
+      <BalanceScriptGuide bare :open="true" />
     </Modal>
   </div>
 </template>

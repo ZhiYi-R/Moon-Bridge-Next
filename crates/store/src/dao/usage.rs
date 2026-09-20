@@ -21,6 +21,15 @@ pub struct UsageSummary {
     pub total_cost: f64,
 }
 
+/// 按 provider 的消耗汇总（余额页「本地等值额度」对照上游配额用）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCost {
+    pub provider_key: String,
+    pub cost: f64,
+    pub requests: i64,
+}
+
 const COLS: &str = "id,session_id,model,upstream_model,provider_key,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,cost,status,error,latency_ms,ttft_ms,created_at";
 
 fn row_to_usage(r: &rusqlite::Row) -> rusqlite::Result<UsageRecord> {
@@ -150,5 +159,33 @@ impl Database {
                 total_cost: r.get(6)?,
             })
         })?)
+    }
+
+    /// 按 provider 汇总 since（秒级，含端点）以来的消耗；provider_key 为空的记录无对照对象，剔除。
+    pub fn usage_cost_by_provider(&self, since: Option<i64>) -> Result<Vec<ProviderCost>> {
+        let conn = self.conn.lock();
+        let mut sql = String::from(
+            "SELECT provider_key, COALESCE(SUM(cost),0), COUNT(*) FROM usage_records WHERE provider_key <> ''",
+        );
+        let mut binds: Vec<Box<dyn ToSql>> = Vec::new();
+        if let Some(s) = since {
+            sql.push_str(" AND created_at >= ?");
+            binds.push(Box::new(s));
+        }
+        sql.push_str(" GROUP BY provider_key");
+        let params: Vec<&dyn ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params.as_slice(), |r| {
+            Ok(ProviderCost {
+                provider_key: r.get(0)?,
+                cost: r.get(1)?,
+                requests: r.get(2)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 }

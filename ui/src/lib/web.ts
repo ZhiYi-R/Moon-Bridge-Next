@@ -266,6 +266,11 @@ export async function webInvoke<T>(cmd: string, args: Record<string, unknown>): 
         "GET",
         `/api/usage/summary${query({ since: args.since, until: args.until })}`,
       )) as T;
+    case "usage_cost_by_provider":
+      return (await request<unknown>(
+        "GET",
+        `/api/usage/cost-by-provider${query({ since: args.since })}`,
+      )) as T;
     case "trace_list":
       return (await request<unknown>("GET", `/api/traces${query({ limit: args.limit })}`)) as T;
     case "trace_read":

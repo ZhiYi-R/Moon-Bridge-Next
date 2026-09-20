@@ -21,7 +21,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use moonbridge_store::{
-    Database, ModelDef, Offer, Provider, Route, Setting, UsageQuery, UsageRecord, UsageSummary,
+    Database, ModelDef, Offer, Provider, ProviderCost, Route, Setting, UsageQuery, UsageRecord,
+    UsageSummary,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -228,6 +229,7 @@ pub fn router(state: AdminState) -> Router {
         // ---- usage ----
         .route("/api/usage", get(usage_query))
         .route("/api/usage/summary", get(usage_summary))
+        .route("/api/usage/cost-by-provider", get(usage_cost_by_provider))
         // ---- balance（余额&健康看板）----
         .route(
             "/api/balance/cards",
@@ -517,6 +519,14 @@ async fn usage_summary(
     Ok(Json(
         state.db.usage_summary_range(params.since, params.until)?,
     ))
+}
+
+/// 按 provider 汇总消耗（余额页本地等值额度对照上游配额）。
+async fn usage_cost_by_provider(
+    State(state): State<AdminState>,
+    Query(params): Query<UsageParams>,
+) -> ApiResult<Json<Vec<ProviderCost>>> {
+    Ok(Json(state.db.usage_cost_by_provider(params.since)?))
 }
 
 // ───────────────────────── 设置 ─────────────────────────

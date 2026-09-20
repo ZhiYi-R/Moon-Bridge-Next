@@ -1,8 +1,8 @@
-// 余额看板内置脚本模板：按调研确认的各服务真实接口编写（2026-09 口径）。
+// 余额看板内置脚本模板：按调研确认的各服务真实接口编写（2026-09 核对）。
 //
 // 每个模板都是可直接运行的完整脚本（首行必须是 `MB = {}`），只按单 key 编写
 // （多 key 由引擎逐 key 执行）。沙箱无 os/io 库：时间戳只能透传 ISO 字符串
-// 或返回 unix 秒数字（契约会把数字归一成字符串，前端再格式化为时间）。
+// 或返回 unix 秒数字（引擎会把数字归一成字符串，前端再格式化为时间）。
 //
 // 接口依据摘要：
 // - new-api：GET {base}/api/user/self → data.quota / 500000 作余额（默认 $）
@@ -282,7 +282,7 @@ const ZHIPU_GLM = `MB = {}
 -- 智谱 GLM Coding Plan：GET {base}/api/monitor/usage/quota/limit
 -- 国内 open.bigmodel.cn / 国际 api.z.ai；鉴权用裸 key（不带 Bearer），失败回退 Bearer。
 -- data.limits[] 的 type：TIME_LIMIT = 5 小时窗口，TOKENS_LIMIT = token 周窗口；
--- percentage 是已用百分比；nextResetTime 是毫秒时间戳（契约允许 reset_at 给 unix 秒数字）。
+-- percentage 是已用百分比；nextResetTime 是毫秒时间戳（reset_at 也可以给 unix 秒数字）。
 
 function MB.query(ctx)
   local base = ctx.base_url ~= "" and ctx.base_url or "https://open.bigmodel.cn"
@@ -559,13 +559,13 @@ export const BALANCE_TEMPLATES: BalanceTemplate[] = [
   {
     id: "generic-percent",
     label: "通用百分比",
-    description: "最通用的骨架：Bearer 鉴权 GET 一个地址，把返回字段映射成百分比配额。其他服务都不匹配时从它改起。",
+    description: "最通用的一版：Bearer 鉴权 GET 一个地址，把返回字段映射成百分比配额。其他服务都不匹配时从它改起。",
     script: GENERIC_PERCENT,
   },
   {
     id: "generic-amount",
     label: "通用金额",
-    description: "金额口径骨架：返回「消耗/余额」金额字段，币种走额外参数 unit（默认 ¥）。",
+    description: "金额模板：返回「消耗/余额」金额字段，币种走额外参数 unit（默认 ¥）。",
     extraText: '{\n  "unit": "¥"\n}',
     script: GENERIC_AMOUNT,
   },

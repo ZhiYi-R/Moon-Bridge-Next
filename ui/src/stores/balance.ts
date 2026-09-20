@@ -8,7 +8,7 @@ export const useBalanceStore = defineStore("balance", () => {
   const cards = ref<BalanceCardView[]>([]);
   const loading = ref(false);
   const error = ref<string | null>(null);
-  /** 正在查询中的标记（整卡刷新为卡片 key，单 key 刷新为 `key#index`；刷新图标按此旋转）。 */
+  /** 正在查询中的卡片 key（刷新图标按此旋转）。 */
   const refreshingKeys = ref(new Set<string>());
   const refreshingAll = ref(false);
   /** 是否已成功加载过一次：路由缓存复用时用于静默刷新。 */
@@ -65,18 +65,17 @@ export const useBalanceStore = defineStore("balance", () => {
     error.value = null;
   }
 
-  /** 刷新卡片：传 keyIndex 只重跑该 key，旋转标记细化到 key 行。 */
-  async function refreshOne(key: string, keyIndex?: number) {
-    const mark = keyIndex === undefined ? key : `${key}#${keyIndex}`;
-    markRefreshing(mark, true);
+  /** 刷新整张卡片（手动刷新只允许到卡粒度，key 行不提供单刷入口）。 */
+  async function refreshOne(key: string) {
+    markRefreshing(key, true);
     try {
-      upsert(await balanceApi.refresh(key, keyIndex));
+      upsert(await balanceApi.refresh(key));
       error.value = null;
     } catch (e) {
       error.value = errMsg(e);
       throw e;
     } finally {
-      markRefreshing(mark, false);
+      markRefreshing(key, false);
     }
   }
 

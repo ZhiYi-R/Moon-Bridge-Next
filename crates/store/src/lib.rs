@@ -24,7 +24,7 @@ use rusqlite::Connection;
 
 pub use balance::{clamp_interval_secs, MIN_INTERVAL_SECS};
 pub use crypto::{AesGcmKey, EncKey, PlaintextKey};
-pub use dao::usage::UsageSummary;
+pub use dao::usage::{ProviderCost, UsageSummary};
 pub use error::{Result, StoreError};
 pub use models::{
     BalanceCard, BalanceCardView, BalanceKeyResult, BalanceQuota, BalanceResult, Endpoint,

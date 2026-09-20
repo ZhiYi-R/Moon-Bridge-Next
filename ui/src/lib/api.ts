@@ -139,6 +139,12 @@ export interface UsageSummary {
   totalCost: number;
 }
 
+export interface ProviderCost {
+  providerKey: string;
+  cost: number;
+  requests: number;
+}
+
 export interface Setting {
   key: string;
   value: Json;
@@ -309,6 +315,8 @@ export const usageApi = {
   ) => call<UsageRecord[]>("usage_query", params),
   summary: (params: { since?: number; until?: number } = {}) =>
     call<UsageSummary>("usage_summary", params),
+  costByProvider: (since?: number) =>
+    call<ProviderCost[]>("usage_cost_by_provider", { since }),
 };
 
 export const traceApi = {

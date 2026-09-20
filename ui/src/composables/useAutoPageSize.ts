@@ -10,6 +10,8 @@ import { onBeforeUnmount, ref, watch, type Ref } from "vue";
  */
 export function useAutoPageSize(container: Ref<HTMLElement | null>, page?: Ref<number>) {
   const pageSize = ref(20);
+  /** 容器内表格区域的实测可用高度（px），供按块估算高度的分页场景使用。 */
+  const availHeight = ref(0);
   let rowHeight = 0;
   let resizeObserver: ResizeObserver | null = null;
   let mutationObserver: MutationObserver | null = null;
@@ -22,21 +24,22 @@ export function useAutoPageSize(container: Ref<HTMLElement | null>, page?: Ref<n
     const head = el.querySelector<HTMLElement>("thead");
     const row = el.querySelector<HTMLElement>("tbody tr");
     if (row) rowHeight = row.offsetHeight;
-    if (!table || !head || rowHeight <= 0) return;
     const cs = getComputedStyle(el);
     let avail =
       el.clientHeight -
       parseFloat(cs.paddingTop) -
       parseFloat(cs.paddingBottom) -
-      head.offsetHeight -
+      (head?.offsetHeight ?? 0) -
       2; // 少量余量，避免取整后溢出出现滚动条
     for (
-      let sib = table.previousElementSibling as HTMLElement | null;
+      let sib = table?.previousElementSibling as HTMLElement | null;
       sib;
       sib = sib.previousElementSibling as HTMLElement | null
     ) {
       avail -= sib.offsetHeight;
     }
+    availHeight.value = Math.max(0, avail);
+    if (!table || rowHeight <= 0) return;
     // 下限为 1：只要高于实际可容纳行数，渲染就会溢出——滚动条和翻页同时出现。
     // 连 1 行都放不下的极端矮容器才有滚动兜底；上限防超大表一次渲染过多。
     const next = Math.max(1, Math.min(200, Math.floor(avail / rowHeight)));
@@ -78,5 +81,5 @@ export function useAutoPageSize(container: Ref<HTMLElement | null>, page?: Ref<n
     if (raf) cancelAnimationFrame(raf);
   });
 
-  return { pageSize };
+  return { pageSize, availHeight };
 }

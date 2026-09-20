@@ -157,6 +157,7 @@ pub fn run() {
             // Usage
             commands::usage::usage_query,
             commands::usage::usage_summary,
+            commands::usage::usage_cost_by_provider,
             // Balance（余额&健康看板）
             commands::balance::balance_card_list,
             commands::balance::balance_card_save,

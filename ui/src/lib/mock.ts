@@ -267,7 +267,7 @@ function fakeAmountBalanceResult(): BalanceResult {
     payload: {
       quotas: [
         { label: "余额", unit: "¥", usedAmount: 12.5, leftAmount: 37.5, resetAt: null },
-        { label: "流量", unit: "GB", usedAmount: 3, leftAmount: null, resetAt: null },
+        { label: "请求数", unit: "次", usedAmount: 320, leftAmount: null, resetAt: null },
         { label: "周额度", usedPercent: used, leftPercent: 100 - used, resetAt: null },
       ],
       summary: "mock：金额与百分比混排，接入真实脚本后按上游返回值展示。",
@@ -828,6 +828,20 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
       s.totalCost = Number(s.totalCost.toFixed(6));
       return s as T;
     }
+    case "usage_cost_by_provider": {
+      let list = usageRecords;
+      if (args.since) list = list.filter((r) => r.createdAt >= Number(args.since));
+      const map = new Map<string, { providerKey: string; cost: number; requests: number }>();
+      for (const r of list) {
+        if (!r.providerKey) continue;
+        const e = map.get(r.providerKey) ?? { providerKey: r.providerKey, cost: 0, requests: 0 };
+        e.cost += r.cost;
+        e.requests++;
+        map.set(r.providerKey, e);
+      }
+      return [...map.values()].map((e) => ({ ...e, cost: Number(e.cost.toFixed(6)) })) as T;
+    }
+
     // ── Trace ──
     case "trace_list": {
       const limit = Number(args.limit ?? 500);

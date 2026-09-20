@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use moonbridge_store::{UsageQuery, UsageRecord, UsageSummary};
+use moonbridge_store::{ProviderCost, UsageQuery, UsageRecord, UsageSummary};
 use tauri::State;
 
 use crate::commands::CmdResult;
@@ -45,4 +45,13 @@ pub fn usage_summary(
     until: Option<i64>,
 ) -> CmdResult<UsageSummary> {
     Ok(state.db.usage_summary_range(since, until)?)
+}
+
+/// 按 provider 汇总 since（秒级，含端点）以来的消耗，供余额页本地等值额度对照。
+#[tauri::command]
+pub fn usage_cost_by_provider(
+    state: State<'_, Arc<ManagedState>>,
+    since: Option<i64>,
+) -> CmdResult<Vec<ProviderCost>> {
+    Ok(state.db.usage_cost_by_provider(since)?)
 }
