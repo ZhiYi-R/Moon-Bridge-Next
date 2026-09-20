@@ -116,21 +116,39 @@ impl Database {
 
     /// 全量用量汇总。
     pub fn usage_summary(&self) -> Result<UsageSummary> {
+        self.usage_summary_range(None, None)
+    }
+
+    /// 时间范围内的用量汇总（created_at 秒级，含两端）。
+    pub fn usage_summary_range(
+        &self,
+        since: Option<i64>,
+        until: Option<i64>,
+    ) -> Result<UsageSummary> {
         let conn = self.conn.lock();
-        Ok(conn.query_row(
-            "SELECT COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0), COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cost),0) FROM usage_records",
-            [],
-            |r| {
-                Ok(UsageSummary {
-                    requests: r.get(0)?,
-                    input_tokens: r.get(1)?,
-                    output_tokens: r.get(2)?,
-                    cache_read_tokens: r.get(3)?,
-                    cache_write_tokens: r.get(4)?,
-                    reasoning_tokens: r.get(5)?,
-                    total_cost: r.get(6)?,
-                })
-            },
-        )?)
+        let mut sql = String::from(
+            "SELECT COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0), COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cost),0) FROM usage_records WHERE 1=1",
+        );
+        let mut binds: Vec<Box<dyn ToSql>> = Vec::new();
+        if let Some(s) = since {
+            sql.push_str(" AND created_at >= ?");
+            binds.push(Box::new(s));
+        }
+        if let Some(u) = until {
+            sql.push_str(" AND created_at <= ?");
+            binds.push(Box::new(u));
+        }
+        let params: Vec<&dyn ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+        Ok(conn.query_row(&sql, params.as_slice(), |r| {
+            Ok(UsageSummary {
+                requests: r.get(0)?,
+                input_tokens: r.get(1)?,
+                output_tokens: r.get(2)?,
+                cache_read_tokens: r.get(3)?,
+                cache_write_tokens: r.get(4)?,
+                reasoning_tokens: r.get(5)?,
+                total_cost: r.get(6)?,
+            })
+        })?)
     }
 }

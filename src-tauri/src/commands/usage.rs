@@ -37,8 +37,12 @@ pub fn usage_query(
     Ok(state.db.query_usage(&q)?)
 }
 
-/// 用量汇总（总请求数、总 token 等）。
+/// 用量汇总（总请求数、总 token 等）；since/until 限定 created_at 秒级范围（含两端）。
 #[tauri::command]
-pub fn usage_summary(state: State<'_, Arc<ManagedState>>) -> CmdResult<UsageSummary> {
-    Ok(state.db.usage_summary()?)
+pub fn usage_summary(
+    state: State<'_, Arc<ManagedState>>,
+    since: Option<i64>,
+    until: Option<i64>,
+) -> CmdResult<UsageSummary> {
+    Ok(state.db.usage_summary_range(since, until)?)
 }

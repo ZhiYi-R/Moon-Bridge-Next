@@ -510,8 +510,13 @@ async fn usage_query(
     Ok(Json(state.db.query_usage(&q)?))
 }
 
-async fn usage_summary(State(state): State<AdminState>) -> ApiResult<Json<UsageSummary>> {
-    Ok(Json(state.db.usage_summary()?))
+async fn usage_summary(
+    State(state): State<AdminState>,
+    Query(params): Query<UsageParams>,
+) -> ApiResult<Json<UsageSummary>> {
+    Ok(Json(
+        state.db.usage_summary_range(params.since, params.until)?,
+    ))
 }
 
 // ───────────────────────── 设置 ─────────────────────────

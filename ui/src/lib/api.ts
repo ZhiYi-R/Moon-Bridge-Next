@@ -1,4 +1,4 @@
-// 前后端契约层：Tauri command 的类型安全封装 + DTO 类型定义。
+// 前后端接口层：Tauri command 的类型安全封装 + DTO 类型定义。
 
 import { invoke } from "@tauri-apps/api/core";
 
@@ -307,7 +307,8 @@ export const usageApi = {
       offset?: number;
     } = {},
   ) => call<UsageRecord[]>("usage_query", params),
-  summary: () => call<UsageSummary>("usage_summary"),
+  summary: (params: { since?: number; until?: number } = {}) =>
+    call<UsageSummary>("usage_summary", params),
 };
 
 export const traceApi = {

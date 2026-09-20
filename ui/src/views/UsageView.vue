@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { RefreshCw } from "lucide-vue-next";
+import { BarChart3, RefreshCw } from "lucide-vue-next";
 import { computed, onActivated, onMounted, ref, watch } from "vue";
 
+import Alert from "@/components/ui/Alert.vue";
 import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
 import Card from "@/components/ui/Card.vue";
+import EmptyState from "@/components/ui/EmptyState.vue";
 import Pagination from "@/components/ui/Pagination.vue";
+import DateRangeFilter, { type DateRange } from "@/components/ui/DateRangeFilter.vue";
+import { useAutoPageSize } from "@/composables/useAutoPageSize";
 import { errMsg, modelApi, usageApi, type UsageRecord, type UsageSummary } from "@/lib/api";
 import { formatCost, formatLatency, formatTime, formatTokens } from "@/lib/utils";
 
@@ -13,6 +17,9 @@ const records = ref<UsageRecord[]>([]);
 const summary = ref<UsageSummary | null>(null);
 const error = ref<string | null>(null);
 const loading = ref(false);
+
+/** 时间范围筛选：null = 不限；变化时按 since/until 重查后端（汇总/图表/明细全部跟随）。 */
+const range = ref<DateRange | null>(null);
 
 /** 模型 slug → 展示名映射（加载失败不影响用量展示，回退显示 slug）。 */
 const modelNames = ref(new Map<string, string>());
@@ -28,8 +35,8 @@ async function load(silent = false) {
   error.value = null;
   try {
     const [recs, sum, models] = await Promise.all([
-      usageApi.query({ limit: 500 }),
-      usageApi.summary(),
+      usageApi.query({ limit: 500, since: range.value?.from, until: range.value?.to }),
+      usageApi.summary({ since: range.value?.from, until: range.value?.to }),
       modelApi.list().catch(() => []),
     ]);
     records.value = recs;
@@ -37,7 +44,6 @@ async function load(silent = false) {
     modelNames.value = new Map(
       models.filter((m) => m.displayName).map((m) => [m.slug, m.displayName as string]),
     );
-    recompute();
   } catch (e) {
     error.value = errMsg(e);
   } finally {
@@ -121,8 +127,11 @@ interface ModelBucket {
   requests: number;
   input: number;
   output: number;
+  cacheRead: number;
   cost: number;
   total: number;
+  /** 缓存命中率 = 缓存读 / 输入（input 为 0 时 null）；与仪表盘口径一致。 */
+  hitRate: number | null;
   pct: number;
 }
 
@@ -132,13 +141,14 @@ const OTHER_MODEL = "__other__";
 
 /** 按模型聚合 token/请求/成本，按总量降序；Top 6 之外并入「其他」。 */
 function modelBuckets(): ModelBucket[] {
-  const map = new Map<string, { requests: number; input: number; output: number; cost: number }>();
+  const map = new Map<string, { requests: number; input: number; output: number; cacheRead: number; cost: number }>();
   for (const r of records.value) {
     const k = r.model ?? "—";
-    const e = map.get(k) ?? { requests: 0, input: 0, output: 0, cost: 0 };
+    const e = map.get(k) ?? { requests: 0, input: 0, output: 0, cacheRead: 0, cost: 0 };
     e.requests += 1;
     e.input += r.inputTokens || 0;
     e.output += r.outputTokens || 0;
+    e.cacheRead += r.cacheReadTokens || 0;
     e.cost += r.cost || 0;
     map.set(k, e);
   }
@@ -146,7 +156,7 @@ function modelBuckets(): ModelBucket[] {
     .map(([model, v]) => ({ model, ...v, total: v.input + v.output }))
     .sort((a, b) => b.total - a.total);
 
-  const rows: Omit<ModelBucket, "pct">[] = arr.slice(0, MAX_MODEL_ROWS);
+  const rows: Omit<ModelBucket, "hitRate" | "pct">[] = arr.slice(0, MAX_MODEL_ROWS);
   const rest = arr.slice(MAX_MODEL_ROWS);
   if (rest.length > 0) {
     const agg = rest.reduce(
@@ -154,25 +164,25 @@ function modelBuckets(): ModelBucket[] {
         requests: a.requests + b.requests,
         input: a.input + b.input,
         output: a.output + b.output,
+        cacheRead: a.cacheRead + b.cacheRead,
         cost: a.cost + b.cost,
         total: a.total + b.total,
       }),
-      { requests: 0, input: 0, output: 0, cost: 0, total: 0 },
+      { requests: 0, input: 0, output: 0, cacheRead: 0, cost: 0, total: 0 },
     );
     rows.push({ model: OTHER_MODEL, members: rest.map((r) => r.model), ...agg });
   }
 
   const max = Math.max(1, ...rows.map((a) => a.total).filter((n) => Number.isFinite(n)));
-  return rows.map((a) => ({ ...a, pct: a.total > 0 ? (a.total / max) * 100 : 0 }));
+  return rows.map((a) => ({
+    ...a,
+    hitRate: a.input > 0 ? a.cacheRead / a.input : null,
+    pct: a.total > 0 ? (a.total / max) * 100 : 0,
+  }));
 }
 
-const tBuckets = ref<TimeBucket[]>([]);
-const mBuckets = ref<ModelBucket[]>([]);
-
-function recompute() {
-  tBuckets.value = timeBuckets();
-  mBuckets.value = modelBuckets();
-}
+const tBuckets = computed(timeBuckets);
+const mBuckets = computed(modelBuckets);
 
 onMounted(() => {
   void load();
@@ -189,53 +199,56 @@ async function refresh() {
   await load();
 }
 
-// ───────────────── 明细分页（页面本身不滚动，列表翻页） ───────────────
-const PAGE_SIZE = 10;
+// ───────────────── 明细分页（页大小随可视高度自适应，避免滚动+翻页双溢出） ───────────────
 const page = ref(1);
-const pageCount = computed(() => Math.max(1, Math.ceil(records.value.length / PAGE_SIZE)));
+const detailScroll = ref<HTMLElement | null>(null);
+const { pageSize } = useAutoPageSize(detailScroll, page);
+const pageCount = computed(() => Math.max(1, Math.ceil(records.value.length / pageSize.value)));
 const pagedRecords = computed(() =>
-  records.value.slice((page.value - 1) * PAGE_SIZE, page.value * PAGE_SIZE),
+  records.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value),
 );
 watch(pageCount, (n) => {
   if (page.value > n) page.value = n;
+});
+watch(range, () => {
+  page.value = 1;
+  void load(true);
 });
 </script>
 
 <template>
   <div class="flex h-full min-h-0 flex-col gap-4">
-    <div
-      v-if="error"
-      class="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive"
-    >
-      {{ error }}
-    </div>
+    <Alert v-if="error" class="shrink-0">{{ error }}</Alert>
 
-    <!-- 汇总摘要（紧凑单行，替代统计卡片堆叠） -->
-    <div class="flex shrink-0 flex-wrap items-center gap-x-6 gap-y-1 text-sm text-muted-foreground">
-      <span>
-        请求
-        <span class="font-semibold text-foreground tabular-nums">{{ formatTokens(summary?.requests ?? 0) }}</span>
-      </span>
-      <span>
-        输入 token
-        <span class="font-semibold text-foreground tabular-nums">{{ formatTokens(summary?.inputTokens ?? 0) }}</span>
-      </span>
-      <span>
-        输出 token
-        <span class="font-semibold text-foreground tabular-nums">{{ formatTokens(summary?.outputTokens ?? 0) }}</span>
-      </span>
-      <span>
-        缓存读
-        <span class="font-semibold text-foreground tabular-nums">{{ formatTokens(summary?.cacheReadTokens ?? 0) }}</span>
-      </span>
-      <span>
-        推理
-        <span class="font-semibold text-foreground tabular-nums">{{ formatTokens(summary?.reasoningTokens ?? 0) }}</span>
-      </span>
-      <span>
-        总成本
-        <span class="font-semibold text-foreground tabular-nums">{{ formatCost(summary?.totalCost ?? 0) }}</span>
-      </span>
+    <!-- 汇总摘要（紧凑单行，替代统计卡片堆叠）；右侧为时间范围筛选 -->
+    <div class="flex shrink-0 items-center justify-between gap-4">
+      <div class="flex min-w-0 flex-wrap items-center gap-x-6 gap-y-1 text-sm text-muted-foreground">
+        <span>
+          请求
+          <span class="font-semibold text-foreground tabular-nums">{{ formatTokens(summary?.requests ?? 0) }}</span>
+        </span>
+        <span>
+          输入 token
+          <span class="font-semibold text-foreground tabular-nums">{{ formatTokens(summary?.inputTokens ?? 0) }}</span>
+        </span>
+        <span>
+          输出 token
+          <span class="font-semibold text-foreground tabular-nums">{{ formatTokens(summary?.outputTokens ?? 0) }}</span>
+        </span>
+        <span>
+          缓存读
+          <span class="font-semibold text-foreground tabular-nums">{{ formatTokens(summary?.cacheReadTokens ?? 0) }}</span>
+        </span>
+        <span>
+          推理
+          <span class="font-semibold text-foreground tabular-nums">{{ formatTokens(summary?.reasoningTokens ?? 0) }}</span>
+        </span>
+        <span>
+          总成本
+          <span class="font-semibold text-foreground tabular-nums">{{ formatCost(summary?.totalCost ?? 0) }}</span>
+        </span>
+      </div>
+      <DateRangeFilter v-model="range" class="shrink-0" />
     </div>
 
     <!-- 图表行：时序 + 模型分布并排；auto-fit 窄窗口自动堆叠 -->
@@ -254,13 +267,10 @@ watch(pageCount, (n) => {
         </div>
       </div>
       <div class="card-content">
-        <div
-          v-if="tBuckets.length === 0"
-          class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
-        >
+        <EmptyState v-if="tBuckets.length === 0" :icon="BarChart3">
           暂无数据。启动网关并发起请求后将在此显示。
-        </div>
-        <div v-else class="flex h-28 items-end gap-1">
+        </EmptyState>
+        <div v-else class="flex h-28 items-end gap-1 border-b">
           <div
             v-for="(b, i) in tBuckets"
             :key="i"
@@ -287,12 +297,7 @@ watch(pageCount, (n) => {
         <h3 class="card-title">模型分布</h3>
       </div>
       <div class="card-content">
-        <div
-          v-if="mBuckets.length === 0"
-          class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
-        >
-          暂无数据。
-        </div>
+        <EmptyState v-if="mBuckets.length === 0" :icon="BarChart3">暂无数据。</EmptyState>
         <ul v-else class="space-y-3">
           <li v-for="m in mBuckets" :key="m.model">
             <div class="mb-1 flex items-center justify-between text-sm">
@@ -304,8 +309,8 @@ watch(pageCount, (n) => {
                 {{ m.model === OTHER_MODEL ? `其他 ${m.members?.length ?? 0} 个模型` : displayName(m.model) }}
               </span>
               <span class="text-xs text-muted-foreground">
-                {{ m.requests }} 次 · 输入 {{ formatTokens(m.input) }} / 输出 {{ formatTokens(m.output) }}
-                <template v-if="m.cost > 0"> · {{ formatCost(m.cost) }}</template>
+                {{ formatTokens(m.total) }} · {{ formatCost(m.cost) }} · 命中率
+                {{ m.hitRate != null ? (m.hitRate * 100).toFixed(1) + "%" : "—" }}
               </span>
             </div>
             <!-- 0/0（无 token）不渲染轨道：满宽空轨道看起来像满值进度条 -->
@@ -322,8 +327,8 @@ watch(pageCount, (n) => {
     </Card>
     </div>
 
-    <!-- 明细表（客户端分页，内部滚动兜底；min-h 下限，极端矮窗口由页面滚动接管） -->
-    <Card class="flex min-h-[12rem] flex-1 flex-col overflow-hidden">
+    <!-- 明细表（客户端分页，页大小随高度自适应；min-h 保证至少数行，极端矮窗口由页面滚动接管） -->
+    <Card class="flex min-h-[16rem] flex-1 flex-col overflow-hidden">
       <div class="card-header shrink-0 flex-row items-center justify-between space-y-0">
         <h3 class="card-title">最近记录</h3>
         <Button
@@ -338,51 +343,39 @@ watch(pageCount, (n) => {
         </Button>
       </div>
       <div class="card-content flex min-h-0 flex-1 flex-col">
-        <div
-          v-if="loading && records.length === 0"
-          class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
-        >
-          加载中…
-        </div>
-        <div
-          v-else-if="records.length === 0"
-          class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
-        >
-          暂无用量记录。
-        </div>
+        <EmptyState v-if="loading && records.length === 0">加载中…</EmptyState>
+        <EmptyState v-else-if="records.length === 0">{{ range ? "该时间范围内暂无记录。" : "暂无用量记录。" }}</EmptyState>
         <template v-else>
-          <div class="scrollbar-thin min-h-[60px] flex-1 overflow-auto">
-            <table class="w-full text-sm">
+          <div ref="detailScroll" class="scrollbar-thin min-h-[60px] flex-1 overflow-auto">
+            <table class="w-full text-center text-sm">
               <thead class="thead-sticky">
-                <tr class="border-b text-left text-muted-foreground">
+                <tr class="border-b text-muted-foreground">
                   <th class="py-2 font-medium">时间</th>
-                  <th class="py-2 font-medium">模型</th>
-                  <th class="py-2 font-medium">上游</th>
-                  <th class="py-2 text-right font-medium">输入</th>
-                  <th class="py-2 text-right font-medium">输出</th>
-                  <th class="py-2 text-right font-medium">成本</th>
-                  <th class="py-2 text-right font-medium">延迟</th>
-                  <th class="py-2 text-center font-medium">状态</th>
+                  <th class="py-2 font-medium">模型 / 上游</th>
+                  <th class="py-2 font-medium">输入</th>
+                  <th class="py-2 font-medium">输出</th>
+                  <th class="py-2 font-medium">成本</th>
+                  <th class="py-2 font-medium">延迟</th>
+                  <th class="py-2 font-medium">状态</th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="r in pagedRecords" :key="r.id" class="border-b last:border-0">
+                <tr v-for="r in pagedRecords" :key="r.id" class="border-b transition-colors last:border-0 hover:bg-accent/40">
                   <td class="whitespace-nowrap py-2 text-xs text-muted-foreground">
                     {{ formatTime(r.createdAt) }}
                   </td>
-                  <td class="py-2" :title="r.model ?? ''">{{ displayName(r.model) }}</td>
                   <td
-                    class="py-2 text-xs text-muted-foreground"
-                    :title="[r.providerKey, r.upstreamModel].filter(Boolean).join(' / ')"
+                    class="py-2"
+                    :title="[r.model, r.providerKey, r.upstreamModel].filter(Boolean).join(' · ')"
                   >
-                    <span v-if="r.providerKey" class="text-foreground/60">{{ r.providerKey }}</span>
-                    <template v-if="r.providerKey"> · </template>{{ displayName(r.upstreamModel) }}
+                    <div class="font-medium">{{ displayName(r.model) }}</div>
+                    <div class="mt-0.5 font-mono text-xs text-muted-foreground">{{ r.providerKey ?? "—" }}</div>
                   </td>
-                  <td class="py-2 text-right tabular-nums">{{ formatTokens(r.inputTokens) }}</td>
-                  <td class="py-2 text-right tabular-nums">{{ formatTokens(r.outputTokens) }}</td>
-                  <td class="py-2 text-right tabular-nums">{{ formatCost(r.cost) }}</td>
-                  <td class="py-2 text-right text-xs tabular-nums text-muted-foreground">{{ formatLatency(r.latencyMs) }}</td>
-                  <td class="py-2 text-center">
+                  <td class="py-2 tabular-nums">{{ formatTokens(r.inputTokens) }}</td>
+                  <td class="py-2 tabular-nums">{{ formatTokens(r.outputTokens) }}</td>
+                  <td class="py-2 tabular-nums">{{ formatCost(r.cost) }}</td>
+                  <td class="py-2 text-xs tabular-nums text-muted-foreground">{{ formatLatency(r.latencyMs) }}</td>
+                  <td class="py-2">
                     <Badge :variant="r.status === 'ok' ? 'success' : 'destructive'">
                       {{ r.status ?? "?" }}
                     </Badge>
@@ -391,7 +384,7 @@ watch(pageCount, (n) => {
               </tbody>
             </table>
           </div>
-          <div class="shrink-0 border-t pt-3">
+          <div v-if="records.length > pageSize" class="shrink-0 border-t pt-3">
             <Pagination v-model:page="page" :page-count="pageCount" :total="records.length" />
           </div>
         </template>

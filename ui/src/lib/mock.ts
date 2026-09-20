@@ -393,7 +393,7 @@ const seedBalanceCards: BalanceCardView[] = [
 ];
 
 // 生成最近 48h 的用量记录：每小时 0–3 条，模型加权随机，少量 error。
-// 注意：createdAt 与后端契约一致使用 unix 秒（store::now_unix）。
+// 注意：createdAt 与后端一致使用 unix 秒（store::now_unix）。
 function seedUsage(): UsageRecord[] {
   const models = ["claude-sonnet-4", "deepseek-v4-pro", "deepseek-v4-flash"];
   const providersByModel: Record<string, string> = {
@@ -568,7 +568,7 @@ function upsert<T>(list: T[], item: T, keyOf: (x: T) => string): void {
 
 // ───────────────────────── command 分发 ─────────────────────────
 
-/** 按 command 名分发到内存实现；与真实 invoke 的参数/返回契约一致。 */
+/** 按 command 名分发到内存实现；与真实 invoke 的参数/返回格式一致。 */
 export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
   await delay();
 
@@ -804,6 +804,9 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
       return list.slice(offset, offset + limit).map((r) => ({ ...r })) as T;
     }
     case "usage_summary": {
+      let list = usageRecords;
+      if (args.since) list = list.filter((r) => r.createdAt >= Number(args.since));
+      if (args.until) list = list.filter((r) => r.createdAt <= Number(args.until));
       const s: UsageSummary = {
         requests: 0,
         inputTokens: 0,
@@ -813,7 +816,7 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
         reasoningTokens: 0,
         totalCost: 0,
       };
-      for (const r of usageRecords) {
+      for (const r of list) {
         s.requests++;
         s.inputTokens += r.inputTokens;
         s.outputTokens += r.outputTokens;
@@ -825,7 +828,6 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
       s.totalCost = Number(s.totalCost.toFixed(6));
       return s as T;
     }
-
     // ── Trace ──
     case "trace_list": {
       const limit = Number(args.limit ?? 500);
