@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { ArrowLeft, ChevronDown, Pencil, Plus, Power, RotateCw, Trash2, Upload } from "lucide-vue-next";
+import { ArrowLeft, ChevronDown, Pencil, Plus, Power, Puzzle, RotateCw, Trash2, Upload } from "lucide-vue-next";
 import { computed, onActivated, onMounted, reactive, ref } from "vue";
 
+import Alert from "@/components/ui/Alert.vue";
 import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
-import Card from "@/components/ui/Card.vue";
+import Checkbox from "@/components/ui/Checkbox.vue";
+import EmptyState from "@/components/ui/EmptyState.vue";
 import Input from "@/components/ui/Input.vue";
 import Label from "@/components/ui/Label.vue";
 import CodeEditor from "@/components/ui/CodeEditor.vue";
@@ -24,7 +26,7 @@ const CAPABILITIES = ["core", "raw_request", "raw_response", "raw_stream"] as co
 const SCOPES = ["global", "provider", "model", "route"] as const;
 
 const DEFAULT_SCRIPT = `-- Moon Bridge Next 插件
--- 暴露全局 MB 表：既承载清单，也承载钩子；宿主 API 挂在全局 mb（小写）。
+-- 暴露全局 MB 表：既承载清单，也承载钩子；程序提供的 API 挂在全局 mb（小写）。
 MB = {
   version = "0.1.0",
   scopes = { "global" },
@@ -349,21 +351,13 @@ onActivated(() => {
 
 <template>
   <div class="flex h-full min-h-0 flex-col">
-    <div
-      v-if="error"
-      class="shrink-0 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive"
-    >
-      {{ error }}
-    </div>
-    <div
-      v-if="needsRestart"
-      class="shrink-0 rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-sm text-amber-600 dark:text-amber-400"
-    >
+    <Alert v-if="error" class="shrink-0">{{ error }}</Alert>
+    <Alert v-if="needsRestart" variant="warning" class="shrink-0">
       有插件变更尚未生效——点击右上「重启网关」应用。
-    </div>
+    </Alert>
 
     <!-- 编辑器模式：满页切换，不再弹窗 -->
-    <Card v-if="editing" class="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <div v-if="editing" class="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div class="flex shrink-0 items-center justify-between border-b px-5 py-3">
         <div class="flex items-center gap-2">
           <Button variant="ghost" size="icon" class="size-7" title="返回列表" @click="tryCloseEditor">
@@ -416,11 +410,9 @@ onActivated(() => {
               :key="c"
               class="flex cursor-pointer items-center gap-1.5 text-sm"
             >
-              <input
-                type="checkbox"
-                class="size-4 accent-primary"
+              <Checkbox
                 :checked="form.capabilities.includes(c)"
-                @change="toggleArr(form.capabilities, c)"
+                @update:checked="toggleArr(form.capabilities, c)"
               />
               <span class="font-mono text-xs">{{ c }}</span>
             </label>
@@ -434,11 +426,9 @@ onActivated(() => {
               :key="s"
               class="flex cursor-pointer items-center gap-1.5 text-sm"
             >
-              <input
-                type="checkbox"
-                class="size-4 accent-primary"
+              <Checkbox
                 :checked="form.scopes.includes(s)"
-                @change="toggleArr(form.scopes, s)"
+                @update:checked="toggleArr(form.scopes, s)"
               />
               <span class="font-mono text-xs">{{ s }}</span>
             </label>
@@ -465,10 +455,10 @@ onActivated(() => {
       <div v-show="scriptOpen" class="flex min-h-0 flex-1 flex-col px-5 py-4">
         <CodeEditor v-model="script" height="100%" class="min-h-0 flex-1" />
       </div>
-    </Card>
+    </div>
 
-    <!-- 插件列表：满版单卡 -->
-    <Card v-else class="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <!-- 插件列表：满版面板 -->
+    <div v-else class="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div class="flex shrink-0 items-center justify-end gap-2 border-b px-5 py-3">
         <Button variant="outline" size="sm" :disabled="!needsRestart" @click="restart">
           <RotateCw class="size-4" /> 重启网关
@@ -489,13 +479,18 @@ onActivated(() => {
         />
       </div>
       <div class="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">
-        <div
-          v-if="plugins.length === 0"
-          class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
-        >
-          暂无已注册插件，点击「新建」创建。示例见仓库
-          <code class="font-mono">plugins/examples/</code>。
-        </div>
+        <EmptyState v-if="plugins.length === 0" :icon="Puzzle">
+          <p>
+            暂无已注册插件。示例见仓库
+            <code class="font-mono">plugins/examples/</code>。
+          </p>
+          <template #action>
+            <Button size="sm" @click="newPlugin"><Plus class="size-4" /> 新建插件</Button>
+            <Button variant="outline" size="sm" :disabled="busy" @click="importPlugins">
+              <Upload class="size-4" /> 导入
+            </Button>
+          </template>
+        </EmptyState>
         <ul v-else class="divide-y">
           <li v-for="p in plugins" :key="p.name" class="py-3 first:pt-0 last:pb-0">
             <div class="flex items-center justify-between gap-2">
@@ -530,7 +525,7 @@ onActivated(() => {
           </li>
         </ul>
       </div>
-    </Card>
+    </div>
 
     <!-- 启用门控：插件 MB.requires 声明的设置未满足时弹框提示，不自动修改 -->
     <Modal :open="reqError !== null" title="无法启用插件" width="max-w-md" @close="reqError = null">

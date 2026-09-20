@@ -3,6 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      // 首帧前按持久化选择挂/摘 .dark，避免亮主题用户看到深色闪屏
+      try {
+        document.documentElement.classList.toggle(
+          "dark",
+          localStorage.getItem("mb-theme") !== "light",
+        );
+      } catch {}
+    </script>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="alternate icon" href="/favicon.ico" />
     <title>Moon Bridge Next</title>

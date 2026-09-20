@@ -63,10 +63,12 @@ function toggle() {
         :key="item.to"
         :to="item.to"
         :title="item.title"
-        class="flex items-center rounded-md text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+        class="relative flex items-center rounded-md text-sm text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
         :class="collapsed ? 'justify-center p-2' : 'gap-3 px-3 py-2'"
         active-class="!bg-accent !text-accent-foreground font-medium"
       >
+        <!-- 当前页指示条：RouterLink 激活时自动带 aria-current="page"（见 style.css） -->
+        <span class="nav-indicator" />
         <component :is="item.icon" class="size-4 shrink-0" />
         <span v-if="!collapsed" class="truncate">{{ item.title }}</span>
       </RouterLink>

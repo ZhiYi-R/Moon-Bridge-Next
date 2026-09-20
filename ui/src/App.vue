@@ -50,10 +50,10 @@ onUnmounted(() => {
     <AppSidebar />
     <div class="flex min-w-0 flex-1 flex-col">
       <AppHeader />
-      <!-- flush 路由（全屏主从面板）去内边距，内容直接打满 -->
+      <!-- flush 路由（全屏主从面板）去内边距，内容直接打满；bg-card 由 main 承载 -->
       <main
         class="scrollbar-thin min-h-0 flex-1 overflow-y-auto"
-        :class="route.meta.flush ? '' : 'p-6'"
+        :class="route.meta.flush ? 'bg-card text-card-foreground' : 'p-6'"
       >
         <RouterView v-slot="{ Component }">
           <!-- 缓存全部视图实例：切回页面直接复用已渲染内容与滚动/筛选状态，不再整表重拉 -->

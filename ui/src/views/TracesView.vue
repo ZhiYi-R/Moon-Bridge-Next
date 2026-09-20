@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { RefreshCw, Trash2 } from "lucide-vue-next";
+import { RefreshCw, ScrollText, Trash2 } from "lucide-vue-next";
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref } from "vue";
 
+import Alert from "@/components/ui/Alert.vue";
 import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
-import Card from "@/components/ui/Card.vue";
 import CodeEditor from "@/components/ui/CodeEditor.vue";
+import EmptyState from "@/components/ui/EmptyState.vue";
 import Input from "@/components/ui/Input.vue";
 import { appApi, errMsg, traceApi, type TraceDetail, type TraceEntry } from "@/lib/api";
 import { formatBytes, formatLatency, formatTimeMs, formatTokens } from "@/lib/utils";
@@ -199,15 +200,10 @@ onUnmounted(() => document.removeEventListener("keydown", onKey));
 
 <template>
   <div class="flex h-full min-h-0 flex-col gap-4">
-    <div
-      v-if="error"
-      class="shrink-0 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive"
-    >
-      {{ error }}
-    </div>
+    <Alert v-if="error" class="shrink-0">{{ error }}</Alert>
 
-    <!-- 主从一体卡：左列表（可拖宽） / 右详情，高度填满视口 -->
-    <Card class="flex min-h-0 flex-1 overflow-hidden">
+    <!-- 主从面板：左列表（可拖宽） / 右详情，高度填满视口 -->
+    <div class="flex min-h-0 flex-1 overflow-hidden">
       <!-- 列表 -->
       <section ref="listEl" class="flex min-h-0 shrink-0 flex-col" :style="{ width: listWidth + 'px' }">
         <div class="flex shrink-0 items-center gap-2 border-b p-3">
@@ -224,18 +220,10 @@ onUnmounted(() => document.removeEventListener("keydown", onKey));
           </Button>
         </div>
         <div class="scrollbar-thin min-h-0 flex-1 overflow-y-auto p-3">
-          <div
-            v-if="loading && filtered.length === 0"
-            class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
-          >
-            加载中…
-          </div>
-          <div
-            v-else-if="filtered.length === 0"
-            class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
-          >
+          <EmptyState v-if="loading && filtered.length === 0" class="p-6">加载中…</EmptyState>
+          <EmptyState v-else-if="filtered.length === 0" :icon="ScrollText" class="p-6">
             暂无 trace。启动网关并发起请求后将在此显示。
-          </div>
+          </EmptyState>
           <ul v-else class="space-y-1.5">
             <li
               v-for="e in filtered"
@@ -367,6 +355,6 @@ onUnmounted(() => document.removeEventListener("keydown", onKey));
           </div>
         </template>
       </section>
-    </Card>
+    </div>
   </div>
 </template>

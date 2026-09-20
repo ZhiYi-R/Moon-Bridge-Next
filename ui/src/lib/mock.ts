@@ -133,10 +133,24 @@ const seedOffers: Offer[] = [
       output: 15,
       cache_read: 0.3,
       cache_write: 3.75,
+      tiers: [
+        { input: 6, output: 22.5, cache_read: 0.6, cache_write: 7.5, tier: { type: "context", size: 200000 } },
+      ],
       context_over_200k: { input: 6, output: 22.5, cache_read: 0.6, cache_write: 7.5 },
     },
   },
-  { providerKey: "openai-relay", modelSlug: "deepseek-v4-pro", pricing: { input: 0.3, output: 1.2 } },
+  {
+    providerKey: "openai-relay",
+    modelSlug: "deepseek-v4-pro",
+    pricing: {
+      input: 0.3,
+      output: 1.2,
+      tiers: [
+        { input: 0.6, output: 2.4, tier: { type: "context", size: 64000 } },
+        { input: 1.2, output: 4.8, tier: { type: "context", size: 100000 } },
+      ],
+    },
+  },
   { providerKey: "openai-relay", modelSlug: "deepseek-v4-flash", pricing: { input: 0.08, output: 0.3 } },
   { providerKey: "gemini-direct", modelSlug: "deepseek-v4-pro", pricing: null },
 ];

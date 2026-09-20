@@ -4,8 +4,8 @@
 
 @layer base {
   :root {
-    /* 告知 WebView 采用深色原生控件：否则原生 <select>/checkbox/滚动条按浅色渲染 */
-    color-scheme: dark;
+    /* 原生控件（select/checkbox/滚动条）随主题着色：亮主题用浅色控件 */
+    color-scheme: light;
     /* 灰阶调色盘：无色相偏移，彩色仅用于语义状态（成功/警告/危险） */
     --background: 0 0% 99%;
     --foreground: 0 0% 9%;
@@ -30,6 +30,8 @@
   }
 
   .dark {
+    /* 深色下原生控件/滚动条按深色渲染 */
+    color-scheme: dark;
     --background: 0 0% 5%;
     --foreground: 0 0% 95%;
     --card: 0 0% 7.5%;
@@ -62,13 +64,18 @@
     @apply h-full;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground transition-colors duration-150;
     font-feature-settings: "rlig" 1, "calt" 1;
   }
 }
 
 /* 细滚动条，贴合桌面工具观感 */
 @layer utilities {
+  .scrollbar-thin {
+    /* Firefox：webkit 伪元素不生效，用标准属性兜底 */
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--muted-foreground) / 0.3) transparent;
+  }
   .scrollbar-thin::-webkit-scrollbar {
     width: 8px;
     height: 8px;
@@ -103,5 +110,13 @@
      分隔由表头行自身的 border-b 承担。 */
   .thead-sticky {
     @apply sticky top-0 z-10 bg-card;
+  }
+
+  /* 侧栏当前页指示条：RouterLink 激活时自动带 aria-current="page" */
+  .nav-indicator {
+    @apply absolute left-1 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-primary opacity-0 transition-opacity;
+  }
+  a[aria-current="page"] .nav-indicator {
+    opacity: 1;
   }
 }

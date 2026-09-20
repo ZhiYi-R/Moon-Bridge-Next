@@ -1,23 +1,25 @@
 <script setup lang="ts">
-import { Minus, RotateCw, Square, X } from "lucide-vue-next";
+import { Minus, Moon, RotateCw, Square, Sun, X } from "lucide-vue-next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { computed, ref } from "vue";
 import { useRoute } from "vue-router";
 
 import Badge from "@/components/ui/Badge.vue";
+import Button from "@/components/ui/Button.vue";
 import Switch from "@/components/ui/Switch.vue";
 import { useConfirm } from "@/composables/useConfirm";
 import { isTauriRuntime, usingMock } from "@/lib/api";
+import { isDark, toggleTheme } from "@/lib/theme";
 import { useGatewayStore } from "@/stores/gateway";
 
 const route = useRoute();
 const gateway = useGatewayStore();
 const { confirm } = useConfirm();
-const confirmingRestart = ref(false);
+const confirming = ref(false);
 
 async function restartGateway() {
-  if (confirmingRestart.value || gateway.loading) return;
-  confirmingRestart.value = true;
+  if (confirming.value || gateway.loading) return;
+  confirming.value = true;
   try {
     if (await confirm({
       title: "重启网关",
@@ -25,7 +27,26 @@ async function restartGateway() {
       confirmText: "重启",
     })) await gateway.restart();
   } finally {
-    confirmingRestart.value = false;
+    confirming.value = false;
+  }
+}
+
+/** 进程开关（仅桌面端）：启动直接执行；停止会中断服务，先确认。 */
+async function onProcessToggle(v: boolean) {
+  if (v) {
+    await gateway.start();
+    return;
+  }
+  if (confirming.value || gateway.loading) return;
+  confirming.value = true;
+  try {
+    if (await confirm({
+      title: "停止网关",
+      message: "停止将中断网关服务，确认继续？",
+      confirmText: "停止",
+    })) await gateway.stop();
+  } finally {
+    confirming.value = false;
   }
 }
 
@@ -80,19 +101,31 @@ const controlCls =
       <Switch
         v-if="gateway.canControlProcess"
         :checked="gateway.running"
-        :disabled="gateway.loading"
+        :disabled="gateway.loading || confirming"
         :title="gateway.running ? '停止网关' : '启动网关'"
-        @update:checked="(v) => (v ? gateway.start() : gateway.stop())"
+        @update:checked="onProcessToggle"
       />
       <button
         v-else
         class="flex h-7 w-9 items-center justify-center rounded-md border border-input text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
         title="重启网关（在线热重启，连接会短暂中断）"
-        :disabled="gateway.loading || confirmingRestart"
+        :disabled="gateway.loading || confirming"
         @click="restartGateway"
       >
         <RotateCw class="size-3.5" :class="gateway.loading ? 'animate-spin' : ''" />
       </button>
+
+      <!-- 主题切换：亮/暗 -->
+      <Button
+        variant="ghost"
+        size="icon"
+        class="size-8"
+        :title="isDark ? '切换为浅色主题' : '切换为深色主题'"
+        @click="toggleTheme"
+      >
+        <Sun v-if="isDark" class="size-4" />
+        <Moon v-else class="size-4" />
+      </Button>
 
       <!-- 窗口控制（仅 Tauri 壳内） -->
       <div v-if="appWindow" class="-mr-6 ml-2 flex items-center self-stretch">

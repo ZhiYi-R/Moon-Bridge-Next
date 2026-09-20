@@ -11,11 +11,11 @@ const badgeVariants = cva(
       variant: {
         default: "border-transparent bg-primary text-primary-foreground",
         secondary: "border-transparent bg-secondary text-secondary-foreground",
-        /* 语义彩色克制使用：低透明度背景 + 降低明度的前景 */
+        /* 语义彩色克制使用：低透明度背景 + 按主题降/升明度的前景 */
         destructive: "border-transparent bg-destructive/10 text-destructive",
         outline: "text-foreground",
-        success: "border-transparent bg-emerald-500/10 text-emerald-500",
-        warning: "border-transparent bg-amber-500/10 text-amber-500",
+        success: "border-transparent bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
+        warning: "border-transparent bg-amber-500/10 text-amber-600 dark:text-amber-400",
       },
     },
     defaultVariants: { variant: "default" },

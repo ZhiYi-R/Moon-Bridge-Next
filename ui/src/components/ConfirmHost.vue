@@ -12,9 +12,8 @@ const { state, settle } = useConfirm();
     <template #footer>
       <Button variant="ghost" size="sm" @click="settle(false)">取消</Button>
       <Button
-        :variant="state.danger ? 'outline' : 'default'"
+        :variant="state.danger ? 'destructive' : 'default'"
         size="sm"
-        :class="state.danger && 'border-destructive/50 text-destructive hover:bg-destructive/10 hover:text-destructive'"
         @click="settle(true)"
       >
         {{ state.confirmText }}

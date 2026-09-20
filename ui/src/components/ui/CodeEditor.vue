@@ -2,11 +2,13 @@
 import { json } from "@codemirror/lang-json";
 import { lua } from "@codemirror/legacy-modes/mode/lua";
 import { StreamLanguage } from "@codemirror/language";
-import { EditorState } from "@codemirror/state";
+import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { basicSetup } from "codemirror";
 import { onMounted, onUnmounted, ref, watch } from "vue";
+
+import { isDark } from "@/lib/theme";
 
 const props = withDefaults(
   defineProps<{
@@ -25,6 +27,28 @@ const emit = defineEmits<{ "update:modelValue": [string] }>();
 const host = ref<HTMLElement | null>(null);
 let view: EditorView | null = null;
 
+/** 浅色主题：透明底接入卡片背景，语法高亮走 basicSetup 内置的 defaultHighlightStyle 兜底。 */
+const lightTheme = EditorView.theme(
+  {
+    "&": { backgroundColor: "transparent", color: "hsl(var(--foreground))" },
+    ".cm-gutters": {
+      backgroundColor: "transparent",
+      color: "hsl(var(--muted-foreground))",
+      border: "none",
+    },
+    ".cm-activeLine, .cm-activeLineGutter": {
+      backgroundColor: "hsl(var(--muted) / 0.6)",
+    },
+    "&.cm-focused .cm-selectionBackground, & .cm-selectionBackground": {
+      backgroundColor: "hsl(var(--accent)) !important",
+    },
+  },
+  { dark: false },
+);
+
+/** 主题用 Compartment 隔离：App 主题切换时只重配这一格，不重建编辑器。 */
+const colorTheme = new Compartment();
+
 onMounted(() => {
   view = new EditorView({
     doc: props.modelValue,
@@ -32,9 +56,9 @@ onMounted(() => {
     extensions: [
       basicSetup,
       props.lang === "json" ? json() : StreamLanguage.define(lua),
-      oneDark,
+      colorTheme.of(isDark.value ? oneDark : lightTheme),
       EditorView.theme({
-        // 不用百分比高度：宿主为 flex 容器，编辑器用 flex:1 填满——grid/flex 混合
+        // 不用百分比高度：外层是 flex 容器，编辑器用 flex:1 填满——grid/flex 混合
         // 布局下百分比高度可能无法解析，导致编辑器退化到内容高度。
         "&": { flex: 1, minWidth: 0, fontSize: "12px" },
         ".cm-scroller": {
@@ -48,6 +72,11 @@ onMounted(() => {
       }),
     ],
   });
+});
+
+// 应用主题切换 → 只重配色主题一格，文档/选区不动
+watch(isDark, (d) => {
+  view?.dispatch({ effects: colorTheme.reconfigure(d ? oneDark : lightTheme) });
 });
 
 // 外部值变化时同步进编辑器（避免光标跳动，仅在内容确实不同时分派）

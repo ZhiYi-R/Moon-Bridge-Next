@@ -2,8 +2,10 @@
 import { ChevronDown } from "lucide-vue-next";
 import { onActivated, onMounted, reactive, ref } from "vue";
 
+import Alert from "@/components/ui/Alert.vue";
 import Button from "@/components/ui/Button.vue";
 import Card from "@/components/ui/Card.vue";
+import Checkbox from "@/components/ui/Checkbox.vue";
 import Input from "@/components/ui/Input.vue";
 import Label from "@/components/ui/Label.vue";
 import Select from "@/components/ui/Select.vue";
@@ -136,12 +138,7 @@ async function save(restart = false) {
 
 <template>
   <div class="space-y-4">
-    <div
-      v-if="error"
-      class="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive"
-    >
-      {{ error }}
-    </div>
+    <Alert v-if="error">{{ error }}</Alert>
 
     <Card>
       <button
@@ -172,7 +169,7 @@ async function save(restart = false) {
               type="password"
               :placeholder="isWebRuntime ? '留空保留当前调用 Token' : '留空则不鉴权'"
             />
-            <p v-if="isWebRuntime" class="text-xs text-muted-foreground">不回显已有凭据；填写新值并重启后生效，不影响管理台 Token。启动环境覆盖需同步更新。</p>
+
           </div>
           <div class="space-y-1.5">
             <Label for="s-proxy">出站代理</Label>
@@ -203,25 +200,15 @@ async function save(restart = false) {
           </div>
           <div class="col-span-full flex flex-col gap-2.5 border-t pt-4">
             <div class="flex items-center gap-2">
-              <input
-                id="s-marker"
-                v-model="form.gateway.sessionMarker"
-                type="checkbox"
-                class="size-4 accent-primary"
-              />
+              <Checkbox id="s-marker" v-model:checked="form.gateway.sessionMarker" />
               <Label for="s-marker">会话水印</Label>
             </div>
             <div class="flex items-center gap-2">
-              <input
-                id="s-bodies"
-                v-model="form.gateway.traceRecordBodies"
-                type="checkbox"
-                class="size-4 accent-primary"
-              />
+              <Checkbox id="s-bodies" v-model:checked="form.gateway.traceRecordBodies" />
               <Label for="s-bodies">trace 记录请求/响应体</Label>
             </div>
             <div class="flex items-center gap-2">
-              <input id="s-auto" v-model="form.autoStart" type="checkbox" class="size-4 accent-primary" />
+              <Checkbox id="s-auto" v-model:checked="form.autoStart" />
               <Label for="s-auto">应用启动时自动开启网关</Label>
             </div>
           </div>

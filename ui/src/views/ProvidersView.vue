@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronDown, ChevronRight, Pencil, Plus, Search, Trash2, X } from "lucide-vue-next";
+import { ChevronDown, ChevronRight, Pencil, Plus, Search, Server, Trash2, X } from "lucide-vue-next";
 import {
   computed,
   onActivated,
@@ -11,9 +11,11 @@ import {
   watch,
 } from "vue";
 
+import Alert from "@/components/ui/Alert.vue";
 import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
-import Card from "@/components/ui/Card.vue";
+import Checkbox from "@/components/ui/Checkbox.vue";
+import EmptyState from "@/components/ui/EmptyState.vue";
 import Input from "@/components/ui/Input.vue";
 import Label from "@/components/ui/Label.vue";
 import Modal from "@/components/ui/Modal.vue";
@@ -399,12 +401,7 @@ function loadPluginList() {
 
 <template>
   <div class="flex h-full min-h-0 flex-col">
-    <div
-      v-if="listError"
-      class="shrink-0 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive"
-    >
-      {{ listError }}
-    </div>
+    <Alert v-if="listError" class="shrink-0">{{ listError }}</Alert>
 
     <!-- 编辑弹窗 -->
     <Modal
@@ -413,12 +410,7 @@ function loadPluginList() {
       :guard="closeGuard"
       @close="closeModal"
     >
-      <div
-        v-if="error"
-        class="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-      >
-        {{ error }}
-      </div>
+      <Alert v-if="error" class="mb-3 px-3">{{ error }}</Alert>
       <div class="grid gap-4 grid-cols-[repeat(auto-fit,minmax(14rem,1fr))]">
         <div class="space-y-1.5">
           <Label for="p-key">唯一标识</Label>
@@ -429,7 +421,7 @@ function loadPluginList() {
           <Input id="p-version" v-model="form.version" placeholder="2023-06-01" />
         </div>
         <div class="flex items-center gap-2 col-span-full">
-          <input id="p-enabled" v-model="form.enabled" type="checkbox" class="size-4 accent-primary" />
+          <Checkbox id="p-enabled" v-model:checked="form.enabled" />
           <Label for="p-enabled">启用</Label>
         </div>
       </div>
@@ -438,7 +430,6 @@ function loadPluginList() {
       <div class="mt-4 space-y-2">
         <div class="flex items-center justify-between">
           <Label>端点</Label>
-          <span class="text-xs text-muted-foreground">按序故障转移；Key 留空沿用上一非空 Key</span>
         </div>
         <!-- 列头 -->
         <div class="grid grid-cols-[8.5rem_minmax(0,1fr)_minmax(0,1fr)_2rem] items-center gap-2 text-xs text-muted-foreground">
@@ -525,11 +516,9 @@ function loadPluginList() {
                   :key="m.slug"
                   class="flex cursor-pointer items-center gap-2 py-0.5 text-sm"
                 >
-                  <input
-                    type="checkbox"
-                    class="size-4 accent-primary"
+                  <Checkbox
                     :checked="checkedModels.has(m.slug)"
-                    @change="toggleEndpointModel(ep.protocol, m.slug)"
+                    @update:checked="toggleEndpointModel(ep.protocol, m.slug)"
                   />
                   <span class="font-mono text-xs">{{ m.slug }}</span>
                   <span v-if="m.displayName" class="text-xs text-muted-foreground">{{ m.displayName }}</span>
@@ -557,7 +546,6 @@ function loadPluginList() {
       <div v-if="pluginList.length > 0" class="mt-4 border-t pt-4">
         <div class="flex items-center justify-between">
           <Label>插件</Label>
-          <span class="text-xs text-muted-foreground">变更保存后自动重启网关生效</span>
         </div>
         <div class="mt-2 space-y-1.5">
           <div
@@ -567,7 +555,7 @@ function loadPluginList() {
           >
             <span class="min-w-0 truncate font-mono text-xs text-muted-foreground">
               {{ p.name }}
-              <span v-if="!p.enabled" class="text-warning">已全局停用</span>
+              <span v-if="!p.enabled" class="text-amber-600 dark:text-amber-400">已全局停用</span>
             </span>
             <div class="w-32 shrink-0">
               <Select v-model="pluginStates[p.name]" :options="TRI_OPTIONS" small />
@@ -582,26 +570,21 @@ function loadPluginList() {
       </template>
     </Modal>
 
-    <!-- 上游服务：满版单卡 -->
-    <Card class="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <!-- 上游服务：满版面板（直接铺进 main，不套卡片外壳） -->
+    <div class="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div class="flex shrink-0 items-center justify-end border-b px-5 py-3">
         <Button size="sm" @click="newProvider">
           <Plus class="size-4" /> 新建
         </Button>
       </div>
       <div class="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">
-        <div
-          v-if="store.loading && store.providers.length === 0"
-          class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
-        >
-          加载中…
-        </div>
-        <div
-          v-else-if="store.providers.length === 0"
-          class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
-        >
-          暂无上游服务，点击「新建」添加。
-        </div>
+        <EmptyState v-if="store.loading && store.providers.length === 0">加载中…</EmptyState>
+        <EmptyState v-else-if="store.providers.length === 0" :icon="Server">
+          暂无上游服务。
+          <template #action>
+            <Button size="sm" @click="newProvider"><Plus class="size-4" /> 新建上游服务</Button>
+          </template>
+        </EmptyState>
         <table v-else class="w-full text-sm">
           <thead class="thead-sticky">
             <tr class="border-b text-left text-muted-foreground">
@@ -613,7 +596,7 @@ function loadPluginList() {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="p in store.providers" :key="p.key" class="border-b last:border-0">
+            <tr v-for="p in store.providers" :key="p.key" class="border-b transition-colors last:border-0 hover:bg-accent/40">
               <td class="py-2 font-mono text-xs">{{ p.key }}</td>
               <td class="py-2 font-mono text-xs text-muted-foreground">{{ endpointProtocols(p) }}</td>
               <td class="max-w-[280px] truncate py-2 text-muted-foreground" :title="p.endpoints[0]?.baseUrl">
@@ -639,6 +622,6 @@ function loadPluginList() {
           </tbody>
         </table>
       </div>
-    </Card>
+    </div>
   </div>
 </template>

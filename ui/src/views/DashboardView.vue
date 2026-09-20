@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { AlertCircle, RefreshCw } from "lucide-vue-next";
+import { Activity, RefreshCw, Server } from "lucide-vue-next";
 import { onActivated, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 
+import Alert from "@/components/ui/Alert.vue";
 import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
 import Card from "@/components/ui/Card.vue";
+import EmptyState from "@/components/ui/EmptyState.vue";
 import { errMsg, providerApi, usageApi, type Provider, type UsageRecord, type UsageSummary } from "@/lib/api";
 import { formatCost, formatTokens } from "@/lib/utils";
 import { useGatewayStore } from "@/stores/gateway";
@@ -155,21 +157,10 @@ onActivated(() => {
 
 <template>
   <div class="space-y-4">
-    <div
-      v-if="loadError"
-      class="flex items-center gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive"
-    >
-      <AlertCircle class="size-4" />
-      {{ loadError }}
-    </div>
+    <Alert v-if="loadError">{{ loadError }}</Alert>
 
     <!-- 网关错误（启动/停止控制已收敛在顶栏开关） -->
-    <div
-      v-if="gateway.error"
-      class="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive"
-    >
-      {{ gateway.error }}
-    </div>
+    <Alert v-if="gateway.error">{{ gateway.error }}</Alert>
 
     <!-- 用量统计：auto-fit 按可用宽度自动分列，窄窗口自然换行而非硬挤 -->
     <div class="grid gap-4 grid-cols-[repeat(auto-fit,minmax(12rem,1fr))]">
@@ -229,13 +220,10 @@ onActivated(() => {
           </Button>
         </div>
         <div class="card-content">
-          <div
-            v-if="perf.buckets.length === 0"
-            class="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground"
-          >
+          <EmptyState v-if="perf.buckets.length === 0" :icon="Activity" class="p-6">
             暂无流式请求数据。
-          </div>
-          <div v-else class="flex h-20 items-end gap-1">
+          </EmptyState>
+          <div v-else class="flex h-20 items-end gap-1 border-b">
             <div
               v-for="b in perf.buckets"
               :key="b.t"
@@ -262,13 +250,10 @@ onActivated(() => {
           </div>
         </div>
         <div class="card-content">
-          <div
-            v-if="perf.buckets.length === 0"
-            class="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground"
-          >
+          <EmptyState v-if="perf.buckets.length === 0" :icon="Activity" class="p-6">
             暂无流式请求数据。
-          </div>
-          <div v-else class="flex h-20 items-end gap-1">
+          </EmptyState>
+          <div v-else class="flex h-20 items-end gap-1 border-b">
             <div
               v-for="b in perf.buckets"
               :key="b.t"
@@ -296,12 +281,9 @@ onActivated(() => {
         <Button size="sm" variant="outline" @click="router.push('/providers')">管理</Button>
       </div>
       <div class="card-content">
-        <div
-          v-if="providers.length === 0"
-          class="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground"
-        >
+        <EmptyState v-if="providers.length === 0" :icon="Server" class="p-6">
           尚未配置上游服务。前往「上游服务」页添加。
-        </div>
+        </EmptyState>
         <ul v-else class="divide-y divide-border">
           <li v-for="p in providers" :key="p.key" class="flex items-center justify-between py-2.5">
             <div class="flex items-center gap-3">

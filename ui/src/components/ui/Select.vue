@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Check, ChevronDown, Search } from "lucide-vue-next";
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch, type HTMLAttributes } from "vue";
 import { cn } from "@/lib/utils";
 
 export interface SelectOption {
@@ -18,6 +18,7 @@ const props = withDefaults(
     small?: boolean;
     /** 大选项集时开启：浮层顶部显示搜索框，最多渲染 100 行，避免上万选项卡顿。 */
     searchable?: boolean;
+    class?: HTMLAttributes["class"];
   }>(),
   { placeholder: "", disabled: false, small: false, searchable: false },
 );
@@ -162,19 +163,20 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div ref="rootRef" class="relative">
+  <div ref="rootRef" :class="cn('relative min-w-0', props.class)">
     <button
       ref="buttonRef"
       type="button"
       role="combobox"
+      aria-haspopup="listbox"
       :aria-expanded="open"
       :disabled="disabled"
       :title="display || placeholder"
       :class="
         cn(
-          'flex items-center justify-between gap-2 rounded-md border border-input bg-transparent text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50',
-          small ? 'h-7 px-2 text-xs' : 'h-9 w-full px-3',
-          !small && 'w-full',
+          // w-full 在 auto 宽容器里退化为内容宽：small 内嵌场景不受影响，固定宽容器里能撑满
+          'flex w-full items-center justify-between gap-2 rounded-md border border-input bg-transparent text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50',
+          small ? 'h-7 px-2 text-xs' : 'h-9 px-3',
         )
       "
       @click="toggle"
@@ -189,6 +191,7 @@ onUnmounted(() => {
     <div
       v-if="open"
       ref="popoverRef"
+      role="listbox"
       class="fixed z-[60] max-h-60 overflow-y-auto rounded-md border bg-popover p-1 shadow-md scrollbar-thin"
       :style="{ ...floatStyle, minWidth: '11rem' }"
     >
@@ -207,6 +210,8 @@ onUnmounted(() => {
         v-for="(o, i) in visibleOptions"
         :key="o.value"
         type="button"
+        role="option"
+        :aria-selected="o.value === modelValue"
         :class="
           cn(
             'flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-left text-sm',

@@ -18,7 +18,7 @@ const emit = defineEmits<{ "update:checked": [boolean] }>();
     :disabled="props.disabled"
     :class="
       cn(
-        'inline-flex h-5 w-9 shrink-0 items-center rounded-full border border-transparent transition-colors',
+        'inline-flex h-5 w-9 shrink-0 items-center rounded-full border border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
         props.checked ? 'bg-primary' : 'bg-input',
         props.disabled && 'cursor-not-allowed opacity-50',
       )

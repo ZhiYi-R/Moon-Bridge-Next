@@ -5,8 +5,11 @@ import { listen } from "@tauri-apps/api/event";
 
 import App from "./App.vue";
 import { isTauriRuntime } from "./lib/api";
+import { initTheme } from "./lib/theme";
 import router from "./router";
 import "./style.css";
+
+initTheme();
 
 const app = createApp(App);
 
