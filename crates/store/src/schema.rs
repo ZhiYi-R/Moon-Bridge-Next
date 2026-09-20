@@ -191,6 +191,19 @@ ALTER TABLE balance_cards ADD COLUMN provider_key TEXT;
 ALTER TABLE balance_cards ADD COLUMN display_mode TEXT NOT NULL DEFAULT 'auto';
 "#;
 
+/// V14：secrets 表——按 (scope, key) 隔离的加密小值存储（OAuth 令牌包等）。
+/// 值一律经 `EncKey` 加密落库；scope 由调用方约定（如 `provider:{key}`、
+/// `{plugin}/{scope}`），表本身不解释。
+const V14: &str = r#"
+CREATE TABLE IF NOT EXISTS secrets (
+    scope      TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value_enc  TEXT NOT NULL DEFAULT '',
+    updated_at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (scope, key)
+);
+"#;
+
 /// V12：余额结果按 key 拆分——多 key 卡片对每个 key 各执行一次脚本、各占一行，
 /// 前端按 key 拆卡展示、逐 key 保留上次成功值。主键由 `card_key` 改为
 /// `(card_key, key_index)`（SQLite 不支持改主键，整表重建）；旧行迁移为 key_index=0、
@@ -273,6 +286,10 @@ const MIGRATIONS: &[Migration] = &[
             verifier TEXT NOT NULL
         );
         INSERT INTO encryption_metadata (id, scheme, verifier) VALUES (1, 'plaintext', '');",
+    },
+    Migration {
+        version: 14,
+        sql: V14,
     },
 ];
 

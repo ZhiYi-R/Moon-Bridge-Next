@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn migrates_and_reports_version() {
         let db = Database::open_in_memory().unwrap();
-        assert_eq!(db.version().unwrap(), 13);
+        assert_eq!(db.version().unwrap(), 14);
         assert_eq!(db.enc.scheme(), "plaintext");
         assert_eq!(db.enc.encrypt("memory-secret").unwrap(), "memory-secret");
         let state: (String, String) = db

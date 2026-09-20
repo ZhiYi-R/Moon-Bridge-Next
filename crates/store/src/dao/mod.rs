@@ -7,5 +7,6 @@ pub mod model;
 pub mod plugin;
 pub mod provider;
 pub mod route;
+pub mod secret;
 pub mod settings;
 pub mod usage;

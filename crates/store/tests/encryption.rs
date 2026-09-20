@@ -257,7 +257,7 @@ fn v12_plaintext_database_migrates_without_guessing_ciphertext_from_prefix() {
     drop(db);
     let conn = Connection::open(dir.db()).unwrap();
     conn.execute_batch(
-        "DROP TABLE encryption_metadata; DELETE FROM schema_version WHERE version = 13;",
+        "DROP TABLE encryption_metadata; DELETE FROM schema_version WHERE version >= 13;",
     )
     .unwrap();
     assert_eq!(
@@ -267,7 +267,7 @@ fn v12_plaintext_database_migrates_without_guessing_ciphertext_from_prefix() {
     drop(conn);
 
     let migrated = Database::open(dir.db()).unwrap();
-    assert_eq!(migrated.version().unwrap(), 13);
+    assert_eq!(migrated.version().unwrap(), 14);
     assert_roundtrip(&migrated, &provider, &cards);
     assert_encrypted(&dir.db(), &provider, &cards);
     drop(migrated);
@@ -313,7 +313,7 @@ fn seed_v12_custom_key(dir: &TestDir, old: &dyn EncKey) -> (Provider, Vec<Balanc
         .unwrap();
     }
     conn.execute_batch(
-        "DROP TABLE encryption_metadata; DELETE FROM schema_version WHERE version = 13;",
+        "DROP TABLE encryption_metadata; DELETE FROM schema_version WHERE version >= 13;",
     )
     .unwrap();
     assert_eq!(
@@ -360,7 +360,7 @@ fn v12_custom_provider_source_is_required_and_only_used_once() {
     let migrated =
         Database::open_with_legacy_key(dir.db(), Box::new(AesGcmKey::new(&[42; 32])), &old)
             .unwrap();
-    assert_eq!(migrated.version().unwrap(), 13);
+    assert_eq!(migrated.version().unwrap(), 14);
     assert_roundtrip(&migrated, &provider, &cards);
     assert_eq!(
         old.decrypt_calls.load(Ordering::Relaxed),
