@@ -16,18 +16,18 @@ use tokio::time::timeout;
 const ADMIN: &str = "synthetic-lifecycle-admin-token";
 const GATEWAY: &str = "synthetic-lifecycle-gateway-token";
 const PROVIDER_KEY: &str = "synthetic-lifecycle-provider-key";
-const BALANCE_KEY: &str = "synthetic-lifecycle-balance-key";
+const QUOTA_SECRET: &str = "synthetic-lifecycle-quota-secret";
 const DEADLINE: Duration = Duration::from_secs(20);
 const POLL: Duration = Duration::from_millis(25);
 const SCRIPT: &str = r#"
-MB = {}
+MB = { category = "quota" }
 function MB.query(ctx)
   local r = mb.http.request({
     method = "GET", url = ctx.base_url .. "/quota",
     headers = {{"authorization", "Bearer " .. ctx.key}}, timeout_ms = 10000
   })
   if r.status ~= 200 then return {status = "error", message = "query failed"} end
-  return {status = "ok", quotas = {{label = "balance", left_amount = r.body.left, unit = "$"}}}
+  return {status = "ok", quotas = {{type = "quota", label = "balance", left_amount = r.body.left, unit = "$"}}}
 end
 "#;
 
@@ -75,7 +75,7 @@ impl Process {
             .env("MOONBRIDGE_ADMIN_TOKEN", ADMIN)
             .env("MOONBRIDGE_GATEWAY_TOKEN", GATEWAY)
             .env(
-                "MOONBRIDGE_BALANCE_PRIVATE_ORIGINS",
+                "MOONBRIDGE_QUOTA_PRIVATE_ORIGINS",
                 serde_json::to_string(&[origin]).unwrap(),
             )
             .env("RUST_LOG", "info")
@@ -179,7 +179,7 @@ struct Mock {
 
 async fn quota(State(state): State<Arc<Mock>>, headers: HeaderMap) -> (StatusCode, Json<Value>) {
     if headers.get("authorization").and_then(|v| v.to_str().ok())
-        != Some(format!("Bearer {BALANCE_KEY}").as_str())
+        != Some(format!("Bearer {PROVIDER_KEY}").as_str())
     {
         return (
             StatusCode::UNAUTHORIZED,
@@ -298,7 +298,7 @@ fn encrypted_storage(dir: &Path) -> Result<()> {
             && entry.file_type()?.is_file()
         {
             let bytes = std::fs::read(entry.path())?;
-            for secret in [PROVIDER_KEY, BALANCE_KEY] {
+            for secret in [PROVIDER_KEY, QUOTA_SECRET] {
                 ensure!(
                     !bytes
                         .windows(secret.len())
@@ -315,19 +315,16 @@ fn encrypted_storage(dir: &Path) -> Result<()> {
 fn valid_quota(results: &Value) -> Result<()> {
     let results = results
         .as_array()
-        .context("balance results must be an array")?;
-    ensure!(
-        results.len() == 1,
-        "manual key must override provider key: {results:?}"
-    );
+        .context("quota results must be an array")?;
+    ensure!(results.len() == 1, "one endpoint one row: {results:?}");
     let result = &results[0];
     ensure!(
         result["status"] == "ok" && result["error"].is_null(),
-        "balance failed: {result}"
+        "quota query failed: {result}"
     );
     let quota = &result["payload"]["quotas"][0];
     ensure!(
-        quota["label"] == "balance" && quota["unit"] == "$",
+        quota["type"] == "quota" && quota["label"] == "balance" && quota["unit"] == "$",
         "invalid quota: {quota}"
     );
     ensure!(
@@ -337,11 +334,19 @@ fn valid_quota(results: &Value) -> Result<()> {
     Ok(())
 }
 
-async fn read_back(client: &Client, base: &str, card: &Value) -> Result<()> {
+async fn read_back(client: &Client, base: &str) -> Result<()> {
     let provider = admin(client, base, Method::GET, "/api/providers/lifecycle", None).await?;
     ensure!(
         provider["endpoints"][0]["apiKey"] == PROVIDER_KEY,
         "provider key did not decrypt"
+    );
+    ensure!(
+        provider["quotaPluginRef"] == "lifecycle-quota" && provider["quotaEnabled"] == true,
+        "quota binding did not persist: {provider}"
+    );
+    ensure!(
+        provider["quotaConfig"]["token"] == QUOTA_SECRET,
+        "quota config did not decrypt: {provider}"
     );
     let model = admin(
         client,
@@ -355,22 +360,24 @@ async fn read_back(client: &Client, base: &str, card: &Value) -> Result<()> {
         model["displayName"] == "Lifecycle Model",
         "model did not persist"
     );
-    let cards = admin(client, base, Method::GET, "/api/balance/cards", None).await?;
-    let cards = cards.as_array().context("cards must be an array")?;
-    ensure!(cards.len() == 1, "unexpected cards: {cards:?}");
+    let (status, script) = request(
+        client,
+        base,
+        Method::GET,
+        "/api/plugins/lifecycle-quota/script",
+        Some(ADMIN),
+        None,
+    )
+    .await?;
     ensure!(
-        cards[0]["apiKey"] == BALANCE_KEY,
-        "manual balance key did not decrypt"
-    );
-    ensure!(
-        cards[0]["scriptRef"] == card["scriptRef"],
-        "balance script did not persist"
+        status == StatusCode::OK && script == SCRIPT,
+        "quota plugin script did not persist"
     );
     let refreshed = admin(
         client,
         base,
         Method::POST,
-        "/api/balance/cards/manual/refresh",
+        "/api/quota/lifecycle/refresh",
         Some(Value::Null),
     )
     .await?;
@@ -452,9 +459,34 @@ async fn exercise(
             "config save persisted an environment credential"
         );
     }
-    admin(&client, &base, Method::PUT, "/api/providers", Some(json!({
-        "key": "lifecycle", "endpoints": [{"protocol": "openai-chat", "baseUrl": origin, "apiKey": PROVIDER_KEY}]
-    }))).await?;
+    admin(
+        &client,
+        &base,
+        Method::PUT,
+        "/api/plugins",
+        Some(json!({
+            "name": "lifecycle-quota", "source": "lua", "scriptRef": SCRIPT,
+            "enabled": true, "config": null, "scopes": [], "capabilities": [],
+            "category": "quota"
+        })),
+    )
+    .await?;
+    let provider = json!({
+        "key": "lifecycle",
+        "endpoints": [{"protocol": "openai-chat", "baseUrl": origin, "apiKey": PROVIDER_KEY}],
+        "quotaPluginRef": "lifecycle-quota",
+        "quotaIntervalSecs": 0,
+        "quotaEnabled": true,
+        "quotaConfig": {"token": QUOTA_SECRET},
+    });
+    admin(
+        &client,
+        &base,
+        Method::PUT,
+        "/api/providers",
+        Some(provider.clone()),
+    )
+    .await?;
     admin(
         &client,
         &base,
@@ -465,39 +497,27 @@ async fn exercise(
         })),
     )
     .await?;
-    let card = json!({
-        "key": "manual", "providerKey": "lifecycle", "apiKey": BALANCE_KEY,
-        "baseUrl": origin, "scriptRef": SCRIPT, "intervalSecs": 0, "enabled": true
-    });
-    admin(
-        &client,
-        &base,
-        Method::PUT,
-        "/api/balance/cards",
-        Some(card.clone()),
-    )
-    .await?;
-    read_back(&client, &base, &card).await?;
+    read_back(&client, &base).await?;
     encrypted_storage(dir)?;
 
     mock.hold.store(true, Ordering::SeqCst);
     let slow_client = client.clone();
     let slow_base = base.clone();
-    let slow_card = card.clone();
+    let slow_provider = provider.clone();
     let mut slow = Task(tokio::spawn(async move {
         admin(
             &slow_client,
             &slow_base,
             Method::POST,
-            "/api/balance/test",
-            Some(slow_card),
+            "/api/quota/test",
+            Some(slow_provider),
         )
         .await
     }));
     timeout(Duration::from_secs(5), async {
         tokio::select! {
             _ = mock.entered.notified() => Ok(()),
-            result = &mut slow.0 => anyhow::bail!("balance request ended before entering mock: {result:?}"),
+            result = &mut slow.0 => anyhow::bail!("quota request ended before entering mock: {result:?}"),
         }
     }).await.context("slow request did not enter mock")??;
     let pid = process.child.id();
@@ -518,7 +538,7 @@ async fn exercise(
     process.alive()?;
     ensure!(
         !slow.0.is_finished(),
-        "restart truncated the held balance request"
+        "restart truncated the held quota request"
     );
     mock.hold.store(false, Ordering::SeqCst);
     mock.release.notify_one();
@@ -533,14 +553,14 @@ async fn exercise(
         "HTTP restart replaced the process"
     );
     process.alive()?;
-    read_back(&client, &base, &card).await?;
+    read_back(&client, &base).await?;
 
     process.stop().await?;
     listener_closed(addr).await?;
     encrypted_storage(dir)?;
     *process = Process::spawn(dir, addr, origin, 2)?;
     ready(process, &probe, addr).await?;
-    read_back(&client, &base, &card).await?;
+    read_back(&client, &base).await?;
     let config = admin(&client, &base, Method::GET, "/api/config", None).await?;
     ensure!(
         config["logLevel"] == "warn",

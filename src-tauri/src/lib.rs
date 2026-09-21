@@ -72,29 +72,29 @@ pub fn run() {
             let auto_start = state.config().auto_start;
             app.manage(state.clone());
 
-            // 余额看板定时调度：与网关启停无关，应用启动即常驻。经
+            // 配额查询定时调度：与网关启停无关，应用启动即常驻。经
             // `tauri::async_runtime` 进入 tokio 运行时后再起常驻任务。
-            let balance_db = state.db.clone();
-            let balance_plugins = Some(state.paths.plugins_dir.clone());
-            let balance_policy = moonbridge_gateway::BalanceNetworkPolicy::from_environment(
+            let quota_db = state.db.clone();
+            let quota_plugins = Some(state.paths.plugins_dir.clone());
+            let quota_policy = moonbridge_gateway::QuotaNetworkPolicy::from_environment(
                 state.config().gateway.egress_proxy,
             );
-            if let Some(reason) = balance_policy.denied_reason() {
+            if let Some(reason) = quota_policy.denied_reason() {
                 tracing::warn!(
                     reason,
-                    "余额看板已整体禁用：每次查询都会失败。请检查 gateway.egress_proxy 与 MOONBRIDGE_BALANCE_PRIVATE_ORIGINS 配置"
+                    "配额查询已整体禁用：每次查询都会失败。请检查 gateway.egress_proxy 与 MOONBRIDGE_QUOTA_PRIVATE_ORIGINS 配置"
                 );
             }
             tauri::async_runtime::spawn(async move {
-                let engine = moonbridge_gateway::BalanceEngine::new(
-                    balance_db.clone(),
-                    balance_plugins.clone(),
+                let engine = moonbridge_gateway::QuotaEngine::new(
+                    quota_db.clone(),
+                    quota_plugins.clone(),
                 )
-                .with_network_policy(balance_policy);
-                let _balance_scheduler = moonbridge_gateway::spawn_balance_scheduler(
-                    balance_db,
+                .with_network_policy(quota_policy);
+                let _quota_scheduler = moonbridge_gateway::spawn_quota_scheduler(
+                    quota_db,
                     engine,
-                    balance_plugins,
+                    quota_plugins,
                 );
             });
 
@@ -158,13 +158,11 @@ pub fn run() {
             commands::usage::usage_query,
             commands::usage::usage_summary,
             commands::usage::usage_cost_by_provider,
-            // Balance（余额&健康看板）
-            commands::balance::balance_card_list,
-            commands::balance::balance_card_save,
-            commands::balance::balance_card_delete,
-            commands::balance::balance_card_refresh,
-            commands::balance::balance_refresh_all,
-            commands::balance::balance_card_test,
+            // Quota（配额查询）
+            commands::quota::quota_list,
+            commands::quota::quota_refresh,
+            commands::quota::quota_refresh_all,
+            commands::quota::quota_test,
             // Trace
             commands::trace::trace_list,
             commands::trace::trace_read,

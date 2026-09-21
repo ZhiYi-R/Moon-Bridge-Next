@@ -55,6 +55,9 @@ impl ManagedState {
         paths.ensure_dirs().context("初始化应用目录失败")?;
         let db = Database::open(&paths.db_path)
             .with_context(|| format!("打开数据库失败: {}", paths.db_path.display()))?;
+        if let Err(e) = moonbridge_gateway::seed_builtin_quota_plugins(&db) {
+            tracing::warn!(error = %e, "内置配额插件播种失败");
+        }
         let config = AppConfig::load_or_default(&paths.config_file).unwrap_or_else(|e| {
             tracing::warn!(error = %e, "引导配置加载失败，使用默认配置");
             AppConfig::default()

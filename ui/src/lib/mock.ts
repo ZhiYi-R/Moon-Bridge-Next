@@ -7,10 +7,9 @@
 import type {
   AppConfig,
   AppInfo,
-  BalanceCard,
-  BalanceCardView,
-  BalanceKeyResult,
-  BalanceResult,
+  ProviderQuotaView,
+  QuotaKeyResult,
+  QuotaResult,
   CatalogModel,
   GatewayConfig,
   GatewayStatus,
@@ -48,6 +47,10 @@ const seedProviders: Provider[] = [
     webSearch: null,
     extra: {},
     enabled: true,
+    quotaPluginRef: "quota-demo",
+    quotaIntervalSecs: 900,
+    quotaEnabled: true,
+    quotaConfig: {},
     createdAt: now - 30 * 24 * HOUR,
     updatedAt: now - 2 * HOUR,
   },
@@ -61,6 +64,11 @@ const seedProviders: Provider[] = [
     webSearch: null,
     extra: {},
     enabled: true,
+    // 绑定但停用：演示组行「停用」徽标与手动刷新可用
+    quotaPluginRef: "quota-demo",
+    quotaIntervalSecs: 3600,
+    quotaEnabled: false,
+    quotaConfig: {},
     createdAt: now - 20 * 24 * HOUR,
     updatedAt: now - 26 * HOUR,
   },
@@ -74,6 +82,10 @@ const seedProviders: Provider[] = [
     webSearch: null,
     extra: {},
     enabled: false,
+    quotaPluginRef: "",
+    quotaIntervalSecs: 0,
+    quotaEnabled: false,
+    quotaConfig: {},
     createdAt: now - 10 * 24 * HOUR,
     updatedAt: now - 5 * 24 * HOUR,
   },
@@ -89,6 +101,10 @@ const seedProviders: Provider[] = [
     webSearch: null,
     extra: {},
     enabled: true,
+    quotaPluginRef: "quota-demo",
+    quotaIntervalSecs: 3600,
+    quotaEnabled: true,
+    quotaConfig: { unit: "¥" },
     createdAt: now - 8 * 24 * HOUR,
     updatedAt: now - 4 * HOUR,
   },
@@ -233,6 +249,21 @@ const seedPlugins: PluginRecord[] = [
     scopes: ["response"],
     capabilities: [],
   },
+  {
+    name: "quota-demo",
+    source: "builtin",
+    scriptRef: "plugins/quota-demo.lua",
+    enabled: true,
+    config: {},
+    scopes: [],
+    capabilities: [],
+    category: "quota",
+    configSchema: {
+      management_token: { type: "string", label: "管理令牌", secret: true, help: "演示字段：密钥类字段加密落库" },
+      unit: { type: "string", label: "货币单位", default: "$" },
+      quota_per_unit: { type: "number", label: "每单位额度", default: 500000 },
+    },
+  },
 ];
 
 const seedBindings: PluginBinding[] = [
@@ -240,7 +271,7 @@ const seedBindings: PluginBinding[] = [
 ];
 
 /** 伪造一次查询结果：配额随机游走，便于观察进度条与状态徽章。 */
-function fakeBalanceResult(): BalanceResult {
+function fakeQuotaResult(): QuotaResult {
   const pct = () => Math.floor(Math.random() * 90);
   const used = pct();
   const weekly = pct();
@@ -248,40 +279,42 @@ function fakeBalanceResult(): BalanceResult {
     status: "ok",
     payload: {
       quotas: [
-        // resetAt 给 unix 秒数字字符串（演示引擎归一后的形态，前端格式化为本地时间）
-        { label: "5 小时窗口", usedPercent: used, leftPercent: 100 - used, resetAt: String(Math.floor(Date.now() / 1000) + 3 * 3600) },
-        { label: "周额度", usedPercent: weekly, leftPercent: 100 - weekly, resetAt: null },
+        // resetAt 给 unix 秒数字字符串（演示引擎归一后的形态，前端格式化为本地时间）；
+        // periodSecs 是契约字段，驱动本地消耗统计的窗口对齐
+        { type: "percentage", label: "5 小时窗口", periodSecs: 5 * 3600, usedPercent: used, leftPercent: 100 - used, resetAt: String(Math.floor(Date.now() / 1000) + 3 * 3600) },
+        { type: "percentage", label: "周额度", periodSecs: 7 * 86400, usedPercent: weekly, leftPercent: 100 - weekly, resetAt: null },
       ],
-      summary: "mock：余额由本地伪造，接入真实脚本后按上游返回值展示。",
+      summary: "mock：配额由本地伪造，接入真实插件后按上游返回值展示。",
     },
     error: null,
     queriedAt: Math.floor(Date.now() / 1000),
   };
 }
 
-/** 金额模式演示结果：同一张卡上并存金额与百分比配额，便于对照两种展示。 */
-function fakeAmountBalanceResult(): BalanceResult {
+/** 金额额度演示结果：同一 Provider 上并存金额与百分比配额，便于对照两种展示。 */
+function fakeAmountQuotaResult(): QuotaResult {
   const used = Math.floor(Math.random() * 90);
   return {
     status: "ok",
     payload: {
       quotas: [
-        { label: "余额", unit: "¥", usedAmount: 12.5, leftAmount: 37.5, resetAt: null },
-        { label: "请求数", unit: "次", usedAmount: 320, leftAmount: null, resetAt: null },
-        { label: "周额度", usedPercent: used, leftPercent: 100 - used, resetAt: null },
+        { type: "quota", label: "余额", unit: "¥", usedAmount: 12.5, leftAmount: 37.5, resetAt: null },
+        // counter 类型前端不渲染，演示过滤行为
+        { type: "counter", label: "请求数", unit: "次", usedAmount: 320, resetAt: null },
+        { type: "percentage", label: "周额度", periodSecs: 7 * 86400, usedPercent: used, leftPercent: 100 - used, resetAt: null },
       ],
-      summary: "mock：金额与百分比混排，接入真实脚本后按上游返回值展示。",
+      summary: "mock：金额与百分比混排，接入真实插件后按上游返回值展示。",
     },
     error: null,
     queriedAt: Math.floor(Date.now() / 1000),
   };
 }
 
-/** 走金额模式的演示卡片 key；其余卡片仍用百分比模式。 */
-const AMOUNT_MODE_KEYS = new Set(["kimi-coding-plan"]);
+/** 走金额模式的演示 Provider key；其余仍用百分比模式。 */
+const AMOUNT_MODE_KEYS = new Set(["kimi-coding"]);
 
-function fakeResultFor(key: string): BalanceResult {
-  return AMOUNT_MODE_KEYS.has(key) ? fakeAmountBalanceResult() : fakeBalanceResult();
+function fakeResultFor(providerKey: string): QuotaResult {
+  return AMOUNT_MODE_KEYS.has(providerKey) ? fakeAmountQuotaResult() : fakeQuotaResult();
 }
 
 /** mock 侧与后端同口径的 key 掩码（结果里只带展示标签，不带原文）。 */
@@ -293,104 +326,49 @@ function maskKey(key: string): string {
   return `${key.slice(0, 6)}…${key.slice(-4)}`;
 }
 
-/** 解析有效 key 列表（与后端同口径：手动列表优先，否则端点留空回退前一个非空 key；去重保序，空列表
- *  回落为单空串，手填只填 URL 的卡也能跑）。pool 显式传入：种子初始化时 live 列表
- *  尚未声明（TDZ），读种子池；运行期 handler 读 live 池。 */
-function mockCardKeys(providerKey: string | null, apiKey: string, pool: Provider[]): string[] {
-  const keys = [...new Set(apiKey.split(/\r?\n/).map((key) => key.trim()).filter(Boolean))];
-  if (keys.length > 0) return keys;
-  const pk = providerKey?.trim();
-  if (pk) {
-    const p = pool.find((x) => x.key === pk);
-    let carry = "";
-    for (const ep of p?.endpoints ?? []) {
-      if (ep.apiKey) carry = ep.apiKey;
-      if (carry && !keys.includes(carry)) keys.push(carry);
-    }
+/** 端点逐行展开为伪造结果（与引擎同口径：apiKey 为空的端点沿用上一个非空 key；
+ *  无端点退化为单次空 key 查询）。 */
+function fakeKeyResults(provider: Provider): QuotaKeyResult[] {
+  const keys: string[] = [];
+  let carry = "";
+  for (const ep of provider.endpoints) {
+    if (ep.apiKey) carry = ep.apiKey;
+    keys.push(carry);
   }
-  return keys.length > 0 ? keys : [""];
-}
-
-/** 按 key 拆行的伪造结果集：每个有效 key 一行（引擎逐 key 执行的 mock 对应物）。 */
-function fakeKeyResults(
-  cardKey: string,
-  providerKey: string | null,
-  apiKey: string,
-  pool: Provider[],
-): BalanceKeyResult[] {
-  return mockCardKeys(providerKey, apiKey, pool).map((key, i) => ({
+  if (keys.length === 0) keys.push("");
+  return keys.map((key, i) => ({
     keyIndex: i,
     keyLabel: maskKey(key),
-    ...fakeResultFor(cardKey),
+    ...fakeResultFor(provider.key),
   }));
 }
 
-const seedBalanceCards: BalanceCardView[] = [
-  {
-    key: "anthropic-quota",
-    providerKey: "anthropic-official",
-    displayMode: "auto",
-    apiKey: "",
-    baseUrl: "",
-    providerLabel: "Anthropic",
-    scriptRef: `-- mock 内联脚本\nreturn { status = "ok", quotas = {}, summary = "mock" }\n`,
-    intervalSecs: 900,
-    enabled: true,
-    extra: {},
-    position: 0,
-    createdAt: Math.floor((now - 12 * 24 * HOUR) / 1000),
-    updatedAt: Math.floor((now - 3 * HOUR) / 1000),
-    results: fakeKeyResults("anthropic-quota", "anthropic-official", "", seedProviders),
-  },
-  {
-    key: "openai-relay",
-    providerKey: "openai-relay",
-    displayMode: "percent",
-    apiKey: "",
-    baseUrl: "",
-    providerLabel: "",
-    scriptRef: "balance_openai.lua",
-    intervalSecs: 0,
-    enabled: false,
-    extra: {},
-    position: 1,
-    createdAt: Math.floor((now - 5 * 24 * HOUR) / 1000),
-    updatedAt: Math.floor((now - 26 * HOUR) / 1000),
-    results: [],
-  },
-  {
-    key: "kimi-coding-plan",
-    providerKey: "kimi-coding",
-    displayMode: "amount",
-    apiKey: "",
-    baseUrl: "",
-    providerLabel: "Kimi Coding Plan",
-    scriptRef: "balance_kimi.lua",
-    intervalSecs: 3600,
-    enabled: true,
-    extra: { unit: "¥" },
-    position: 2,
-    createdAt: Math.floor((now - 2 * 24 * HOUR) / 1000),
-    updatedAt: Math.floor((now - 1 * HOUR) / 1000),
-    results: fakeKeyResults("kimi-coding-plan", "kimi-coding", "", seedProviders),
-  },
-  {
-    key: "legacy-manual",
-    providerKey: null,
-    displayMode: "percent",
-    apiKey: "sk-ant-mock-legacy-000111",
-    baseUrl: "https://legacy.example.com",
-    providerLabel: "",
-    scriptRef: `-- 旧版手填模式卡片（providerKey 为 null）：演示列表与分组兜底\nreturn { status = "ok", quotas = {}, summary = "legacy" }\n`,
-    intervalSecs: 1800,
-    enabled: true,
-    extra: {},
-    position: 3,
-    createdAt: Math.floor((now - 30 * 24 * HOUR) / 1000),
-    updatedAt: Math.floor((now - 6 * HOUR) / 1000),
-    results: fakeKeyResults("legacy-manual", null, "sk-ant-mock-legacy-000111", seedProviders),
-  },
-];
+/** Provider + 结果集 → 配额视图（与后端 `list_quota_views` 同形状）。 */
+function quotaViewOf(p: Provider, results: QuotaKeyResult[]): ProviderQuotaView {
+  return {
+    providerKey: p.key,
+    quotaPluginRef: p.quotaPluginRef ?? "",
+    quotaIntervalSecs: p.quotaIntervalSecs ?? 0,
+    quotaEnabled: p.quotaEnabled ?? false,
+    keyCount: Math.max(1, p.endpoints.length),
+    results,
+  };
+}
+
+/** 配额结果的可变存储：providerKey → 逐端点最近结果（引擎落库的 mock 对应物）。 */
+const quotaResults = new Map<string, QuotaKeyResult[]>();
+for (const p of seedProviders) {
+  if (p.quotaPluginRef && p.quotaEnabled) {
+    quotaResults.set(p.key, fakeKeyResults(p));
+  }
+}
+
+/** 绑定配额插件的 Provider 视图列表（与后端同口径：quotaPluginRef 非空即列出）。 */
+function quotaViews(): ProviderQuotaView[] {
+  return providers
+    .filter((p) => (p.quotaPluginRef ?? "").trim() !== "")
+    .map((p) => quotaViewOf(p, (quotaResults.get(p.key) ?? []).map((r) => ({ ...r }))));
+}
 
 // 生成最近 48h 的用量记录：每小时 0–3 条，模型加权随机，少量 error。
 // 注意：createdAt 与后端一致使用 unix 秒（store::now_unix）。
@@ -464,7 +442,6 @@ const settings = new Map<string, Json>([
 ]);
 const usageRecords = seedUsage();
 const scripts = new Map<string, string>(seedPlugins.map((p) => [p.name, DEFAULT_SCRIPT]));
-const balanceCards = [...seedBalanceCards];
 
 const gatewayStatus: GatewayStatus = { running: false, addr: "127.0.0.1:8787", error: null };
 
@@ -728,67 +705,39 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
       return undefined as T;
     }
 
-    // ── 余额看板 ──
-    case "balance_card_list":
-      return balanceCards.map((c) => ({ ...c, results: c.results.map((r) => ({ ...r })) })) as T;
-    case "balance_card_save": {
-      const card = (args as { card: BalanceCard }).card;
-      // 保存只带配置字段：已有查询结果原地保留（与前端 store 同口径）
-      const prev = balanceCards.find((c) => c.key === card.key);
-      upsert(
-        balanceCards,
-        { ...card, results: prev?.results ?? [], updatedAt: Math.floor(Date.now() / 1000) },
-        (x) => x.key,
-      );
-      return undefined as T;
+    // ── 配额查询 ──
+    case "quota_list":
+      return quotaViews() as T;
+    case "quota_refresh": {
+      const p = providers.find((x) => x.key === args.providerKey);
+      if (!p) throw new Error(`上游服务不存在：${String(args.providerKey)}`);
+      if (!(p.quotaPluginRef ?? "").trim()) throw new Error(`上游服务未绑定配额查询插件：${p.key}`);
+      quotaResults.set(p.key, fakeKeyResults(p));
+      return quotaViewOf(p, quotaResults.get(p.key)!.map((r) => ({ ...r }))) as T;
     }
-    case "balance_card_delete": {
-      const idx = balanceCards.findIndex((c) => c.key === args.key);
-      if (idx < 0) throw new Error(`余额卡片不存在：${String(args.key)}`);
-      balanceCards.splice(idx, 1);
-      return undefined as T;
-    }
-    case "balance_card_refresh": {
-      const card = balanceCards.find((c) => c.key === args.key);
-      if (!card) throw new Error(`余额卡片不存在：${String(args.key)}`);
-      const fresh = fakeKeyResults(card.key, card.providerKey, card.apiKey, providers);
-      const keyIndex = args.keyIndex === null || args.keyIndex === undefined
-        ? null
-        : Number(args.keyIndex);
-      if (keyIndex === null) {
-        // 整卡刷新：全部 key 重跑，结果行按当前 key 列表重建
-        card.results = fresh;
-      } else if (keyIndex >= 0 && keyIndex < fresh.length) {
-        // 单 key 刷新：只替换该 key 的行（数组随 key 列表伸缩）
-        card.results = fresh.map((r, i) =>
-          i === keyIndex ? r : (card.results.find((o) => o.keyIndex === i) ?? r),
-        );
+    case "quota_refresh_all": {
+      for (const p of providers) {
+        if (!(p.quotaPluginRef ?? "").trim() || !p.quotaEnabled) continue;
+        quotaResults.set(p.key, fakeKeyResults(p));
       }
-      return { ...card, results: card.results.map((r) => ({ ...r })) } as T;
+      return quotaViews() as T;
     }
-    case "balance_refresh_all": {
-      for (const c of balanceCards) {
-        if (!c.enabled) continue;
-        c.results = fakeKeyResults(c.key, c.providerKey, c.apiKey, providers);
-      }
-      return balanceCards.map((c) => ({ ...c, results: c.results.map((r) => ({ ...r })) })) as T;
-    }
-    case "balance_card_test": {
-      // dry-run 语义：不写库、卡片无需已保存；脚本为空模拟引擎级失败
-      const card = (args as { card: BalanceCard }).card;
-      if (!card.scriptRef.trim()) {
+    case "quota_test": {
+      // dry-run 语义：不写库、Provider 无需已保存；未绑定插件模拟引擎级失败
+      const p = (args as { provider: Provider }).provider;
+      if (!(p.quotaPluginRef ?? "").trim()) {
         return [
           {
             keyIndex: 0,
             keyLabel: "",
             status: "error",
             payload: null,
-            error: "脚本为空：请填写脚本路径或内联脚本",
+            error: "未绑定配额查询插件",
             queriedAt: Math.floor(Date.now() / 1000),
           },
         ] as T;
       }
-      return fakeKeyResults(card.key, card.providerKey, card.apiKey, providers) as T;
+      return fakeKeyResults(p) as T;
     }
 
     // ── Usage ──

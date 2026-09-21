@@ -171,6 +171,9 @@ pub async fn run_headless(opts: HeadlessOpts) -> Result<()> {
 
     let db = moonbridge_store::Database::open(&paths.db_path)
         .with_context(|| format!("打开数据库失败: {}", paths.db_path.display()))?;
+    if let Err(e) = moonbridge_gateway::seed_builtin_quota_plugins(&db) {
+        tracing::warn!(error = %e, "内置配额插件播种失败");
+    }
     let state = moonbridge_gateway::bootstrap(app_config.gateway.clone(), Arc::new(db))
         .context("构建网关状态失败")?;
     tracing::info!(addr = %state.config.addr, "headless 网关已启动（鉴权已开启），Ctrl-C 退出");

@@ -15,9 +15,9 @@
 //! 依赖方向：gateway → core, protocol, plugin, store。
 
 pub mod auth;
-pub mod balance;
-pub mod balance_http;
-pub use balance_http::BalanceNetworkPolicy;
+pub mod quota;
+pub mod quota_http;
+pub use quota_http::QuotaNetworkPolicy;
 pub mod bridge;
 pub mod config;
 pub mod dispatch;
@@ -41,9 +41,13 @@ use moonbridge_plugin::{
 use moonbridge_protocol::{builtin_registry, NoopHooks, PluginHooks, Registry};
 use moonbridge_store::Database;
 
-pub use balance::{
-    list_views, run_balance_loop, spawn_balance_scheduler, view_of, BalanceEngine, SCHEDULE_TICK,
+pub use quota::{
+    list_views as list_quota_views, run_quota_loop, seed_builtin_quota_plugins,
+    spawn_quota_scheduler, view_of as quota_view_of, QuotaEngine, BUILTIN_QUOTA_PLUGINS,
+    SCHEDULE_TICK,
 };
+// 供管理面在保存/导入插件时沙箱求值 `MB` 清单（category/config_schema）。
+pub use moonbridge_plugin::LuaRuntime as PluginLuaRuntime;
 pub use config::GatewayConfig;
 pub use error::{GatewayError, Result};
 pub use state::AppState;
@@ -181,6 +185,11 @@ pub fn load_plugins(
     match db.list_plugins() {
         Ok(plugins) => {
             for p in plugins {
+                // 类别白名单：只有 core 插件进入请求链路注册表；quota 等非核心
+                // 类别由各自的引擎驱动，永不在此加载
+                if p.category != "core" {
+                    continue;
+                }
                 // 全局停用但被某作用域强制启用的插件仍需加载
                 let force_enabled = overrides
                     .get(&p.name)

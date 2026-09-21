@@ -2,7 +2,7 @@
 //!
 //! 以 SQLite（rusqlite, bundled + WAL）为唯一持久化后端，承载 provider/model/
 //! route/plugin/usage/settings 全部配置与运行时数据。手写版本化 migration
-//! （见 [`schema`]），每表一个 DAO 模块（见 [`dao`]；余额看板见 [`balance`]），
+//! （见 [`schema`]），每表一个 DAO 模块（见 [`dao`]；配额查询见 [`quota`]），
 //! 统一由 [`Database`] 暴露。
 //!
 //! 并发模型：单连接 + `parking_lot::Mutex` 串行化。本地网关的管理类读写为低并发，
@@ -10,11 +10,11 @@
 //!
 //! 依赖方向：store → core（不依赖 protocol/plugin/gateway）。
 
-pub mod balance;
 pub mod crypto;
 pub mod dao;
 pub mod error;
 pub mod models;
+pub mod quota;
 pub mod schema;
 
 use std::path::Path;
@@ -22,15 +22,14 @@ use std::path::Path;
 use parking_lot::Mutex;
 use rusqlite::Connection;
 
-pub use balance::{clamp_interval_secs, MIN_INTERVAL_SECS};
 pub use crypto::{AesGcmKey, EncKey, PlaintextKey};
 pub use dao::usage::{ProviderCost, UsageSummary};
 pub use error::{Result, StoreError};
 pub use models::{
-    BalanceCard, BalanceCardView, BalanceKeyResult, BalanceQuota, BalanceResult, Endpoint,
-    ModelDef, Offer, PluginBinding, PluginRecord, Provider, Route, Setting, UsageQuery,
-    UsageRecord,
+    Endpoint, ModelDef, Offer, PluginBinding, PluginRecord, Provider, ProviderQuotaView,
+    QuotaEntry, QuotaKeyResult, QuotaResult, Route, Setting, UsageQuery, UsageRecord,
 };
+pub use quota::{clamp_interval_secs, MIN_INTERVAL_SECS, QUOTA_SEEDS_DONE};
 
 /// SQLite 存储句柄。可 `Arc` 共享给 gateway 与 app 层。
 pub struct Database {
@@ -78,7 +77,7 @@ impl Database {
         Self::from_conn(conn, enc, None)
     }
 
-    /// 将旧 provider 密钥按指定来源解密后迁移到目标密钥；旧 balance 密钥始终按明文迁移。
+    /// 将旧 provider 密钥按指定来源解密后迁移到目标密钥。
     pub fn open_with_legacy_key(
         path: impl AsRef<Path>,
         target: Box<dyn EncKey>,
@@ -195,11 +194,6 @@ impl Database {
             }
         }
         let source = legacy_provider_key.unwrap_or(&PlaintextKey);
-        let mut stmt = conn.prepare("SELECT key, api_key FROM balance_cards")?;
-        let cards = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        drop(stmt);
         for (provider, idx, stored) in endpoints {
             if legacy {
                 let plaintext = source.decrypt(&stored)?;
@@ -211,10 +205,22 @@ impl Database {
                 enc.decrypt(&stored)?;
             }
         }
-        for (key, stored) in cards {
+        // quota_config_enc（V14+ 列）同理：plaintext scheme 下存的是明文 JSON，
+        // 直接按明文重加密；非 legacy 时逐行解密校验（尽早暴露错误密钥）。
+        let quota_rows = {
+            let mut stmt = conn
+                .prepare("SELECT key, quota_config_enc FROM providers WHERE quota_config_enc <> ''")?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        for (key, stored) in quota_rows {
             if legacy {
                 conn.execute(
-                    "UPDATE balance_cards SET api_key = ?1 WHERE key = ?2",
+                    "UPDATE providers SET quota_config_enc = ?1 WHERE key = ?2",
                     rusqlite::params![enc.encrypt(&stored)?, key],
                 )?;
             } else {
@@ -260,12 +266,12 @@ pub(crate) fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     #[test]
     fn migrates_and_reports_version() {
         let db = Database::open_in_memory().unwrap();
-        assert_eq!(db.version().unwrap(), 13);
+        assert_eq!(db.version().unwrap(), 14);
         assert_eq!(db.enc.scheme(), "plaintext");
         assert_eq!(db.enc.encrypt("memory-secret").unwrap(), "memory-secret");
         let state: (String, String) = db
@@ -336,6 +342,10 @@ mod tests {
             web_search: Some(json!({"support": "auto"})),
             extra: json!({}),
             enabled: true,
+            quota_plugin_ref: String::new(),
+            quota_interval_secs: 0,
+            quota_enabled: false,
+            quota_config: serde_json::Value::Null,
             created_at: 0,
             updated_at: 0,
         };
@@ -420,6 +430,8 @@ mod tests {
             config: json!({"prefix": "hi"}),
             scopes: vec!["global".into(), "model".into()],
             capabilities: vec!["core".into()],
+            category: "core".into(),
+            config_schema: Value::Null,
         })
         .unwrap();
         // 默认继承插件 enabled

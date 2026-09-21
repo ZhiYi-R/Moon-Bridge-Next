@@ -43,6 +43,19 @@ pub struct Provider {
     /// 是否启用。
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// 配额查询插件引用（`plugins.name`，category=quota）；空串 = 未绑定配额查询。
+    #[serde(default)]
+    pub quota_plugin_ref: String,
+    /// 配额定时查询间隔（秒）；`0` = 禁用定时、只手动刷新。保存时 `1..=59` 夹到 60。
+    #[serde(default)]
+    pub quota_interval_secs: i64,
+    /// 配额查询开关（独立于 quota_plugin_ref，便于临时停用）。
+    #[serde(default)]
+    pub quota_enabled: bool,
+    /// 配额插件实例配置（解密后的 JSON；落库为 AES 密文 `quota_config_enc`）。
+    /// 插件 `config_schema` 声明的字段值都在里面（含密钥类），明文不落库。
+    #[serde(default)]
+    pub quota_config: Value,
     /// 创建时间（unix 秒）。
     #[serde(default)]
     pub created_at: i64,
@@ -53,10 +66,6 @@ pub struct Provider {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_display_mode() -> String {
-    "auto".to_string()
 }
 
 /// 模型元数据定义（仅承载模型自身属性；定价口径统一在 offers）。
@@ -126,6 +135,18 @@ pub struct PluginRecord {
     /// 能力声明：core/raw_request/raw_response/raw_stream。
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// 插件类别：`core`（请求链路插件，进钩子注册表）| `quota`（配额查询插件，
+    /// 绑定 Provider 由配额引擎驱动，不接触请求链路）。
+    #[serde(default = "default_category")]
+    pub category: String,
+    /// 脚本 `MB.config_schema` 声明的实例配置 JSON Schema（保存/导入时由沙箱求值
+    /// 提取；`null` = 无声明）。quota 插件据此渲染 Provider 的配额配置表单。
+    #[serde(default)]
+    pub config_schema: Value,
+}
+
+fn default_category() -> String {
+    "core".to_string()
 }
 
 fn default_source() -> String {
@@ -148,60 +169,11 @@ pub struct PluginBinding {
     pub config: Value,
 }
 
-/// 余额&健康看板卡片。
-///
-/// 每张卡片绑一段 Lua 脚本（`script_ref` 判定与插件一致：`.lua` 结尾 = `plugins_dir`
-/// 内文件，否则内联源码），脚本暴露 `MB.query(ctx)` 返回配额/余额信息。
+/// 单个 key 最近一次配额查询结果，按 `(provider_key, key_index)` 保存，
+/// 随 Provider 删除级联清理。`key_index` 即 `provider_endpoints.idx`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BalanceCard {
-    /// 唯一 key（卡片名，亦作为脚本 ctx 的 `name`）。
-    pub key: String,
-    /// 引用的上游 Provider key（`providers.key`）；仅在无手动 key 时解析其端点 key。
-    /// 有手动 key 时仅用作分组和脚本 ctx.provider 的默认标签。
-    #[serde(default)]
-    pub provider_key: Option<String>,
-    /// 显示样式：`auto`（按数据自动）| `percent`（强制百分比）| `amount`（强制金额）。
-    /// 纯前端展示 concern，引擎不参与；保存时非法值归一为 `auto`。
-    #[serde(default = "default_display_mode")]
-    pub display_mode: String,
-    /// 手动 API Key（明文），多 key 用换行分隔；去空白、保序去重后非空则覆盖服务引用。
-    #[serde(default)]
-    pub api_key: String,
-    /// 查询 URL（脚本 ctx 的 `base_url`）。用户可选填写的配额接口基准地址，
-    /// 与 Provider 端点无关、两种模式通用；留空则脚本需自行处理 URL。
-    #[serde(default)]
-    pub base_url: String,
-    /// 服务商展示标签（脚本 ctx 的 `provider`；引用模式下留空则取 Provider key）。
-    #[serde(default)]
-    pub provider_label: String,
-    /// 脚本引用：`.lua` 结尾为 `plugins_dir` 内文件，否则内联 Lua 源码。
-    #[serde(default)]
-    pub script_ref: String,
-    /// 定时查询间隔（秒）；`0` 表示禁用定时、只手动刷新。保存时 `1..=59` 夹到 60。
-    #[serde(default)]
-    pub interval_secs: i64,
-    /// 是否启用（禁用后不参与 `balance_refresh_all` 与定时调度）。
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// 卡片自定义参数（原样透传脚本 ctx 的 `extra`）。
-    #[serde(default)]
-    pub extra: Value,
-    /// 展示排序（升序）。
-    #[serde(default)]
-    pub position: i64,
-    /// 创建时间（unix 秒）。
-    #[serde(default)]
-    pub created_at: i64,
-    /// 更新时间（unix 秒）。
-    #[serde(default)]
-    pub updated_at: i64,
-}
-
-/// 单个 key 最近一次查询结果，按 (card_key, key_index) 保存，随卡片删除级联清理。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BalanceResult {
+pub struct QuotaResult {
     /// `ok` | `error`。
     pub status: String,
     /// 脚本返回的完整 JSON（`quotas` 已归一为 camelCase 并补齐 used/left 互补值，
@@ -229,18 +201,29 @@ where
     }
 }
 
-/// 余额脚本返回的单条配额（`payload.quotas` 的元素）。
+/// 配额脚本返回的单条配额（`payload.quotas` 的元素）。
 ///
-/// 脚本按 Lua 习惯写 snake_case，引擎落库前归一为 camelCase（本结构的序列化形状）；
-/// `used_percent` / `left_percent` 互补，脚本只给一个时由引擎补另一个。
-/// 金额模式：脚本给出 `unit` + `used_amount`（可再带 `left_amount`）时，前端按
-/// 「消耗 x{unit} · 余额 y{unit}」展示；amount 字段之间以及与 percent 之间均不做互补互推。
+/// 判别字段 `type` 必填：`percentage`（百分比额度）| `quota`（带金额的额度）|
+/// `counter`（无界计数器，前端不渲染）。脚本按 Lua 习惯写 snake_case，引擎落库前
+/// 归一为 camelCase（本结构的序列化形状）；`used_percent` / `left_percent` 互补，
+/// 脚本只给一个时由引擎补另一个。amount 字段之间以及与 percent 之间不做互补互推。
 /// 脚本自定义的额外字段经 `extra` 原样保留。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BalanceQuota {
+pub struct QuotaEntry {
+    /// 配额类型判别（JSON 字段名 `type`）：percentage / quota / counter。
+    #[serde(rename = "type")]
+    pub quota_type: String,
     /// 配额展示名（如「5 小时窗口」）。
     pub label: String,
+    /// 配额窗口时长（秒）：有滚动窗口语义的配额填写，供本地消耗统计对照；
+    /// 无窗口语义（如总额度）不填。
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "period_secs"
+    )]
+    pub period_secs: Option<i64>,
     /// 已用百分比。
     #[serde(
         default,
@@ -286,34 +269,42 @@ pub struct BalanceQuota {
     pub extra: serde_json::Map<String, Value>,
 }
 
-/// 余额卡片视图：卡片配置 + 逐 key 的最近一次查询结果（空数组表示从未查询过）。
+/// Provider 配额视图：绑定信息 + 逐端点 key 的最近一次查询结果（空数组表示从未查询过）。
 ///
-/// 多 key 卡片按 key 拆卡展示：引擎对解析出的每个 key 各跑一次脚本，每个 key 一行
-/// 结果。REST 与 IPC 两个宿主共用同一形状，前端一次拿到卡片与其全部 key 的余额。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BalanceCardView {
-    #[serde(flatten)]
-    pub card: BalanceCard,
-    #[serde(default)]
-    pub results: Vec<BalanceKeyResult>,
-}
-
-/// 单个 key 的查询结果（`balance_results` 一行的视图，按 `(card_key, key_index)` 定位）。
-///
-/// `key_label` 是掩码后的 key 展示标签（如 `sk-kim…LXyw`），由引擎在运行时写入；
-/// 查询结果只携带掩码；管理员编辑卡片或 Provider 时仍可接触原始凭据。
+/// 引擎对 Provider 的每个端点 key 各跑一次配额脚本，每个 key 一行结果。
+/// REST 与 IPC 两个宿主共用同一形状，前端一次拿到 Provider 与其全部 key 的配额。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BalanceKeyResult {
-    /// key 在本次解析结果中的序号（0 起，与 `ctx.keys` 的顺序口径一致）。
+pub struct ProviderQuotaView {
+    pub provider_key: String,
+    /// 绑定的配额插件名（`plugins.name`，category=quota）。
+    pub quota_plugin_ref: String,
+    /// 定时查询间隔（秒）；`0` = 只手动刷新。
+    pub quota_interval_secs: i64,
+    /// 配额查询开关。
+    pub quota_enabled: bool,
+    /// 端点数量（key 行数上限）。
+    pub key_count: i64,
+    #[serde(default)]
+    pub results: Vec<QuotaKeyResult>,
+}
+
+/// 单个 key 的查询结果（`quota_results` 一行的视图，按 `(provider_key, key_index)` 定位）。
+///
+/// `key_label` 是掩码后的 key 展示标签（如 `sk-kim…LXyw`），由引擎在运行时写入；
+/// 查询结果只携带掩码；管理员编辑 Provider 时仍可接触原始凭据。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaKeyResult {
+    /// 端点序号（`provider_endpoints.idx`，与 `ctx.keys` 的顺序口径一致）。
     #[serde(default)]
     pub key_index: i64,
-    /// 掩码后的 key 展示标签；无 key（手填模式空 key 或解析失败）时为空串。
+    /// 掩码后的 key 展示标签；无端点 key 时为空串。
     #[serde(default)]
     pub key_label: String,
     /// 本次查询结果。
     #[serde(flatten)]
-    pub result: BalanceResult,
+    pub result: QuotaResult,
 }
 
 /// 用量记录。

@@ -7,9 +7,9 @@
 //! 认证：全部 `/api/*` 需要 `Authorization: Bearer <admin_token>`；token 由启动参数
 //! 强制提供（见 [`crate::args`]）。
 
-pub mod balance;
 pub mod catalog;
 pub mod plugin;
+pub mod quota;
 pub mod trace;
 
 use std::sync::{Arc, RwLock};
@@ -230,21 +230,14 @@ pub fn router(state: AdminState) -> Router {
         .route("/api/usage", get(usage_query))
         .route("/api/usage/summary", get(usage_summary))
         .route("/api/usage/cost-by-provider", get(usage_cost_by_provider))
-        // ---- balance（余额&健康看板）----
+        // ---- quota（配额查询）----
+        .route("/api/quota", get(quota::quota_list))
         .route(
-            "/api/balance/cards",
-            get(balance::balance_card_list).put(balance::balance_card_save),
+            "/api/quota/:key/refresh",
+            post(quota::quota_refresh),
         )
-        .route(
-            "/api/balance/cards/:key",
-            delete(balance::balance_card_delete),
-        )
-        .route(
-            "/api/balance/cards/:key/refresh",
-            post(balance::balance_card_refresh),
-        )
-        .route("/api/balance/refresh", post(balance::balance_refresh_all))
-        .route("/api/balance/test", post(balance::balance_card_test))
+        .route("/api/quota/refresh", post(quota::quota_refresh_all))
+        .route("/api/quota/test", post(quota::quota_test))
         // ---- trace ----
         .route("/api/traces", get(trace::trace_list))
         .route(

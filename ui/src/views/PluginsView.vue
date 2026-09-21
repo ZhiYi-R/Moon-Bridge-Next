@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ArrowLeft, ChevronDown, Pencil, Plus, Power, Puzzle, RotateCw, Trash2, Upload } from "lucide-vue-next";
-import { computed, onActivated, onMounted, reactive, ref } from "vue";
+import { computed, onActivated, onMounted, reactive, ref, watch } from "vue";
 
 import Alert from "@/components/ui/Alert.vue";
 import Badge from "@/components/ui/Badge.vue";
@@ -11,6 +11,7 @@ import Input from "@/components/ui/Input.vue";
 import Label from "@/components/ui/Label.vue";
 import CodeEditor from "@/components/ui/CodeEditor.vue";
 import Modal from "@/components/ui/Modal.vue";
+import Select from "@/components/ui/Select.vue";
 import Switch from "@/components/ui/Switch.vue";
 import { useConfirm } from "@/composables/useConfirm";
 import { useToast } from "@/composables/useToast";
@@ -41,6 +42,34 @@ function MB.on_request(ctx, req)
 end
 `;
 
+/** 配额插件的默认脚本骨架：契约是 MB.query(ctx)，配额必须带 type 判别。 */
+const QUOTA_DEFAULT_SCRIPT = `-- Moon Bridge Next 配额查询插件
+-- 配额引擎对 Provider 的每个端点 Key 各调一次 MB.query：
+--   ctx = { name, key, keys = {key}, base_url（该端点地址）, provider, extra（配额配置） }
+-- 返回 { status = "ok", quotas = {...}, summary = "..." }；quotas 每项必须带 type：
+--   percentage: used_percent / left_percent（0-100，可附 period_secs / reset_at）
+--   quota:      unit + used_amount / left_amount
+--   counter:    unit + used_amount（无界计数，看板不展示）
+MB = {
+  category = "quota",
+}
+
+function MB.query(ctx)
+  local r = mb.http.request({
+    method = "GET",
+    url = ctx.base_url .. "/quota",
+    headers = { { "Authorization", "Bearer " .. ctx.key } },
+  })
+  if r.status ~= 200 then
+    return { status = "error", message = "上游 " .. r.status }
+  end
+  return {
+    status = "ok",
+    quotas = { { type = "percentage", label = "额度", left_percent = r.body.left } },
+  }
+end
+`;
+
 const plugins = ref<PluginRecord[]>([]);
 const error = ref<string | null>(null);
 const needsRestart = ref(false);
@@ -56,6 +85,7 @@ interface Form {
   scriptRef: string;
   enabled: boolean;
   configText: string;
+  category: string;
   scopes: string[];
   capabilities: string[];
 }
@@ -65,10 +95,20 @@ const form = reactive<Form>({
   scriptRef: "",
   enabled: true,
   configText: "{}",
+  category: "core",
   scopes: ["global"],
   capabilities: ["core"],
 });
 const script = ref(DEFAULT_SCRIPT);
+
+// 切换类别时，脚本仍是某一套默认骨架则换成对应骨架；用户改过则不动。
+watch(
+  () => form.category,
+  (category) => {
+    if (script.value === DEFAULT_SCRIPT && category === "quota") script.value = QUOTA_DEFAULT_SCRIPT;
+    else if (script.value === QUOTA_DEFAULT_SCRIPT && category === "core") script.value = DEFAULT_SCRIPT;
+  },
+);
 
 // ── 编辑器未保存守卫：进入编辑时拍快照，返回/取消时比对 ──
 const editorSnapshot = ref("");
@@ -114,6 +154,7 @@ function newPlugin() {
     scriptRef: "",
     enabled: true,
     configText: "{}",
+    category: "core",
     scopes: ["global"],
     capabilities: ["core"],
   });
@@ -130,6 +171,7 @@ async function editPlugin(p: PluginRecord) {
     scriptRef: p.scriptRef,
     enabled: p.enabled,
     configText: JSON.stringify(p.config ?? {}, null, 2),
+    category: p.category ?? "core",
     scopes: [...p.scopes],
     capabilities: [...p.capabilities],
   });
@@ -168,6 +210,7 @@ async function save() {
     config,
     scopes: [...form.scopes],
     capabilities: [...form.capabilities],
+    category: form.category,
   };
   busy.value = true;
   try {
@@ -403,6 +446,17 @@ onActivated(() => {
           <Input id="pl-ref" v-model="form.scriptRef" placeholder="留空则为 my_plugin.lua" />
         </div>
         <div class="space-y-1.5">
+          <Label for="pl-category">类别</Label>
+          <Select
+            id="pl-category"
+            v-model="form.category"
+            :options="[
+              { value: 'core', label: 'core · 请求链路' },
+              { value: 'quota', label: 'quota · 配额查询' },
+            ]"
+          />
+        </div>
+        <div v-if="form.category === 'core'" class="space-y-1.5">
           <Label>能力</Label>
           <div class="flex flex-wrap gap-x-4 gap-y-2 pt-1.5">
             <label
@@ -418,7 +472,7 @@ onActivated(() => {
             </label>
           </div>
         </div>
-        <div class="space-y-1.5">
+        <div v-if="form.category === 'core'" class="space-y-1.5">
           <Label>作用域</Label>
           <div class="flex flex-wrap gap-x-4 gap-y-2 pt-1.5">
             <label
@@ -496,6 +550,7 @@ onActivated(() => {
             <div class="flex items-center justify-between gap-2">
               <div class="flex min-w-0 items-center gap-2">
                 <span class="truncate font-medium">{{ p.name }}</span>
+                <Badge v-if="p.category && p.category !== 'core'" variant="secondary" class="shrink-0">{{ p.category }}</Badge>
                 <span class="shrink-0 font-mono text-xs text-muted-foreground">{{ p.source }}</span>
                 <Badge :variant="p.enabled ? 'success' : 'secondary'" class="shrink-0">
                   {{ p.enabled ? "启用" : "停用" }}
@@ -516,7 +571,8 @@ onActivated(() => {
             <div class="mt-1 truncate font-mono text-xs text-muted-foreground" :title="p.scriptRef">
               {{ p.scriptRef }}
             </div>
-            <div class="mt-1.5 flex flex-wrap gap-x-2 text-xs text-muted-foreground">
+            <!-- 能力/作用域只对 core 链路插件有意义；quota 插件不展示 -->
+            <div v-if="(p.category ?? 'core') === 'core'" class="mt-1.5 flex flex-wrap gap-x-2 text-xs text-muted-foreground">
               <span v-if="p.capabilities.length" class="font-mono">{{ p.capabilities.join(" · ") }}</span>
               <span v-else>未声明 capabilities</span>
               <span>·</span>

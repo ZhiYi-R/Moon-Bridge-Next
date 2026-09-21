@@ -26,6 +26,10 @@ pub struct Manifest {
     /// 版本。
     #[serde(default = "default_version")]
     pub version: String,
+    /// 插件类别：`core`（请求链路插件，进钩子注册表）| `quota`（配额查询插件，
+    /// 绑定 Provider 由配额引擎驱动，不接触请求链路）。
+    #[serde(default = "default_category")]
+    pub category: String,
     /// 作用域：global / provider / model / route。
     #[serde(default)]
     pub scopes: Vec<String>,
@@ -42,6 +46,10 @@ pub struct Manifest {
 
 fn default_version() -> String {
     "0.0.0".to_string()
+}
+
+fn default_category() -> String {
+    "core".to_string()
 }
 
 impl Manifest {

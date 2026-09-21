@@ -885,6 +885,8 @@ async fn plugin_script_ref_outside_plugins_dir_is_rejected() {
         config: Value::Null,
         scopes: vec!["global".to_string()],
         capabilities: vec!["core".to_string()],
+        category: "core".to_string(),
+        config_schema: serde_json::Value::Null,
     })
     .unwrap();
 
@@ -1424,123 +1426,99 @@ async fn failed_config_write_does_not_change_runtime_or_persisted_state() {
     }
 }
 
-// ───────────────────────── 余额&健康看板 ─────────────────────────
+// ───────────────────────── 配额查询 ─────────────────────────
 
 /// 不联网的查询脚本：直接返回固定 table（含中文与 snake_case quotas）。
-const BALANCE_SCRIPT: &str = r#"
-MB = {}
+const QUOTA_SCRIPT: &str = r#"
+MB = { category = "quota" }
 function MB.query(ctx)
   return {
     status = "ok",
-    quotas = { { label = "每周窗口", used_percent = 43, reset_at = "t" } },
+    quotas = { { type = "percentage", label = "每周窗口", used_percent = 43, reset_at = "t" } },
     summary = "余额正常",
   }
 end
 "#;
 
-fn balance_card(key: &str, interval_secs: i64) -> Value {
+/// 注册一个内联 quota 插件并返回其名字。
+async fn put_quota_plugin(h: &Harness, name: &str) {
+    let (status, body) = h
+        .json(
+            Method::PUT,
+            "/api/plugins",
+            json!({
+                "name": name,
+                "source": "lua",
+                "scriptRef": QUOTA_SCRIPT,
+                "enabled": true,
+                "config": null,
+                "scopes": [],
+                "capabilities": [],
+                "category": "quota",
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+fn quota_provider(key: &str, plugin: &str, interval_secs: i64) -> Value {
     json!({
         "key": key,
-        "apiKey": "sk-test",
-        "baseUrl": "https://api.example.test",
-        "providerLabel": "示例服务商",
-        "scriptRef": BALANCE_SCRIPT,
-        "intervalSecs": interval_secs,
-        "enabled": true,
-        "extra": {"widget": "quota"},
-        "position": 0,
+        "endpoints": [{"protocol": "openai-chat", "baseUrl": "https://api.example.test", "apiKey": "sk-test"}],
+        "quotaPluginRef": plugin,
+        "quotaIntervalSecs": interval_secs,
+        "quotaEnabled": true,
+        "quotaConfig": {"widget": "demo"},
     })
 }
 
 #[tokio::test]
-async fn balance_cards_crud_roundtrip() {
-    let h = Harness::new("balance-crud");
+async fn quota_views_and_refresh_roundtrip() {
+    let h = Harness::new("quota-roundtrip");
+    put_quota_plugin(&h, "quota-demo").await;
 
-    let (status, body) = h.get("/api/balance/cards").await;
+    let (status, body) = h.get("/api/quota").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!([]), "初始为空数组: {body}");
 
-    // 保存（intervalSecs=5 应被夹到 60）
+    // 保存 Provider（quotaIntervalSecs=5 应被夹到 60）
     let (status, body) = h
-        .json(Method::PUT, "/api/balance/cards", balance_card("main", 5))
+        .json(
+            Method::PUT,
+            "/api/providers",
+            quota_provider("main", "quota-demo", 5),
+        )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
-    let (status, body) = h.get("/api/balance/cards").await;
+    let (status, body) = h.get("/api/quota").await;
     assert_eq!(status, StatusCode::OK);
-    let cards = body.as_array().expect("列表应为数组").clone();
-    assert_eq!(cards.len(), 1, "{body}");
-    assert_eq!(cards[0]["key"], json!("main"));
-    assert_eq!(cards[0]["apiKey"], json!("sk-test"));
-    assert_eq!(cards[0]["providerLabel"], json!("示例服务商"));
-    assert_eq!(cards[0]["intervalSecs"], json!(60), "保存时 1..=59 夹到 60");
-    assert_eq!(cards[0]["extra"]["widget"], json!("quota"));
+    let views = body.as_array().expect("列表应为数组").clone();
+    assert_eq!(views.len(), 1, "{body}");
+    assert_eq!(views[0]["providerKey"], json!("main"));
+    assert_eq!(views[0]["quotaPluginRef"], json!("quota-demo"));
+    assert_eq!(views[0]["quotaIntervalSecs"], json!(60), "保存时 1..=59 夹到 60");
     assert_eq!(
-        cards[0]["results"],
+        views[0]["results"],
         json!([]),
         "从未查询时 results 为空数组"
     );
 
-    // 冲突更新不新增行
-    let (status, _) = h
-        .json(
-            Method::PUT,
-            "/api/balance/cards",
-            balance_card("main", 3600),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK);
-    let (_, body) = h.get("/api/balance/cards").await;
-    let cards = body.as_array().unwrap();
-    assert_eq!(cards.len(), 1, "upsert 不得新增行: {body}");
-    assert_eq!(cards[0]["intervalSecs"], json!(3600));
-
-    // 删除后列表为空
-    let (status, _) = h.delete("/api/balance/cards/main").await;
-    assert_eq!(status, StatusCode::OK);
-    let (status, body) = h.get("/api/balance/cards").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, json!([]), "删除后列表应回到空: {body}");
-}
-
-#[tokio::test]
-async fn balance_endpoints_require_auth() {
-    let h = Harness::new("balance-auth");
-
-    for (method, uri) in [
-        (Method::GET, "/api/balance/cards"),
-        (Method::PUT, "/api/balance/cards"),
-        (Method::DELETE, "/api/balance/cards/main"),
-        (Method::POST, "/api/balance/cards/main/refresh"),
-        (Method::POST, "/api/balance/refresh"),
-    ] {
-        let (status, raw) = h.raw(method.clone(), uri, None, None, Vec::new()).await;
-        assert_error(status, &parse_json(&raw), StatusCode::UNAUTHORIZED);
-    }
-}
-
-#[tokio::test]
-async fn balance_refresh_runs_inline_script() {
-    let h = Harness::new("balance-refresh");
-
-    let (status, _) = h
-        .json(Method::PUT, "/api/balance/cards", balance_card("main", 0))
-        .await;
-    assert_eq!(status, StatusCode::OK);
-
+    // 手动刷新：执行脚本并落库
     let (status, body) = h
-        .json(Method::POST, "/api/balance/cards/main/refresh", Value::Null)
+        .json(Method::POST, "/api/quota/main/refresh", Value::Null)
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["key"], json!("main"));
+    assert_eq!(body["providerKey"], json!("main"));
     let results = body["results"].as_array().expect("results 应为数组");
-    assert_eq!(results.len(), 1, "手填单 key 卡片拆一行: {body}");
+    assert_eq!(results.len(), 1, "单端点拆一行: {body}");
     let result = &results[0];
     assert_eq!(result["keyIndex"], json!(0));
     assert_eq!(result["keyLabel"], json!("sk…"), "label 是掩码而非原文");
     assert_eq!(result["status"], json!("ok"));
     assert_eq!(result["error"], Value::Null);
     let quota = &result["payload"]["quotas"][0];
+    assert_eq!(quota["type"], json!("percentage"));
     assert_eq!(quota["label"], json!("每周窗口"));
     assert_eq!(
         quota["usedPercent"],
@@ -1551,120 +1529,94 @@ async fn balance_refresh_runs_inline_script() {
     assert_eq!(quota["resetAt"], json!("t"));
     assert_eq!(result["payload"]["summary"], json!("余额正常"));
 
-    // 单 key 刷新（query key_index=0）：同样返回整卡视图
-    let (status, body) = h
-        .json(
-            Method::POST,
-            "/api/balance/cards/main/refresh?key_index=0",
-            Value::Null,
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["results"][0]["status"], json!("ok"));
-
-    let (status, body) = h.get("/api/balance/cards").await;
+    let (status, body) = h.get("/api/quota").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body[0]["results"][0]["payload"]["summary"],
         json!("余额正常"),
         "刷新结果应落库"
     );
+
+    // 删除 Provider 后视图消失（结果行级联删除）
+    let (status, _) = h.delete("/api/providers/main").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = h.get("/api/quota").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!([]), "删除后列表应回到空: {body}");
 }
 
 #[tokio::test]
-async fn balance_manual_keys_override_provider_via_api() {
-    let h = Harness::new("balance-manual-keys");
-    let (status, _) = h.json(Method::PUT, "/api/providers", json!({
-        "key": "upstream",
-        "endpoints": [{"protocol": "openai-chat", "baseUrl": "https://unused.test", "apiKey": "provider-key"}]
-    })).await;
-    assert_eq!(status, StatusCode::OK);
-    let mut card = balance_card("manual", 0);
-    card["providerKey"] = json!("upstream");
-    card["apiKey"] = json!(" manual-a\r\nmanual-b\nmanual-a\n");
-    card["scriptRef"] = json!(
-        r#"
-    MB = {}
-    function MB.query(ctx)
-      assert(#ctx.keys == 1 and ctx.keys[1] == ctx.key)
-      return { status = "ok", summary = ctx.key }
-    end
-    "#
-    );
-    let (status, preview) = h
-        .json(Method::POST, "/api/balance/test", card.clone())
-        .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(preview.as_array().unwrap().len(), 2);
-    assert_eq!(preview[0]["payload"]["summary"], json!("manual-a"));
-    assert_eq!(preview[1]["payload"]["summary"], json!("manual-b"));
-    let (_, cards) = h.get("/api/balance/cards").await;
-    assert_eq!(cards, json!([]));
+async fn quota_endpoints_require_auth() {
+    let h = Harness::new("quota-auth");
 
-    let (status, _) = h
-        .json(Method::PUT, "/api/balance/cards", card.clone())
-        .await;
-    assert_eq!(status, StatusCode::OK);
-    let (_, cards) = h.get("/api/balance/cards").await;
-    assert_eq!(cards[0]["apiKey"], card["apiKey"]);
-    let (status, refreshed) = h
-        .json(
-            Method::POST,
-            "/api/balance/cards/manual/refresh",
-            Value::Null,
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(refreshed["results"].as_array().unwrap().len(), 2);
-    for idx in 0..2 {
-        assert_eq!(refreshed["results"][idx]["status"], json!("ok"));
-        assert_eq!(
-            refreshed["results"][idx]["payload"],
-            preview[idx]["payload"]
-        );
+    for (method, uri) in [
+        (Method::GET, "/api/quota"),
+        (Method::POST, "/api/quota/refresh"),
+        (Method::POST, "/api/quota/main/refresh"),
+        (Method::POST, "/api/quota/test"),
+    ] {
+        let (status, raw) = h.raw(method.clone(), uri, None, None, Vec::new()).await;
+        assert_error(status, &parse_json(&raw), StatusCode::UNAUTHORIZED);
     }
-
-    card["providerKey"] = json!("missing");
-    let (status, preview) = h
-        .json(Method::POST, "/api/balance/test", card.clone())
-        .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(preview.as_array().unwrap().len(), 2);
-    assert_eq!(preview[0]["status"], json!("ok"));
-    assert_eq!(preview[1]["status"], json!("ok"));
-
-    card["providerKey"] = json!("upstream");
-    card["apiKey"] = json!(" \r\n ");
-    let (status, _) = h.json(Method::PUT, "/api/balance/cards", card).await;
-    assert_eq!(status, StatusCode::OK);
-    let (status, refreshed) = h
-        .json(
-            Method::POST,
-            "/api/balance/cards/manual/refresh",
-            Value::Null,
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(refreshed["results"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        refreshed["results"][0]["payload"]["summary"],
-        json!("provider-key")
-    );
 }
 
 #[tokio::test]
-async fn balance_refresh_unknown_key_is_404() {
-    let h = Harness::new("balance-404");
+async fn quota_test_dry_run_does_not_persist() {
+    let h = Harness::new("quota-test");
+    put_quota_plugin(&h, "quota-demo").await;
 
-    let (status, body) = h
+    // 多端点 Provider：逐端点各一行结果
+    let (status, preview) = h
         .json(
             Method::POST,
-            "/api/balance/cards/ghost/refresh",
-            Value::Null,
+            "/api/quota/test",
+            json!({
+                "key": "unsaved",
+                "endpoints": [
+                    {"protocol": "openai-chat", "baseUrl": "https://a.test", "apiKey": "sk-a"},
+                    {"protocol": "openai-chat", "baseUrl": "https://b.test", "apiKey": "sk-b"}
+                ],
+                "quotaPluginRef": "quota-demo",
+            }),
         )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    let results = preview.as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["payload"]["summary"], json!("余额正常"));
+    assert_eq!(results[1]["payload"]["summary"], json!("余额正常"));
+
+    // dry-run 不写库：Provider 未保存，视图列表仍为空
+    let (_, views) = h.get("/api/quota").await;
+    assert_eq!(views, json!([]));
+}
+
+#[tokio::test]
+async fn quota_refresh_unknown_or_unbound_provider() {
+    let h = Harness::new("quota-404");
+
+    // 不存在的 Provider：404
+    let (status, body) = h
+        .json(Method::POST, "/api/quota/ghost/refresh", Value::Null)
         .await;
     assert_error(status, &body, StatusCode::NOT_FOUND);
 
-    let (status, body) = h.delete("/api/balance/cards/ghost").await;
-    assert_error(status, &body, StatusCode::NOT_FOUND);
+    // 未绑定配额插件的 Provider：400，且不产生结果行
+    let (status, _) = h
+        .json(
+            Method::PUT,
+            "/api/providers",
+            json!({
+                "key": "bare",
+                "endpoints": [{"protocol": "openai-chat", "baseUrl": "https://x.test", "apiKey": "k"}],
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = h
+        .json(Method::POST, "/api/quota/bare/refresh", Value::Null)
+        .await;
+    assert_error(status, &body, StatusCode::BAD_REQUEST);
+    let (_, views) = h.get("/api/quota").await;
+    assert_eq!(views, json!([]), "未绑定 Provider 不出现在视图里");
 }

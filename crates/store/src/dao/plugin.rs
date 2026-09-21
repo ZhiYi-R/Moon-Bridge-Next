@@ -12,8 +12,21 @@ fn str_vec(s: Option<String>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// 归一化插件类别：未识别的值一律回落 `core`（请求链路插件）——
+/// 白名单收紧在注册表侧（只收 core），这里只保证落库值非空。
+pub fn normalize_plugin_category(category: &str) -> String {
+    match category {
+        "quota" => "quota".to_string(),
+        _ => "core".to_string(),
+    }
+}
+
+const PLUGIN_COLS: &str =
+    "name,source,script_ref,enabled,config_json,scopes_json,capabilities_json,category,config_schema_json";
+
 fn row_to_plugin(r: &rusqlite::Row) -> rusqlite::Result<PluginRecord> {
     let config: String = r.get(4)?;
+    let schema: String = r.get(8)?;
     Ok(PluginRecord {
         name: r.get(0)?,
         source: r.get(1)?,
@@ -22,6 +35,8 @@ fn row_to_plugin(r: &rusqlite::Row) -> rusqlite::Result<PluginRecord> {
         config: serde_json::from_str(&config).unwrap_or(Value::Null),
         scopes: str_vec(r.get(5)?),
         capabilities: str_vec(r.get(6)?),
+        category: r.get(7)?,
+        config_schema: serde_json::from_str(&schema).unwrap_or(Value::Null),
     })
 }
 
@@ -40,9 +55,8 @@ impl Database {
     /// 列出全部插件。
     pub fn list_plugins(&self) -> Result<Vec<PluginRecord>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT name,source,script_ref,enabled,config_json,scopes_json,capabilities_json FROM plugins ORDER BY name",
-        )?;
+        let mut stmt =
+            conn.prepare(&format!("SELECT {PLUGIN_COLS} FROM plugins ORDER BY name"))?;
         let rows = stmt.query_map([], row_to_plugin)?;
         let mut out = Vec::new();
         for r in rows {
@@ -54,9 +68,9 @@ impl Database {
     /// 按名获取插件。
     pub fn get_plugin(&self, name: &str) -> Result<Option<PluginRecord>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT name,source,script_ref,enabled,config_json,scopes_json,capabilities_json FROM plugins WHERE name = ?1",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {PLUGIN_COLS} FROM plugins WHERE name = ?1"
+        ))?;
         let mut rows = stmt.query_map(params![name], row_to_plugin)?;
         match rows.next() {
             Some(Ok(p)) => Ok(Some(p)),
@@ -75,13 +89,30 @@ impl Database {
         };
         let scopes = serde_json::to_string(&p.scopes)?;
         let caps = serde_json::to_string(&p.capabilities)?;
+        let schema = if p.config_schema.is_null() {
+            String::new()
+        } else {
+            p.config_schema.to_string()
+        };
         conn.execute(
-            "INSERT INTO plugins (name,source,script_ref,enabled,config_json,scopes_json,capabilities_json)
-             VALUES (?1,?2,?3,?4,?5,?6,?7)
+            "INSERT INTO plugins (name,source,script_ref,enabled,config_json,scopes_json,capabilities_json,category,config_schema_json)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
              ON CONFLICT(name) DO UPDATE SET
                 source=excluded.source, script_ref=excluded.script_ref, enabled=excluded.enabled,
-                config_json=excluded.config_json, scopes_json=excluded.scopes_json, capabilities_json=excluded.capabilities_json",
-            params![p.name, p.source, p.script_ref, p.enabled as i32, config, scopes, caps],
+                config_json=excluded.config_json, scopes_json=excluded.scopes_json,
+                capabilities_json=excluded.capabilities_json, category=excluded.category,
+                config_schema_json=excluded.config_schema_json",
+            params![
+                p.name,
+                p.source,
+                p.script_ref,
+                p.enabled as i32,
+                config,
+                scopes,
+                caps,
+                normalize_plugin_category(&p.category),
+                schema
+            ],
         )?;
         Ok(())
     }

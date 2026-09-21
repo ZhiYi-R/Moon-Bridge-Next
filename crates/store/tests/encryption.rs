@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use moonbridge_store::{
-    AesGcmKey, BalanceCard, Database, EncKey, Endpoint, PlaintextKey, Provider, StoreError,
+    AesGcmKey, Database, EncKey, Endpoint, PlaintextKey, Provider, StoreError,
 };
 use rusqlite::{params, Connection};
 use serde_json::json;
@@ -42,7 +42,10 @@ impl Drop for TestDir {
     }
 }
 
-fn seed(db: &Database) -> (Provider, Vec<BalanceCard>) {
+/// 配额配置的密钥类字段（断言其不以明文出现在数据库文件中）。
+const QUOTA_SECRET: &str = "sk-quota-mgmt-secret";
+
+fn seed(db: &Database) -> Provider {
     let provider = Provider {
         key: "provider".into(),
         endpoints: [
@@ -64,40 +67,18 @@ fn seed(db: &Database) -> (Provider, Vec<BalanceCard>) {
         web_search: None,
         extra: json!({}),
         enabled: true,
+        quota_plugin_ref: "quota/test".into(),
+        quota_interval_secs: 60,
+        quota_enabled: true,
+        quota_config: json!({"management_token": QUOTA_SECRET, "unit": "$"}),
         created_at: 0,
         updated_at: 0,
     };
     db.upsert_provider(&provider).unwrap();
-    let cards = [
-        "sk-balance-single-secret",
-        "",
-        "sk-balance-first-secret\n\n sk-balance-last-secret \nsk-balance-first-secret",
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(index, api_key)| BalanceCard {
-        key: format!("card-{index}"),
-        provider_key: Some(provider.key.clone()),
-        display_mode: "auto".into(),
-        api_key: api_key.into(),
-        base_url: "https://example.invalid/balance".into(),
-        provider_label: "Example".into(),
-        script_ref: String::new(),
-        interval_secs: 60,
-        enabled: true,
-        extra: json!({}),
-        position: index as i64,
-        created_at: 1,
-        updated_at: 0,
-    })
-    .collect::<Vec<_>>();
-    for card in &cards {
-        db.upsert_balance_card(card).unwrap();
-    }
-    (provider, cards)
+    provider
 }
 
-fn assert_roundtrip(db: &Database, provider: &Provider, cards: &[BalanceCard]) {
+fn assert_roundtrip(db: &Database, provider: &Provider) {
     assert_eq!(
         db.get_provider(&provider.key).unwrap().unwrap().endpoints,
         provider.endpoints
@@ -106,44 +87,37 @@ fn assert_roundtrip(db: &Database, provider: &Provider, cards: &[BalanceCard]) {
         db.list_endpoints(&provider.key).unwrap(),
         provider.endpoints
     );
+    let listed = db.list_providers().unwrap();
+    assert_eq!(listed[0].endpoints, provider.endpoints);
+    assert_eq!(listed[0].quota_config, provider.quota_config);
+    // 绑定且启用才到期；v12 降级场景配额字段被剥掉，不到期
     assert_eq!(
-        db.list_providers().unwrap()[0].endpoints,
-        provider.endpoints
+        db.list_quota_due(1_000_000)
+            .unwrap()
+            .iter()
+            .any(|p| p.key == provider.key),
+        provider.quota_enabled && provider.quota_interval_secs > 0
     );
-    let listed = db.list_balance_cards().unwrap();
-    let due = db.list_balance_cards_due(1_000).unwrap();
-    assert_eq!(listed.len(), cards.len());
-    assert_eq!(due.len(), cards.len());
-    for (index, card) in cards.iter().enumerate() {
-        assert_eq!(
-            db.get_balance_card(&card.key).unwrap().unwrap().api_key,
-            card.api_key
-        );
-        assert_eq!(listed[index].key, card.key);
-        assert_eq!(listed[index].api_key, card.api_key);
-        assert_eq!(due[index].key, card.key);
-        assert_eq!(due[index].api_key, card.api_key);
-    }
+}
+
+fn stored_endpoint_keys(conn: &Connection) -> Vec<String> {
+    conn.prepare("SELECT api_key_enc FROM provider_endpoints ORDER BY provider_key, idx")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
 }
 
 fn stored_keys(conn: &Connection) -> (Vec<String>, Vec<String>) {
-    fn query(conn: &Connection, sql: &str) -> Vec<String> {
-        conn.prepare(sql)
+    (
+        stored_endpoint_keys(conn),
+        conn.prepare("SELECT quota_config_enc FROM providers ORDER BY key")
             .unwrap()
             .query_map([], |row| row.get::<_, String>(0))
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap()
-    }
-    (
-        query(
-            conn,
-            "SELECT api_key_enc FROM provider_endpoints ORDER BY provider_key, idx",
-        ),
-        query(
-            conn,
-            "SELECT api_key FROM balance_cards ORDER BY position, key",
-        ),
+            .unwrap(),
     )
 }
 
@@ -156,18 +130,17 @@ fn state(conn: &Connection) -> (String, String) {
     .unwrap()
 }
 
-fn assert_encrypted(path: &Path, provider: &Provider, cards: &[BalanceCard]) {
+fn assert_encrypted(path: &Path, provider: &Provider) {
     let conn = Connection::open(path).unwrap();
-    let (endpoints, balances) = stored_keys(&conn);
+    let (endpoints, quota_encs) = stored_keys(&conn);
     assert_eq!(endpoints.len(), provider.endpoints.len());
-    assert_eq!(balances.len(), cards.len());
+    assert_eq!(quota_encs.len(), 1, "一个 provider 一行 quota_config_enc");
     for (stored, original) in endpoints.iter().zip(&provider.endpoints) {
         assert_ne!(stored, &original.api_key);
         assert!(stored.starts_with("mbk:v1:"));
     }
-    for (stored, original) in balances.iter().zip(cards) {
-        assert_ne!(stored, &original.api_key);
-        assert!(stored.starts_with("mbk:v1:"));
+    if !provider.quota_config.is_null() {
+        assert!(quota_encs[0].starts_with("mbk:v1:"), "配额配置应加密落库");
     }
     let (scheme, verifier) = state(&conn);
     assert_eq!(scheme, "aes256-gcm-v1");
@@ -189,7 +162,7 @@ fn assert_encrypted(path: &Path, provider: &Provider, cards: &[BalanceCard]) {
             .endpoints
             .iter()
             .map(|endpoint| endpoint.api_key.as_str())
-            .chain(cards.iter().flat_map(|card| card.api_key.lines()))
+            .chain([QUOTA_SECRET])
             .filter(|secret| !secret.is_empty())
         {
             assert!(
@@ -203,22 +176,52 @@ fn assert_encrypted(path: &Path, provider: &Provider, cards: &[BalanceCard]) {
     }
 }
 
+/// V12 库没有配额列：断言用的 Provider 剥掉配额字段（降级后数据真实丢失）。
+fn strip_quota(p: &Provider) -> Provider {
+    let mut p = p.clone();
+    p.quota_plugin_ref.clear();
+    p.quota_interval_secs = 0;
+    p.quota_enabled = false;
+    p.quota_config = serde_json::Value::Null;
+    p
+}
+
+/// 把当前数据库伪装成 V12：encryption_metadata 与 V14 新增列一并回滚。
+fn downgrade_to_v12(conn: &Connection) {
+    conn.execute_batch(
+        "DROP TABLE encryption_metadata;
+         ALTER TABLE providers DROP COLUMN quota_plugin_ref;
+         ALTER TABLE providers DROP COLUMN quota_interval_secs;
+         ALTER TABLE providers DROP COLUMN quota_enabled;
+         ALTER TABLE providers DROP COLUMN quota_config_enc;
+         ALTER TABLE plugins DROP COLUMN category;
+         ALTER TABLE plugins DROP COLUMN config_schema_json;
+         DROP TABLE quota_results;
+         DELETE FROM schema_version WHERE version >= 13;",
+    )
+    .unwrap();
+    assert_eq!(
+        moonbridge_store::schema::current_version(&conn).unwrap(),
+        12
+    );
+}
+
 #[test]
 fn default_disk_database_encrypts_both_key_kinds_and_reopens_in_order() {
     let dir = TestDir::new();
     let db = Database::open(dir.db()).unwrap();
-    let (provider, cards) = seed(&db);
-    assert_roundtrip(&db, &provider, &cards);
-    assert_encrypted(&dir.db(), &provider, &cards);
+    let provider = seed(&db);
+    assert_roundtrip(&db, &provider);
+    assert_encrypted(&dir.db(), &provider);
     let key = fs::read(dir.key()).unwrap();
     #[cfg(unix)]
     assert_eq!(key.len(), 32);
     #[cfg(windows)]
     assert!(key.len() > 32);
     drop(db);
-    assert_encrypted(&dir.db(), &provider, &cards);
+    assert_encrypted(&dir.db(), &provider);
     let reopened = Database::open(dir.db()).unwrap();
-    assert_roundtrip(&reopened, &provider, &cards);
+    assert_roundtrip(&reopened, &provider);
     assert_eq!(fs::read(dir.key()).unwrap(), key);
 }
 
@@ -227,7 +230,7 @@ fn explicit_key_file_is_used_without_creating_default_sidecar() {
     let dir = TestDir::new();
     let key_path = dir.0.join("master.key");
     let db = Database::open_with_key_file(&dir.db(), &key_path).unwrap();
-    let (provider, cards) = seed(&db);
+    let provider = seed(&db);
     let key = fs::read(&key_path).unwrap();
     #[cfg(unix)]
     assert_eq!(key.len(), 32);
@@ -236,8 +239,8 @@ fn explicit_key_file_is_used_without_creating_default_sidecar() {
     assert!(!dir.key().exists());
     drop(db);
     let reopened = Database::open_with_key_file(&dir.db(), &key_path).unwrap();
-    assert_roundtrip(&reopened, &provider, &cards);
-    assert_encrypted(&dir.db(), &provider, &cards);
+    assert_roundtrip(&reopened, &provider);
+    assert_encrypted(&dir.db(), &provider);
     assert_eq!(fs::read(&key_path).unwrap(), key);
     assert!(!dir.key().exists());
 }
@@ -246,33 +249,24 @@ fn explicit_key_file_is_used_without_creating_default_sidecar() {
 fn v12_plaintext_database_migrates_without_guessing_ciphertext_from_prefix() {
     let dir = TestDir::new();
     let db = Database::open_with_key(dir.db(), Box::new(PlaintextKey)).unwrap();
-    let (mut provider, mut cards) = seed(&db);
+    let mut provider = seed(&db);
     provider.endpoints[0].api_key = "mbk:v1:not-actually-encrypted".into();
-    cards[0].api_key = AesGcmKey::new(&[37; 32])
-        .encrypt("still-a-plaintext-key")
-        .unwrap();
+    provider.quota_config["management_token"] = json!("mbk:v1:not-actually-encrypted");
     db.upsert_provider(&provider).unwrap();
-    db.upsert_balance_card(&cards[0]).unwrap();
-    assert_roundtrip(&db, &provider, &cards);
+    assert_roundtrip(&db, &provider);
     drop(db);
     let conn = Connection::open(dir.db()).unwrap();
-    conn.execute_batch(
-        "DROP TABLE encryption_metadata; DELETE FROM schema_version WHERE version = 13;",
-    )
-    .unwrap();
-    assert_eq!(
-        moonbridge_store::schema::current_version(&conn).unwrap(),
-        12
-    );
+    downgrade_to_v12(&conn);
     drop(conn);
 
     let migrated = Database::open(dir.db()).unwrap();
-    assert_eq!(migrated.version().unwrap(), 13);
-    assert_roundtrip(&migrated, &provider, &cards);
-    assert_encrypted(&dir.db(), &provider, &cards);
+    assert_eq!(migrated.version().unwrap(), 14);
+    let provider = strip_quota(&provider);
+    assert_roundtrip(&migrated, &provider);
+    assert_encrypted(&dir.db(), &provider);
     drop(migrated);
     let reopened = Database::open(dir.db()).unwrap();
-    assert_roundtrip(&reopened, &provider, &cards);
+    assert_roundtrip(&reopened, &provider);
     assert!(Database::open_with_key(dir.db(), Box::new(PlaintextKey)).is_err());
 }
 
@@ -296,9 +290,9 @@ impl EncKey for CountingLegacyKey {
     }
 }
 
-fn seed_v12_custom_key(dir: &TestDir, old: &dyn EncKey) -> (Provider, Vec<BalanceCard>) {
+fn seed_v12_custom_key(dir: &TestDir, old: &dyn EncKey) -> Provider {
     let db = Database::open_with_key(dir.db(), Box::new(PlaintextKey)).unwrap();
-    let (provider, cards) = seed(&db);
+    let provider = seed(&db);
     drop(db);
     let conn = Connection::open(dir.db()).unwrap();
     for (index, endpoint) in provider.endpoints.iter().enumerate() {
@@ -312,27 +306,18 @@ fn seed_v12_custom_key(dir: &TestDir, old: &dyn EncKey) -> (Provider, Vec<Balanc
         )
         .unwrap();
     }
-    conn.execute_batch(
-        "DROP TABLE encryption_metadata; DELETE FROM schema_version WHERE version = 13;",
-    )
-    .unwrap();
-    assert_eq!(
-        moonbridge_store::schema::current_version(&conn).unwrap(),
-        12
-    );
-    let (endpoints, balances) = stored_keys(&conn);
+    let (endpoints, quota_encs) = stored_keys(&conn);
     for (stored, endpoint) in endpoints.iter().zip(&provider.endpoints) {
         assert_ne!(stored, &endpoint.api_key);
         assert!(stored.starts_with("mbk:v1:"));
     }
-    assert_eq!(
-        balances,
-        cards
-            .iter()
-            .map(|card| card.api_key.clone())
-            .collect::<Vec<_>>()
+    // 配额配置在 plaintext scheme 下是明文 JSON（与旧版 api_key 口径一致）
+    assert!(
+        quota_encs[0].contains(QUOTA_SECRET),
+        "plaintext scheme 下配额配置明文落库"
     );
-    (provider, cards)
+    downgrade_to_v12(&conn);
+    provider
 }
 
 #[test]
@@ -342,9 +327,9 @@ fn v12_custom_provider_source_is_required_and_only_used_once() {
         key: AesGcmKey::new(&[41; 32]),
         decrypt_calls: AtomicUsize::new(0),
     };
-    let (provider, cards) = seed_v12_custom_key(&dir, &old);
+    let provider = strip_quota(&seed_v12_custom_key(&dir, &old));
     let conn = Connection::open(dir.db()).unwrap();
-    let original = stored_keys(&conn);
+    let original = stored_endpoint_keys(&conn);
     drop(conn);
 
     let error = Database::open_with_key(dir.db(), Box::new(AesGcmKey::new(&[42; 32])))
@@ -352,7 +337,7 @@ fn v12_custom_provider_source_is_required_and_only_used_once() {
         .expect("legacy provider source must not be guessed");
     assert!(error.to_string().contains("来源不明确"), "{error}");
     let conn = Connection::open(dir.db()).unwrap();
-    assert_eq!(stored_keys(&conn), original);
+    assert_eq!(stored_endpoint_keys(&conn), original);
     assert_eq!(state(&conn), ("plaintext".into(), String::new()));
     drop(conn);
     assert_eq!(old.decrypt_calls.load(Ordering::Relaxed), 0);
@@ -360,34 +345,33 @@ fn v12_custom_provider_source_is_required_and_only_used_once() {
     let migrated =
         Database::open_with_legacy_key(dir.db(), Box::new(AesGcmKey::new(&[42; 32])), &old)
             .unwrap();
-    assert_eq!(migrated.version().unwrap(), 13);
-    assert_roundtrip(&migrated, &provider, &cards);
+    assert_eq!(migrated.version().unwrap(), 14);
+    assert_roundtrip(&migrated, &provider);
     assert_eq!(
         old.decrypt_calls.load(Ordering::Relaxed),
         provider.endpoints.len()
     );
     drop(migrated);
-    assert_encrypted(&dir.db(), &provider, &cards);
+    assert_encrypted(&dir.db(), &provider);
     let conn = Connection::open(dir.db()).unwrap();
-    let migrated_keys = stored_keys(&conn);
+    let migrated_keys = stored_endpoint_keys(&conn);
     let migrated_state = state(&conn);
-    assert_ne!(migrated_keys.0, original.0);
-    assert_ne!(migrated_keys.1, original.1);
+    assert_ne!(migrated_keys, original);
     drop(conn);
 
     let reopened =
         Database::open_with_legacy_key(dir.db(), Box::new(AesGcmKey::new(&[42; 32])), &old)
             .unwrap();
-    assert_roundtrip(&reopened, &provider, &cards);
+    assert_roundtrip(&reopened, &provider);
     assert_eq!(
         old.decrypt_calls.load(Ordering::Relaxed),
         provider.endpoints.len()
     );
     drop(reopened);
     let reopened = Database::open_with_key(dir.db(), Box::new(AesGcmKey::new(&[42; 32]))).unwrap();
-    assert_roundtrip(&reopened, &provider, &cards);
+    assert_roundtrip(&reopened, &provider);
     let conn = Connection::open(dir.db()).unwrap();
-    assert_eq!(stored_keys(&conn), migrated_keys);
+    assert_eq!(stored_endpoint_keys(&conn), migrated_keys);
     assert_eq!(state(&conn), migrated_state);
 }
 
@@ -395,9 +379,9 @@ fn v12_custom_provider_source_is_required_and_only_used_once() {
 fn v12_wrong_custom_provider_source_rolls_back_keys_and_encryption_metadata() {
     let dir = TestDir::new();
     let old = AesGcmKey::new(&[51; 32]);
-    let (provider, cards) = seed_v12_custom_key(&dir, &old);
+    let provider = strip_quota(&seed_v12_custom_key(&dir, &old));
     let conn = Connection::open(dir.db()).unwrap();
-    let original = stored_keys(&conn);
+    let original = stored_endpoint_keys(&conn);
     drop(conn);
 
     let error = Database::open_with_legacy_key(
@@ -409,23 +393,23 @@ fn v12_wrong_custom_provider_source_rolls_back_keys_and_encryption_metadata() {
     .expect("wrong legacy source must fail authentication");
     assert!(matches!(error, StoreError::Encryption(_)), "{error}");
     let conn = Connection::open(dir.db()).unwrap();
-    assert_eq!(stored_keys(&conn), original);
+    assert_eq!(stored_endpoint_keys(&conn), original);
     assert_eq!(state(&conn), ("plaintext".into(), String::new()));
     drop(conn);
 
     let migrated =
         Database::open_with_legacy_key(dir.db(), Box::new(AesGcmKey::new(&[52; 32])), &old)
             .unwrap();
-    assert_roundtrip(&migrated, &provider, &cards);
+    assert_roundtrip(&migrated, &provider);
     drop(migrated);
-    assert_encrypted(&dir.db(), &provider, &cards);
+    assert_encrypted(&dir.db(), &provider);
 }
 
 #[test]
 fn encrypted_database_rejects_missing_wrong_and_malformed_keys_without_replacement() {
     let dir = TestDir::new();
     let db = Database::open(dir.db()).unwrap();
-    let (provider, cards) = seed(&db);
+    let provider = seed(&db);
     drop(db);
     let key = fs::read(dir.key()).unwrap();
     let conn = Connection::open(dir.db()).unwrap();
@@ -443,7 +427,7 @@ fn encrypted_database_rejects_missing_wrong_and_malformed_keys_without_replaceme
     }
     fs::write(dir.key(), &key).unwrap();
     let reopened = Database::open(dir.db()).unwrap();
-    assert_roundtrip(&reopened, &provider, &cards);
+    assert_roundtrip(&reopened, &provider);
     drop(reopened);
     fs::remove_file(dir.key()).unwrap();
     assert!(Database::open(dir.db()).is_err());
@@ -460,8 +444,8 @@ fn altered_ciphertext_or_verifier_is_rejected_on_open() {
             "UPDATE provider_endpoints SET api_key_enc = ?1 WHERE idx = 0",
         ),
         (
-            "SELECT api_key FROM balance_cards WHERE key = 'card-0'",
-            "UPDATE balance_cards SET api_key = ?1 WHERE key = 'card-0'",
+            "SELECT quota_config_enc FROM providers WHERE key = 'provider'",
+            "UPDATE providers SET quota_config_enc = ?1 WHERE key = 'provider'",
         ),
         (
             "SELECT verifier FROM encryption_metadata WHERE id = 1",
@@ -557,10 +541,11 @@ impl EncKey for FailingKey {
 
 #[test]
 fn migration_failure_rolls_back_all_keys_and_metadata() {
-    for fail_after in [1, 5, 7] {
+    // 加密调用顺序：4 个端点 + 1 条配额配置 + verifier——0/3/5 覆盖首/中/尾。
+    for fail_after in [0, 3, 5] {
         let dir = TestDir::new();
         let db = Database::open_with_key(dir.db(), Box::new(PlaintextKey)).unwrap();
-        let (provider, cards) = seed(&db);
+        let provider = seed(&db);
         drop(db);
         let conn = Connection::open(dir.db()).unwrap();
         let original_keys = stored_keys(&conn);
@@ -586,6 +571,6 @@ fn migration_failure_rolls_back_all_keys_and_metadata() {
         assert_eq!(state(&conn), original_state);
         drop(conn);
         let reopened = Database::open_with_key(dir.db(), Box::new(PlaintextKey)).unwrap();
-        assert_roundtrip(&reopened, &provider, &cards);
+        assert_roundtrip(&reopened, &provider);
     }
 }

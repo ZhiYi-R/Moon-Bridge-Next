@@ -31,8 +31,9 @@
 ---@class MbManifest
 ---@field name string 唯一插件名
 ---@field version string|nil 版本
----@field scopes string[]|nil 作用域："global"|"provider"|"model"|"route"
----@field capabilities string[] 能力："core"|"raw_request"|"raw_response"|"raw_stream"
+---@field category string|nil 类别："core"（缺省，请求链路插件）|"quota"（配额查询插件：由配额引擎驱动，不进钩子注册表）
+---@field scopes string[]|nil 作用域："global"|"provider"|"model"|"route"（仅 core 类生效）
+---@field capabilities string[] 能力："core"|"raw_request"|"raw_response"|"raw_stream"（仅 core 类生效）
 ---@field requires table|nil 启用门控：`{ <网关配置键> = <期望值>, ... }`（bool/int/float/字符串）。
 ---仅 app 层校验——启用动作（新建即启用 / 停用→启用）时不满足则拒绝并弹提示；网关侧不感知。
 ---@field config_schema table|nil 配置 JSON Schema（供 UI 渲染表单）
@@ -54,38 +55,40 @@
 ---流式 chunk 钩子（需声明 "raw_stream"；高频，未声明则完全跳过）。
 ---@field on_upstream_chunk_raw (fun(ctx: MbCtx, chunk: MbRawChunk): MbChunkVerdict|nil)|nil
 ---@field on_client_chunk_raw (fun(ctx: MbCtx, chunk: MbRawChunk): MbChunkVerdict|nil)|nil
----余额&健康看板：**独立于插件**的一次性脚本入口——由「余额看板」卡片引用并调用，
----不进插件注册表、不参与上面的能力门控与钩子链路（见 crates/gateway/src/balance.rs）。
----@field query (fun(ctx: MbBalanceQueryCtx): MbBalanceReturn)|nil 查询一次余额/配额
+---配额查询（category = "quota" 插件）：由 Provider 绑定并调用 `MB.query`，
+---不进钩子注册表、不参与上面的能力门控与钩子链路（见 crates/gateway/src/quota.rs）。
+---@field query (fun(ctx: MbQuotaQueryCtx): MbQuotaReturn)|nil 查询一次配额（仅 quota 类插件）
 
 --------------------------------------------------------------------------------
--- 余额&健康看板（MB.query）
+-- 配额查询（MB.query，quota 类插件）
 --------------------------------------------------------------------------------
 
----@class MbBalanceQuota
+---@class MbQuotaEntry
+---@field type string 必填判别："percentage" 百分比额度 | "quota" 金额额度 | "counter" 计数器（前端不渲染）
 ---@field label string 配额展示名（如「5 小时窗口」）
----@field used_percent number|nil 已用百分比；与 left_percent 互补，只给一个即可
----@field left_percent number|nil 剩余百分比
----@field unit string|nil 金额/数量单位（如 "¥"、"GB"），金额模式使用
----@field used_amount number|nil 已用金额/数量（金额模式；amount 与 percent 互不推导）
----@field left_amount number|nil 剩余金额/数量（金额模式）
+---@field period_secs integer|nil 窗口秒数（如 5*3600），驱动前端本地消耗统计
+---@field used_percent number|nil 已用百分比（percentage；与 left_percent 互补，只给一个即可）
+---@field left_percent number|nil 剩余百分比（percentage）
+---@field unit string|nil 金额/数量单位（如 "¥"、"GB"），quota/counter 使用
+---@field used_amount number|nil 已用金额/数量（quota/counter；amount 与 percent 互不推导）
+---@field left_amount number|nil 剩余金额/数量（quota）
 ---@field reset_at string|integer|nil 重置时间：字符串原样展示；或给 unix 秒数字（引擎归一为字符串，前端按本地时间格式化——沙箱无 os 库，毫秒时间戳请除 1000 取整后给出）
 
----@class MbBalanceReturn
+---@class MbQuotaReturn
 ---返回 table，经宿主序列化为 JSON 落库。
 ---@field status string|nil "ok"|"error"（缺省 = ok）
 ---@field message string|nil 失败原因（status = "error" 时展示给用户）
----@field quotas MbBalanceQuota[]|nil 配额列表
+---@field quotas MbQuotaEntry[]|nil 配额列表（缺 type 或缺该类型必填字段的项被剔除并记入 warnings）
 ---@field summary string|nil 一句话摘要
 ---额外字段原样保留在结果 payload 中。
 
----@class MbBalanceQueryCtx
----@field name string 卡片 key
+---@class MbQuotaQueryCtx
+---@field provider string Provider key（绑定该插件的上游服务）
+---@field name string Provider key（同 provider，兼容别名）
 ---@field key string 本次查询的 API Key（与 keys[1] 相同）
----@field keys string[] 当前 key 的单元素数组——引擎对卡片解析出的每个 key 各调用一次 MB.query 并拆成多张卡片展示，脚本只需按单 key 编写（引用上游服务时 key 由其端点解析并去重；端点 key 留空回退前一个非空 key）
----@field base_url string 卡片上可选填写的查询 URL（配额接口基准地址；与 Provider 端点无关，可能为空字符串）
----@field provider string 服务商标识（Provider key）
----@field extra table 卡片自定义参数（编辑表单「额外参数 JSON」的解码值）
+---@field keys string[] 当前 key 的单元素数组——引擎对 Provider 的每个端点 key 各调用一次 MB.query 并拆行落库，脚本只需按单 key 编写
+---@field base_url string 该 key 所属端点的 base_url（配额接口基准地址；无端点 Provider 为空字符串）
+---@field extra table Provider 配额配置（编辑表单「配额配置 JSON」的解码值）
 
 ---@type MbManifest
 MB = {}

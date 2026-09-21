@@ -12,7 +12,7 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use moonbridge_gateway::{parse_script_ref, ScriptRef};
+use moonbridge_gateway::{parse_script_ref, PluginLuaRuntime, ScriptRef};
 use moonbridge_store::{PluginBinding, PluginRecord};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -62,19 +62,28 @@ pub async fn plugin_save(
     State(state): State<AdminState>,
     Json(plugin): Json<PluginRecord>,
 ) -> ApiResult<Json<Value>> {
+    // 脚本可读取时，以脚本 `MB` 清单为准提取 category/config_schema（清单是权威
+    // 元数据，表单值只是兜底）；沙箱求值失败（如脚本语法错误）则保留表单值。
+    let script = match script_file(&state, &plugin.script_ref)? {
+        Some(f) if f.is_file() => {
+            std::fs::read_to_string(&f).map_err(|e| ApiError::internal(e.to_string()))?
+        }
+        Some(_) => String::new(),          // 文件脚本尚未落盘
+        None => plugin.script_ref.clone(), // 内联脚本即内容
+    };
+    let mut plugin = plugin;
+    if !script.trim().is_empty() {
+        if let Ok(manifest) = PluginLuaRuntime::manifest_of_script(&plugin.name, &script) {
+            plugin.category = manifest.category;
+            plugin.config_schema = manifest.config_schema.unwrap_or(Value::Null);
+        }
+    }
     let old_enabled = state
         .db
         .get_plugin(&plugin.name)?
         .map(|p| p.enabled)
         .unwrap_or(false);
     if plugin.enabled && !old_enabled {
-        let script = match script_file(&state, &plugin.script_ref)? {
-            Some(f) if f.is_file() => {
-                std::fs::read_to_string(&f).map_err(|e| ApiError::internal(e.to_string()))?
-            }
-            Some(_) => String::new(),          // 文件脚本尚未落盘
-            None => plugin.script_ref.clone(), // 内联脚本即内容
-        };
         let cfg = serde_json::to_value(state.config().gateway)
             .map_err(|e| ApiError::internal(e.to_string()))?;
         let unmet = unmet_requirements(&cfg, &extract_lua_requires(&script));
@@ -180,6 +189,17 @@ fn extract_lua_string_list(script: &str, key: &str) -> Vec<String> {
         .filter(|(i, _)| i % 2 == 1)
         .map(|(_, s)| s.to_string())
         .collect()
+}
+
+/// 从 Lua 脚本中尽力提取 `key = "value"` 形式的标量字符串（导入时读取 `category`
+/// 声明）；找不到回退 `None`。与 [`extract_lua_string_list`] 同一取舍：忽略转义与注释。
+fn extract_lua_string(script: &str, key: &str) -> Option<String> {
+    let pos = script.find(key)?;
+    let rest = &script[pos + key.len()..];
+    let eq = rest.find('=')?;
+    let open = rest[eq..].find('"')?;
+    let close = rest[eq + open + 1..].find('"')?;
+    Some(rest[eq + open + 1..eq + open + 1 + close].to_string())
 }
 
 /// 单个文件的导入结果。
@@ -359,6 +379,16 @@ fn import_one(state: &AdminState, file: &PluginImportFile) -> PluginImportOutcom
     if capabilities.is_empty() {
         capabilities = vec!["core".to_string()];
     }
+    // 沙箱求值 `MB` 清单拿 category/config_schema；求值失败回退文本提取的 category。
+    let manifest = PluginLuaRuntime::manifest_of_script(&name, &content).ok();
+    let category = manifest
+        .as_ref()
+        .map(|m| m.category.clone())
+        .or_else(|| extract_lua_string(&content, "category"))
+        .unwrap_or_else(|| "core".to_string());
+    let config_schema = manifest
+        .and_then(|m| m.config_schema)
+        .unwrap_or(Value::Null);
     // 导入即启用，但 `MB.requires` 未满足时保持停用（在结果 message 说明，不阻断导入）；
     // 配置序列化失败时视为不校验（保持启用，不阻断导入）
     let cfg = serde_json::to_value(state.config().gateway).unwrap_or(Value::Null);
@@ -375,6 +405,8 @@ fn import_one(state: &AdminState, file: &PluginImportFile) -> PluginImportOutcom
         config: serde_json::Value::Null,
         scopes,
         capabilities,
+        category,
+        config_schema,
     };
     if let Err(e) = state.db.upsert_plugin(&rec) {
         return import_fail(&path_string, &name, "error", format!("落库失败: {e}"));

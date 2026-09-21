@@ -274,6 +274,40 @@ const MIGRATIONS: &[Migration] = &[
         );
         INSERT INTO encryption_metadata (id, scheme, verifier) VALUES (1, 'plaintext', '');",
     },
+    // V14：配额查询插件化。plugins 增加 `category`（core=请求链路插件，quota=配额查询
+    // 插件——只有 core 进入请求钩子注册表）；配额绑定收敛到 Provider 自身字段
+    // （plugin_ref/interval/enabled/config——key 的唯一来源是 provider 端点，卡片层
+    // 整体废弃）。`quota_config_enc` 为 AES 加密列（同 api_key_enc），承载插件
+    // config_schema 声明的实例配置（含密钥类字段），明文不落库。
+    //
+    // `quota_results` 按 `(provider_key, key_index)` 存最近一次结果（key_index 即
+    // provider_endpoints.idx）。旧 `balance_cards`/`balance_results` 数据废弃。
+    Migration {
+        version: 14,
+        sql: r#"
+ALTER TABLE plugins ADD COLUMN category TEXT NOT NULL DEFAULT 'core';
+ALTER TABLE plugins ADD COLUMN config_schema_json TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE providers ADD COLUMN quota_plugin_ref TEXT NOT NULL DEFAULT '';
+ALTER TABLE providers ADD COLUMN quota_interval_secs INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE providers ADD COLUMN quota_enabled INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE providers ADD COLUMN quota_config_enc TEXT NOT NULL DEFAULT '';
+
+DROP TABLE IF EXISTS balance_cards;
+DROP TABLE IF EXISTS balance_results;
+
+CREATE TABLE IF NOT EXISTS quota_results (
+    provider_key TEXT NOT NULL,
+    key_index    INTEGER NOT NULL,
+    key_label    TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL,
+    payload_json TEXT,
+    error        TEXT,
+    queried_at   INTEGER NOT NULL,
+    PRIMARY KEY (provider_key, key_index)
+);
+"#,
+    },
 ];
 
 /// 对连接执行 migration（幂等）。

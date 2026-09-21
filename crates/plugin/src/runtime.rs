@@ -16,7 +16,7 @@ use tokio::sync::Mutex;
 use moonbridge_core::{ContentBlock, CoreRequest, CoreResponse, CoreStreamEvent, Tool};
 use moonbridge_protocol::{ChunkVerdict, RawChunk, RawMessage, RawVerdict, ReqCtx};
 
-use crate::bridge::HostBridge;
+use crate::bridge::{HostBridge, HttpRequest, HttpResponse};
 use crate::convert;
 use crate::error::{PluginError, Result};
 use crate::host;
@@ -107,6 +107,35 @@ impl LuaRuntime {
         })
     }
 
+    /// 从脚本解析 [`Manifest`]（`MB` 表）：脚本在带指令/超时配额的沙箱里执行一次
+    /// 顶层代码后读取 `MB`，宿主能力用一个全拒桥占位——脚本若在顶层调 `mb.*` 会失败，
+    /// 这类脚本按约定也不应这么写。供保存/导入路径提取 `category`/`config_schema`
+    /// 等嵌套元数据，不进注册表、不跑任何钩子。
+    pub fn manifest_of_script(name: &str, script: &str) -> Result<Manifest> {
+        struct NullBridge;
+        #[async_trait::async_trait]
+        impl HostBridge for NullBridge {
+            async fn http_request(
+                &self,
+                _req: HttpRequest,
+            ) -> std::result::Result<HttpResponse, String> {
+                Err("manifest 读取不提供宿主能力".to_string())
+            }
+            async fn provider_invoke(
+                &self,
+                _provider: &str,
+                _model: &str,
+                _req: CoreRequest,
+            ) -> std::result::Result<CoreResponse, String> {
+                Err("manifest 读取不提供宿主能力".to_string())
+            }
+        }
+        Ok(
+            Self::new(name, script, &serde_json::Value::Null, Arc::new(NullBridge), SessionStore::new())?
+                .manifest,
+        )
+    }
+
     /// 加锁 + 写入会话 + 重置本次调用的执行预算。
     async fn enter(&self, ctx: &ReqCtx) -> Result<tokio::sync::MutexGuard<'_, Lua>> {
         let lua = self.lua.lock().await;
@@ -144,6 +173,7 @@ impl LuaRuntime {
         let fallback = Manifest {
             name: name.to_string(),
             version: "0.0.0".to_string(),
+            category: "core".to_string(),
             scopes: Vec::new(),
             capabilities: Default::default(),
             config_schema: None,
@@ -153,6 +183,7 @@ impl LuaRuntime {
             return Ok(fallback);
         };
         let version: Option<String> = mb.get("version").ok().flatten();
+        let category: Option<String> = mb.get("category").ok().flatten();
         let scopes: Vec<String> = mb.get("scopes").unwrap_or_default();
         let caps: Vec<String> = mb.get("capabilities").unwrap_or_default();
         let entry: Option<String> = mb.get("entry").ok().flatten();
@@ -163,6 +194,7 @@ impl LuaRuntime {
         Ok(Manifest {
             name: name.to_string(),
             version: version.unwrap_or_else(|| "0.0.0".to_string()),
+            category: category.unwrap_or_else(|| "core".to_string()),
             scopes,
             capabilities: caps.into_iter().collect(),
             config_schema,

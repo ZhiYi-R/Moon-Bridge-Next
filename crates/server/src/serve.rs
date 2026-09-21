@@ -35,6 +35,9 @@ pub async fn run(opts: ServerOpts) -> Result<()> {
         None => moonbridge_store::Database::open(&paths.db_path),
     }
     .with_context(|| format!("打开数据库失败: {}", paths.db_path.display()))?;
+    if let Err(e) = moonbridge_gateway::seed_builtin_quota_plugins(&db) {
+        tracing::warn!(error = %e, "内置配额插件播种失败");
+    }
     let db = Arc::new(db);
     let lifecycle = Arc::new(Lifecycle::default());
     let admin_state = AdminState {
@@ -81,23 +84,23 @@ async fn serve_generations(web_dir: &Path, admin_state: AdminState) -> Result<()
         }
         merged = merged.layer(middleware::from_fn(security_headers));
         gateway_state.hooks.init_all().await;
-        let balance_policy = moonbridge_gateway::BalanceNetworkPolicy::from_environment(
+        let quota_policy = moonbridge_gateway::QuotaNetworkPolicy::from_environment(
             gateway_state.config.egress_proxy.clone(),
         );
-        if let Some(reason) = balance_policy.denied_reason() {
+        if let Some(reason) = quota_policy.denied_reason() {
             tracing::warn!(
                 reason,
-                "余额看板已整体禁用：每次查询都会失败。请检查 gateway.egress_proxy 与 MOONBRIDGE_BALANCE_PRIVATE_ORIGINS 配置"
+                "配额查询已整体禁用：每次查询都会失败。请检查 gateway.egress_proxy 与 MOONBRIDGE_QUOTA_PRIVATE_ORIGINS 配置"
             );
         }
-        let balance_engine = moonbridge_gateway::BalanceEngine::new(
+        let quota_engine = moonbridge_gateway::QuotaEngine::new(
             admin_state.db.clone(),
             Some(admin_state.paths.plugins_dir.clone()),
         )
-        .with_network_policy(balance_policy);
-        let balance_scheduler = moonbridge_gateway::spawn_balance_scheduler(
+        .with_network_policy(quota_policy);
+        let quota_scheduler = moonbridge_gateway::spawn_quota_scheduler(
             admin_state.db.clone(),
-            balance_engine,
+            quota_engine,
             Some(admin_state.paths.plugins_dir.clone()),
         );
         lifecycle.listening(local_addr);
@@ -122,8 +125,8 @@ async fn serve_generations(web_dir: &Path, admin_state: AdminState) -> Result<()
             }
         };
         lifecycle.drained();
-        balance_scheduler.abort();
-        let _ = balance_scheduler.await;
+        quota_scheduler.abort();
+        let _ = quota_scheduler.await;
         gateway_state.hooks.shutdown_all().await;
         served.context("HTTP 服务错误")?;
         tracing::info!(addr = %local_addr, "Moon Bridge Next 服务端已停止");

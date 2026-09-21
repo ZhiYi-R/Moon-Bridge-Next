@@ -48,7 +48,7 @@ The desktop gateway can require an access token (`auth_token`) on its entry poin
 
 ### Desktop Application
 
-All management happens in the UI: Dashboard (gateway status, usage, provider overview), Providers (endpoints and keys), Models (catalog import and offers), Routes (aliases), Plugins (in-app script editing, enable/disable, effective after gateway restart), Usage (charts and details), Balance (balance and health dashboard), Traces (message browsing), and Settings (gateway parameters). The system tray provides window recall, one-click gateway start/stop, and quit.
+All management happens in the UI: Dashboard (gateway status, usage, provider overview), Providers (endpoints and keys), Models (catalog import and offers), Routes (aliases), Plugins (in-app script editing, enable/disable, effective after gateway restart), Usage (charts and details), Quota (per-key quota dashboard), Traces (message browsing), and Settings (gateway parameters). The system tray provides window recall, one-click gateway start/stop, and quit.
 
 ### Server Deployment (Web Mode)
 
@@ -57,20 +57,20 @@ For headless deployments, use `moonbridge-server`: one port serves the LLM gatew
 - Supply the admin token with `--admin-token` / `MOONBRIDGE_ADMIN_TOKEN`; it is used only by the management API and is never stored or echoed. Supply the gateway token with `--gateway-token` / `MOONBRIDGE_GATEWAY_TOKEN`, or use the existing configured token. It must be non-empty and different from the admin token.
 - When upgrading from a shared-token release, put the old value in `MOONBRIDGE_GATEWAY_TOKEN` and generate a different admin token; model clients keep their existing key, while the browser signs in with the new admin token. The web token is held only in page memory, so refresh requires signing in again; the UI is protected by CSP.
 - The management API returns `authToken: null`; saving `null` or an empty value preserves the existing gateway token, while an explicit update persists a new gateway token. Saving unrelated settings does not persist an environment override.
-- The multi-stage `Dockerfile` builds the frontend, compiles the server, and runs a slim image as uid 10001; `deploy/soul/` contains a Docker Compose example. “Restart gateway” gracefully drains requests in-process, runs lifecycle hooks, and rebinds without a supervisor; status reports the actual bound address. Each gateway generation has one balance scheduler, and restart cancels the previous generation's tasks.
+- The multi-stage `Dockerfile` builds the frontend, compiles the server, and runs a slim image as uid 10001; `deploy/soul/` contains a Docker Compose example. “Restart gateway” gracefully drains requests in-process, runs lifecycle hooks, and rebinds without a supervisor; status reports the actual bound address. Each gateway generation has one quota scheduler, and restart cancels the previous generation's tasks.
 - For public exposure, place a reverse proxy in front for TLS termination, and protect the two tokens separately.
 
 ### Credential Storage and Upgrade Backups
 
-The default file database encrypts provider and balance-query credentials uniformly with AES-GCM; V13 migrates legacy data and encryption metadata transactionally. The default key file is `<db>.key`; use `--key-file` / `MOONBRIDGE_KEY_FILE` to choose another path. Unix key files use mode `0600`; Windows wraps the key with current-user DPAPI, so recovery is bound to that account. Missing or incorrect keys fail closed rather than falling back to plaintext.
+The default file database encrypts provider credentials and quota-query configuration uniformly with AES-GCM; V13 migrates legacy data and encryption metadata transactionally. The default key file is `<db>.key`; use `--key-file` / `MOONBRIDGE_KEY_FILE` to choose another path. Unix key files use mode `0600`; Windows wraps the key with current-user DPAPI, so recovery is bound to that account. Missing or incorrect keys fail closed rather than falling back to plaintext.
 
 Back up the database and key file together. Before upgrading, keep a separate database backup: an old image cannot directly roll back against a database written by the new encrypted library; restore the pre-upgrade database and matching credential material to roll back. The frontend may still handle credentials while editing or querying; encryption protects the listed fields at rest, not the entire database, configuration, or traces.
 
-### Balance Query Security Boundaries
+### Quota Query Security Boundaries
 
-Balance-script HTTP requests may reach only the same origin or an explicitly authorized origin; private and cloud-metadata addresses are denied by default. To allow a private origin, set `MOONBRIDGE_BALANCE_PRIVATE_ORIGINS` at startup to a JSON array of exact origins, for example `["https://balance.internal.example:8443"]`; a card's `extra` field cannot grant access, and metadata endpoints remain forbidden. Requests do not use the system proxy, do not follow redirects, and pin the validated DNS address; decompressed responses are limited to 1 MiB, with a 30-second per-request timeout and a 45-second per-card timeout.
+Quota-script HTTP requests may reach only the same origin or an explicitly authorized origin; private and cloud-metadata addresses are denied by default. To allow a private origin, set `MOONBRIDGE_QUOTA_PRIVATE_ORIGINS` at startup to a JSON array of exact origins, for example `["https://quota.internal.example:8443"]`; quota configuration cannot grant access, and metadata endpoints remain forbidden. Requests do not use the system proxy, do not follow redirects, and pin the validated DNS address; decompressed responses are limited to 1 MiB, with a 30-second per-request timeout and a 45-second per-provider timeout.
 
-When `egressProxy` is explicitly configured, balance HTTP reports proxy use as unsupported instead of silently going direct; gateway inference requests still support the proxy. Script results of `nil` or an invalid `status` are errors. The new-api template computes dollar balance from current `data.quota / 500000`, not `used_quota`; the Kimi template tolerates a single available quota window.
+When `egressProxy` is explicitly configured, quota HTTP reports proxy use as unsupported instead of silently going direct; gateway inference requests still support the proxy. Script results of `nil` or an invalid `status` are errors. The new-api plugin computes balance from current `data.quota / quota_per_unit` (default 500000), not `used_quota`; the Kimi plugin tolerates a single available quota window.
 
 ## Usage
 

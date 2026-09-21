@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronDown, ChevronRight, Pencil, Plus, Search, Server, Trash2, X } from "lucide-vue-next";
+import { ChevronDown, ChevronRight, Pencil, Plus, RefreshCw, Search, Server, Trash2, X } from "lucide-vue-next";
 import {
   computed,
   onActivated,
@@ -27,12 +27,14 @@ import {
   errMsg,
   modelApi,
   pluginApi,
+  quotaApi,
   type ModelDef,
   type Offer,
   type PluginBinding,
   type PluginRecord,
   type Provider,
   type ProviderEndpoint,
+  type QuotaKeyResult,
 } from "@/lib/api";
 import { useGatewayStore } from "@/stores/gateway";
 import { useProviderStore } from "@/stores/provider";
@@ -51,6 +53,17 @@ const PROTOCOLS = ["anthropic", "openai-response", "openai-chat", "google-genai"
 const protocolOptions = PROTOCOLS.map((p) => ({ value: p, label: p }));
 
 const pluginList = ref<PluginRecord[]>([]);
+/** 只有 core 类插件参与请求链路的三态绑定；quota 插件由下方配额区单独绑定。 */
+const hookPlugins = computed(() =>
+  pluginList.value.filter((p) => (p.category ?? "core") === "core"),
+);
+/** quota 类插件下拉（Provider 配额绑定的候选）。 */
+const quotaPluginOptions = computed(() => [
+  { value: "", label: "不绑定" },
+  ...pluginList.value
+    .filter((p) => p.category === "quota")
+    .map((p) => ({ value: p.name, label: p.name })),
+]);
 /** 插件相对当前 provider 的三态：inherit=跟随全局 / on=启用 / off=禁用 */
 type TriState = "inherit" | "on" | "off";
 const pluginStates = reactive<Record<string, TriState>>({});
@@ -76,6 +89,10 @@ function emptyProvider(): Provider {
     webSearch: null,
     extra: {},
     enabled: true,
+    quotaPluginRef: "",
+    quotaIntervalSecs: 0,
+    quotaEnabled: false,
+    quotaConfig: {},
     createdAt: 0,
     updatedAt: 0,
   };
@@ -87,6 +104,94 @@ function endpointProtocols(p: Provider): string {
 }
 
 const form = reactive<Provider>(emptyProvider());
+
+// ── 配额配置：按所选插件的 configSchema 渲染字段；无 schema = 无需配置 ──
+const quotaTesting = ref(false);
+const quotaTestResult = ref<QuotaKeyResult[] | null>(null);
+
+interface QuotaSchemaField {
+  name: string;
+  type: string;
+  label: string;
+  help: string;
+  secret: boolean;
+  default: unknown;
+}
+
+const selectedQuotaPlugin = computed(() => pluginList.value.find((p) => p.name === form.quotaPluginRef));
+
+/** 所选配额插件的实例配置字段（config_schema 声明）；无 schema 返回空数组。 */
+const quotaSchemaFields = computed<QuotaSchemaField[]>(() => {
+  const s = selectedQuotaPlugin.value?.configSchema;
+  if (!s || typeof s !== "object" || Array.isArray(s)) return [];
+  return Object.entries(s as Record<string, Record<string, unknown>>).map(([name, f]) => ({
+    name,
+    type: typeof f.type === "string" ? f.type : "string",
+    label: typeof f.label === "string" ? f.label : name,
+    help: typeof f.help === "string" ? f.help : "",
+    secret: f.secret === true,
+    default: f.default,
+  }));
+});
+
+/** 校验并归一化 quotaConfig：number 字段转数字，剔除 schema 之外的键与空串。 */
+function normalizeQuotaConfig(): boolean {
+  const out: Record<string, unknown> = {};
+  const src = form.quotaConfig && typeof form.quotaConfig === "object" ? form.quotaConfig : {};
+  for (const f of quotaSchemaFields.value) {
+    let v = (src as Record<string, unknown>)[f.name];
+    if (v === undefined || v === null || v === "") continue;
+    if (f.type === "number") {
+      const n = Number(v);
+      if (!Number.isFinite(n)) {
+        error.value = `配额配置「${f.label}」需要是数字`;
+        return false;
+      }
+      v = n;
+    } else if (f.type === "boolean") {
+      v = v === true || v === "true";
+    } else {
+      v = String(v);
+    }
+    out[f.name] = v;
+  }
+  form.quotaConfig = out;
+  return true;
+}
+
+/** 换插件时把 quotaConfig 重置为该插件 schema 的默认值。 */
+function applyQuotaDefaults() {
+  const out: Record<string, unknown> = {};
+  for (const f of quotaSchemaFields.value) if (f.default !== undefined) out[f.name] = f.default;
+  form.quotaConfig = out;
+}
+
+// 表单装载期间 Object.assign 会改写 quotaPluginRef——此时绝不能重置 quotaConfig
+// （会覆盖 Provider 已存的配置）。sync flush + 标志位精确拦截装载期触发。
+let loadingForm = false;
+watch(
+  () => form.quotaPluginRef,
+  () => {
+    if (loadingForm) return;
+    applyQuotaDefaults();
+    quotaTestResult.value = null;
+  },
+  { flush: "sync" },
+);
+
+/** 用当前表单配置 dry-run 一次配额查询（不写库）。 */
+async function runQuotaTest() {
+  if (!normalizeQuotaConfig()) return;
+  quotaTesting.value = true;
+  quotaTestResult.value = null;
+  try {
+    quotaTestResult.value = await quotaApi.test({ ...form, endpoints: form.endpoints.map((e) => ({ ...e })) });
+  } catch (e) {
+    error.value = errMsg(e);
+  } finally {
+    quotaTesting.value = false;
+  }
+}
 
 function addEndpoint() {
   form.endpoints.push(emptyEndpoint());
@@ -240,11 +345,11 @@ async function loadPluginStates(providerKey: string) {
   }
 }
 
-/** 初始化三态表：全部默认「跟随全局」 */
+/** 初始化三态表：全部默认「跟随全局」（仅 core 类插件参与）。 */
 function resetPluginStates() {
   for (const name of Object.keys(pluginStates)) delete pluginStates[name];
   originalBindings.value = {};
-  for (const p of pluginList.value) pluginStates[p.name] = "inherit";
+  for (const p of hookPlugins.value) pluginStates[p.name] = "inherit";
 }
 
 // ── 未保存关闭守卫：弹窗打开并加载完绑定后拍快照，关闭时比对 ──
@@ -274,7 +379,10 @@ async function tryClose() {
 }
 
 async function newProvider() {
+  loadingForm = true;
   Object.assign(form, emptyProvider());
+  loadingForm = false;
+  quotaTestResult.value = null;
   error.value = null;
   editing.value = true;
   expandedEndpoint.value = null;
@@ -293,7 +401,15 @@ function closeModal() {
 
 async function editProvider(p: Provider) {
   // JSON 深拷贝隔离编辑态（structuredClone 无法克隆 Vue 响应式 Proxy）
+  loadingForm = true;
   Object.assign(form, JSON.parse(JSON.stringify(p)));
+  loadingForm = false;
+  // 补齐 schema 默认值的缺省键（存量值优先）
+  for (const f of quotaSchemaFields.value) {
+    const cfg = form.quotaConfig as Record<string, unknown>;
+    if (f.default !== undefined && cfg[f.name] === undefined) cfg[f.name] = f.default;
+  }
+  quotaTestResult.value = null;
   error.value = null;
   editing.value = true;
   expandedEndpoint.value = null;
@@ -312,12 +428,13 @@ async function save() {
     error.value = "至少需要一个 Base URL";
     return;
   }
+  if (!normalizeQuotaConfig()) return;
   try {
     // 服务端会回填 createdAt/updatedAt 并归一化端点顺序，本地拼不出最终记录：回退整表重拉
     await store.save({ ...form });
-    // 插件三态 diff：非 inherit 落 binding，inherit 删除已有 binding
+    // 插件三态 diff：非 inherit 落 binding，inherit 删除已有 binding（仅 core 类）
     let bindingsChanged = false;
-    for (const p of pluginList.value) {
+    for (const p of hookPlugins.value) {
       const state = pluginStates[p.name] ?? "inherit";
       const had = p.name in originalBindings.value;
       if (state === "inherit") {
@@ -542,14 +659,86 @@ function loadPluginList() {
         </Button>
       </div>
 
-      <!-- 插件三态开关 -->
-      <div v-if="pluginList.length > 0" class="mt-4 border-t pt-4">
+      <!-- 配额查询绑定：脚本在配额插件里，这里只选插件与间隔；配置按插件 config_schema -->
+      <div class="mt-4 border-t pt-4">
+        <Label>配额查询</Label>
+        <div class="mt-2 grid gap-4 grid-cols-[repeat(auto-fit,minmax(14rem,1fr))]">
+          <div class="space-y-1.5">
+            <Label for="p-quota-plugin">配额插件</Label>
+            <Select
+              id="p-quota-plugin"
+              v-model="form.quotaPluginRef"
+              :options="quotaPluginOptions"
+              placeholder="不绑定"
+            />
+          </div>
+          <div class="space-y-1.5">
+            <Label for="p-quota-interval">查询间隔（秒）</Label>
+            <Input id="p-quota-interval" v-model="form.quotaIntervalSecs" type="number" min="0" />
+          </div>
+          <div class="flex items-center gap-2 pt-6">
+            <Checkbox id="p-quota-enabled" v-model:checked="form.quotaEnabled" />
+            <Label for="p-quota-enabled">启用定时查询</Label>
+          </div>
+        </div>
+        <p class="mt-1.5 text-xs text-muted-foreground">
+          对每个端点 Key 各执行一次插件的 MB.query；间隔 0 = 仅手动刷新。
+        </p>
+
+        <template v-if="form.quotaPluginRef">
+          <!-- 实例配置：由插件 MB.config_schema 驱动；无 schema = 无需配置 -->
+          <div v-if="quotaSchemaFields.length" class="mt-3 grid gap-4 grid-cols-[repeat(auto-fit,minmax(14rem,1fr))]">
+            <div v-for="f in quotaSchemaFields" :key="f.name" class="space-y-1.5">
+              <Label :for="'p-quota-cfg-' + f.name">{{ f.label }}</Label>
+              <Input
+                :id="'p-quota-cfg-' + f.name"
+                v-model="(form.quotaConfig as Record<string, string | number>)[f.name]"
+                :type="f.secret ? 'password' : f.type === 'number' ? 'number' : 'text'"
+                :placeholder="f.default !== undefined ? String(f.default) : ''"
+                autocomplete="off"
+              />
+              <p v-if="f.help" class="text-xs text-muted-foreground">{{ f.help }}</p>
+            </div>
+          </div>
+          <p v-else class="mt-3 text-xs text-muted-foreground">该插件未声明实例配置项。</p>
+          <p v-if="quotaSchemaFields.length" class="mt-1.5 text-xs text-muted-foreground">
+            实例配置整体加密落库。
+          </p>
+
+          <!-- 测试查询：dry-run 当前表单配置，不写库 -->
+          <div class="mt-3 flex items-center gap-2">
+            <Button variant="outline" size="sm" :disabled="quotaTesting" @click="runQuotaTest">
+              <RefreshCw class="size-3.5" :class="quotaTesting ? 'animate-spin' : ''" />
+              {{ quotaTesting ? "查询中…" : "测试查询" }}
+            </Button>
+            <span class="text-xs text-muted-foreground">用当前表单配置试跑一次，不影响线上结果</span>
+          </div>
+          <div v-if="quotaTestResult" class="mt-2 space-y-1.5">
+            <div v-for="r in quotaTestResult" :key="r.keyIndex" class="flex items-center gap-2 text-xs">
+              <Badge v-if="r.keyLabel" variant="secondary" class="max-w-[10rem] truncate font-mono">
+                {{ r.keyLabel }}
+              </Badge>
+              <Badge :variant="r.status === 'ok' ? 'success' : 'destructive'">
+                {{ r.status === "ok" ? "成功" : "失败" }}
+              </Badge>
+              <span v-if="r.status === 'error'" class="text-destructive">{{ r.error || r.payload?.message }}</span>
+              <span v-else-if="r.payload?.summary" class="text-muted-foreground">{{ r.payload.summary }}</span>
+              <span v-else-if="r.payload?.quotas?.length" class="text-muted-foreground">
+                {{ r.payload.quotas.map((q) => q.label).join("、") }}
+              </span>
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <!-- 插件三态开关（仅请求链路插件；配额插件在上方单独绑定） -->
+      <div v-if="hookPlugins.length > 0" class="mt-4 border-t pt-4">
         <div class="flex items-center justify-between">
           <Label>插件</Label>
         </div>
         <div class="mt-2 space-y-1.5">
           <div
-            v-for="p in pluginList"
+            v-for="p in hookPlugins"
             :key="p.name"
             class="flex items-center justify-between gap-4"
           >

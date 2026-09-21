@@ -23,7 +23,7 @@ const nav = [
   { to: "/routes", title: "路由", icon: GitBranch },
   { to: "/plugins", title: "插件", icon: Puzzle },
   { to: "/usage", title: "用量", icon: BarChart3 },
-  { to: "/balance", title: "余额", icon: Wallet },
+  { to: "/quota", title: "额度", icon: Wallet },
   { to: "/traces", title: "调用追踪", icon: ScrollText },
   { to: "/settings", title: "设置", icon: Settings },
 ];

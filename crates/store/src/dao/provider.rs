@@ -8,22 +8,42 @@ use crate::models::{Endpoint, Provider};
 use crate::Database;
 
 const SELECT_COLS: &str =
-    "key,version,user_agent,web_search_json,extra_json,enabled,created_at,updated_at";
+    "key,version,user_agent,web_search_json,extra_json,enabled,created_at,updated_at,quota_plugin_ref,quota_interval_secs,quota_enabled,quota_config_enc";
 
-fn row_to_provider(r: &rusqlite::Row) -> rusqlite::Result<Provider> {
+/// `quota_config_enc` 需要 `self.enc` 解密，行映射只能先把密文带出去——
+/// 返回 `(Provider, quota_config_enc)`，由调用方解密后写回 `quota_config`。
+fn row_to_provider(r: &rusqlite::Row) -> rusqlite::Result<(Provider, String)> {
     let extra_json: String = r.get(4)?;
     let ws: Option<String> = r.get(3)?;
-    Ok(Provider {
-        key: r.get(0)?,
-        endpoints: Vec::new(),
-        version: r.get(1)?,
-        user_agent: r.get(2)?,
-        web_search: ws.and_then(|s| serde_json::from_str(&s).ok()),
-        extra: serde_json::from_str(&extra_json).unwrap_or(Value::Null),
-        enabled: r.get::<_, i32>(5)? != 0,
-        created_at: r.get(6)?,
-        updated_at: r.get(7)?,
-    })
+    Ok((
+        Provider {
+            key: r.get(0)?,
+            endpoints: Vec::new(),
+            version: r.get(1)?,
+            user_agent: r.get(2)?,
+            web_search: ws.and_then(|s| serde_json::from_str(&s).ok()),
+            extra: serde_json::from_str(&extra_json).unwrap_or(Value::Null),
+            enabled: r.get::<_, i32>(5)? != 0,
+            quota_plugin_ref: r.get(8)?,
+            quota_interval_secs: r.get(9)?,
+            quota_enabled: r.get::<_, i32>(10)? != 0,
+            quota_config: Value::Null,
+            created_at: r.get(6)?,
+            updated_at: r.get(7)?,
+        },
+        r.get(11)?,
+    ))
+}
+
+impl Database {
+    /// 解密 `quota_config_enc` 为 JSON；空串/解密失败按空对象处理（新行尚无配置）。
+    fn decode_quota_config(&self, enc: &str) -> Result<Value> {
+        if enc.is_empty() {
+            return Ok(Value::Null);
+        }
+        let plain = self.enc.decrypt(enc)?;
+        Ok(serde_json::from_str(&plain).unwrap_or(Value::Null))
+    }
 }
 
 impl Database {
@@ -75,10 +95,11 @@ impl Database {
         ))?;
         let mut rows = stmt.query_map(params![key], row_to_provider)?;
         match rows.next() {
-            Some(Ok(mut p)) => {
+            Some(Ok((mut p, quota_enc))) => {
                 drop(rows);
                 drop(stmt);
                 drop(conn);
+                p.quota_config = self.decode_quota_config(&quota_enc)?;
                 p.endpoints = self.list_endpoints(&p.key)?;
                 Ok(Some(p))
             }
@@ -99,15 +120,40 @@ impl Database {
             p.extra.to_string()
         };
         let created = if p.created_at > 0 { p.created_at } else { now };
+        // 配额配置整段加密落库（含密钥类字段）；空配置存空串，读回按空对象处理。
+        let quota_config_enc = if p.quota_config.is_null()
+            || p.quota_config.as_object().is_some_and(|o| o.is_empty())
+        {
+            String::new()
+        } else {
+            self.enc.encrypt(&p.quota_config.to_string())?
+        };
         let tx = conn.transaction()?;
         tx.execute(
-            "INSERT INTO providers (key,version,user_agent,web_search_json,extra_json,enabled,created_at,updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+            "INSERT INTO providers (key,version,user_agent,web_search_json,extra_json,enabled,created_at,updated_at,quota_plugin_ref,quota_interval_secs,quota_enabled,quota_config_enc)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
              ON CONFLICT(key) DO UPDATE SET
                 version=excluded.version, user_agent=excluded.user_agent,
                 web_search_json=excluded.web_search_json, extra_json=excluded.extra_json,
-                enabled=excluded.enabled, updated_at=excluded.updated_at",
-            params![p.key, p.version, p.user_agent, ws, extra, p.enabled as i32, created, now],
+                enabled=excluded.enabled, updated_at=excluded.updated_at,
+                quota_plugin_ref=excluded.quota_plugin_ref,
+                quota_interval_secs=excluded.quota_interval_secs,
+                quota_enabled=excluded.quota_enabled,
+                quota_config_enc=excluded.quota_config_enc",
+            params![
+                p.key,
+                p.version,
+                p.user_agent,
+                ws,
+                extra,
+                p.enabled as i32,
+                created,
+                now,
+                p.quota_plugin_ref,
+                crate::quota::clamp_interval_secs(p.quota_interval_secs),
+                p.quota_enabled as i32,
+                quota_config_enc,
+            ],
         )?;
         tx.execute(
             "DELETE FROM provider_endpoints WHERE provider_key = ?1",
@@ -138,6 +184,10 @@ impl Database {
         tx.execute("DELETE FROM routes WHERE provider_key = ?1", params![key])?;
         tx.execute(
             "DELETE FROM plugin_bindings WHERE scope = 'provider' AND scope_key = ?1",
+            params![key],
+        )?;
+        tx.execute(
+            "DELETE FROM quota_results WHERE provider_key = ?1",
             params![key],
         )?;
         tx.commit()?;

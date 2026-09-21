@@ -27,11 +27,13 @@ withDefaults(defineProps<{ open?: boolean; bare?: boolean }>(), { open: false, b
           <code class="font-mono">message</code>（失败原因）、<code class="font-mono">summary</code>（一句话备注，可不填）、
           <code class="font-mono">quotas</code>（余额条目列表，界面上画成环形图）。
         </p>
-        <pre class="scrollbar-thin overflow-auto rounded border bg-muted/40 p-2 font-mono text-[11px]">{ label = "Weekly", used_percent = 43, reset_at = "2026/9/21 13:02" }
-{ label = "余额", unit = "$", left_amount = 0 }</pre>
+        <pre class="scrollbar-thin overflow-auto rounded border bg-muted/40 p-2 font-mono text-[11px]">{ type = "percentage", label = "Weekly", period_secs = 604800, used_percent = 43, reset_at = "2026/9/21 13:02" }
+{ type = "quota", label = "余额", unit = "$", left_amount = 0 }</pre>
         <p class="text-muted-foreground">
-          条目字段名用 snake_case（used_percent、left_amount 这样的小写下划线写法），界面显示时会自动转成 camelCase（usedPercent、leftAmount）；
-          百分比两个字段给一个就够。已用和剩余金额可以只给一个，零值也会照常显示。
+          每条配额必须声明 <code class="font-mono">type</code>：<code class="font-mono">percentage</code>（百分比额度）、
+          <code class="font-mono">quota</code>（金额额度）、<code class="font-mono">counter</code>（计数器，界面不展示）。
+          字段名用 snake_case（used_percent、left_amount），显示时自动转 camelCase；百分比两个字段给一个就够。
+          有滚动窗口的配额填 <code class="font-mono">period_secs</code>（窗口秒数），界面据此对照本地消耗。
           reset_at 可以直接写要显示的文字，也可以给 unix 时间戳的秒数，界面会换算成本地时间。
         </p>
         <p class="text-muted-foreground">

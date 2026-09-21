@@ -43,6 +43,14 @@ export interface Provider {
   webSearch?: Json;
   extra: Json;
   enabled: boolean;
+  /** 配额查询插件引用（category=quota 的插件名）；空串 = 未绑定配额查询。 */
+  quotaPluginRef: string;
+  /** 配额定时查询间隔（秒）；0 = 只手动刷新。 */
+  quotaIntervalSecs: number;
+  /** 配额查询开关（独立于 quotaPluginRef，便于临时停用）。 */
+  quotaEnabled: boolean;
+  /** 配额插件实例配置（按插件 configSchema 的字段值；密钥类字段也在其中，整体加密落库）。 */
+  quotaConfig: Json;
   createdAt: number;
   updatedAt: number;
 }
@@ -98,6 +106,10 @@ export interface PluginRecord {
   config: Json;
   scopes: string[];
   capabilities: string[];
+  /** 插件类别：`core` 请求链路插件（进钩子注册表）| `quota` 配额查询插件（绑定 Provider）。 */
+  category?: string;
+  /** 实例配置字段声明（MB.config_schema）：{ 字段名: { type, label, default, secret, help } }；quota 插件用它驱动 Provider 配额配置表单。 */
+  configSchema?: Json;
 }
 
 export interface PluginBinding {
@@ -338,88 +350,76 @@ export const appApi = {
   setConfig: (config: AppConfig) => call<void>("config_set", { config }),
 };
 
-// ───────────────────────── 余额看板 ─────────────────────────
+// ───────────────────────── 配额查询 ─────────────────────────
 
-/** 配额显示样式：`auto` 按数据自动判断，`percent`/`amount` 强制对应口径。 */
-export type DisplayMode = "auto" | "percent" | "amount";
+/** 配额类型判别：`percentage` 百分比额度 | `quota` 金额额度 | `counter` 计数器（不渲染）。 */
+export type QuotaType = "percentage" | "quota" | "counter";
 
-/** 余额卡片：key 即卡片名，scriptRef 为插件目录内的 `.lua` 路径或内联脚本原文。 */
-export interface BalanceCard {
-  key: string;
-  /** 上游服务引用；无手动 Key 时解析其端点 Key，否则仅作分组和提供商标签。 */
-  providerKey: string | null;
-  /** 显示样式；后端落库时非法值归一为 `auto`。 */
-  displayMode: DisplayMode;
-  /** 手动 Key，可换行输入多个；去空白、保序去重后非空则完全覆盖上游服务 Key。 */
-  apiKey: string;
-  /** 查询 URL（可选）：配额接口基准地址，脚本里 `ctx.base_url` 读取；与 Provider 端点无关。 */
-  baseUrl: string;
-  /** 旧卡遗留的展示名；新卡片恒为空串，界面按 `providerKey` 展示并分组。 */
-  providerLabel: string;
-  scriptRef: string;
-  /** 自动查询间隔（秒）；0 = 关闭定时。 */
-  intervalSecs: number;
-  enabled: boolean;
-  extra: Json;
-  position: number;
-  createdAt: number;
-  updatedAt: number;
-}
-
-/** 单条配额进度（used/left 缺一由前端按 100 互补）。 */
-export interface BalanceQuota {
+/** 单条配额（type 必填的判别式契约；后端已做 percent 互补，前端不再推断）。 */
+export interface QuotaEntry {
+  type: QuotaType;
   label: string;
+  /** 配额窗口时长（秒）；有滚动窗口的配额填写，供本地消耗统计对照。 */
+  periodSecs?: number | null;
   usedPercent?: number | null;
   leftPercent?: number | null;
-  /** 金额单位（如 `¥`、`$`、`GB`），仅金额模式使用。 */
+  /** 金额单位（如 `¥`、`$`、`GB`），quota/counter 使用。 */
   unit?: string | null;
-  /** 已用金额；存在即走金额模式，不再展示百分比。 */
   usedAmount?: number | null;
-  /** 剩余金额；缺失时金额模式只展示已用。 */
   leftAmount?: number | null;
   resetAt?: string | null;
 }
 
-/** 脚本返回的余额载荷（宽松结构：约定字段 + 任意附加键）。 */
-export interface BalancePayload {
+/** 配额脚本返回的载荷（宽松结构：约定字段 + 任意附加键）。 */
+export interface QuotaPayload {
   status?: string;
   message?: string;
-  quotas?: BalanceQuota[];
+  quotas?: QuotaEntry[];
   summary?: string;
+  /** 后端归一时剔除的非法配额原因。 */
+  warnings?: string[];
   [k: string]: Json;
 }
 
-export interface BalanceResult {
+export interface QuotaResult {
   status: "ok" | "error";
-  payload?: BalancePayload | null;
+  payload?: QuotaPayload | null;
   error?: string | null;
   /** 查询时刻（unix 秒）。 */
   queriedAt: number;
 }
 
-/** 单个 key 的查询结果：多 key 卡片按 key 拆行，前端在同一卡片内逐 key 渲染。 */
-export interface BalanceKeyResult extends BalanceResult {
-  /** key 在卡片解析结果中的序号（0 起）。 */
+/** 单个端点 key 的查询结果：多端点 Provider 按 keyIndex（端点下标）拆行渲染。 */
+export interface QuotaKeyResult extends QuotaResult {
+  /** 端点序号（provider.endpoints 下标，0 起）。 */
   keyIndex: number;
-  /** 查询结果使用掩码标签（如 `sk-kim…LXyw`）；卡片编辑仍会接触原始 key。 */
+  /** 查询结果使用掩码标签（如 `sk-kim…LXyw`）；Provider 编辑仍可接触原始 key。 */
   keyLabel: string;
 }
 
-export interface BalanceCardView extends BalanceCard {
-  /** 逐 key 的最近一次查询结果（按 keyIndex 升序）；从未查询为空数组。 */
-  results: BalanceKeyResult[];
+/** Provider 配额视图：绑定信息 + 逐端点的最近一次查询结果。 */
+export interface ProviderQuotaView {
+  providerKey: string;
+  /** 绑定的配额插件名。 */
+  quotaPluginRef: string;
+  /** 定时查询间隔（秒）；0 = 只手动刷新。 */
+  quotaIntervalSecs: number;
+  /** 配额查询开关。 */
+  quotaEnabled: boolean;
+  /** 端点数量（key 行数上限）。 */
+  keyCount: number;
+  /** 逐端点的最近一次查询结果（按 keyIndex 升序）；从未查询为空数组。 */
+  results: QuotaKeyResult[];
 }
 
-export const balanceApi = {
-  list: () => call<BalanceCardView[]>("balance_card_list"),
-  save: (card: BalanceCard) => call<void>("balance_card_save", { card }),
-  remove: (key: string) => call<void>("balance_card_delete", { key }),
-  /** 刷新卡片：传 keyIndex 只重跑该 key，缺省整卡全量重跑。 */
-  refresh: (key: string, keyIndex?: number) =>
-    call<BalanceCardView>("balance_card_refresh", { key, keyIndex: keyIndex ?? null }),
-  refreshAll: () => call<BalanceCardView[]>("balance_refresh_all"),
-  /** dry-run：用表单里的卡片配置试跑一次脚本（逐 key 返回），不写库、不影响线上结果。 */
-  test: (card: BalanceCard) => call<BalanceKeyResult[]>("balance_card_test", { card }),
+export const quotaApi = {
+  list: () => call<ProviderQuotaView[]>("quota_list"),
+  /** 刷新一个 Provider 的配额（逐端点全量重跑）。 */
+  refresh: (providerKey: string) =>
+    call<ProviderQuotaView>("quota_refresh", { providerKey }),
+  refreshAll: () => call<ProviderQuotaView[]>("quota_refresh_all"),
+  /** dry-run：用表单里的 Provider 配置试跑一次配额脚本（逐端点返回），不写库。 */
+  test: (provider: Provider) => call<QuotaKeyResult[]>("quota_test", { provider }),
 };
 
 /** 从 Tauri command 错误中提取可读消息（后端返回 `{ message }`）。 */

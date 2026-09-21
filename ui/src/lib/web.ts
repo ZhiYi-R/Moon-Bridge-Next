@@ -226,26 +226,18 @@ export async function webInvoke<T>(cmd: string, args: Record<string, unknown>): 
       );
       return ok<T>();
 
-    // ── 余额看板 ──
-    case "balance_card_list":
-      return (await request<unknown>("GET", "/api/balance/cards")) as T;
-    case "balance_card_save":
-      await request("PUT", "/api/balance/cards", { body: args.card });
-      return ok<T>();
-    case "balance_card_delete":
-      await request("DELETE", `/api/balance/cards/${seg(args.key)}`);
-      return ok<T>();
-    case "balance_card_refresh": {
-      const qs =
-        args.keyIndex !== null && args.keyIndex !== undefined
-          ? `?key_index=${encodeURIComponent(String(args.keyIndex))}`
-          : "";
-      return (await request<unknown>("POST", `/api/balance/cards/${seg(args.key)}/refresh${qs}`)) as T;
-    }
-    case "balance_refresh_all":
-      return (await request<unknown>("POST", "/api/balance/refresh")) as T;
-    case "balance_card_test":
-      return (await request<unknown>("POST", "/api/balance/test", { body: args.card })) as T;
+    // ── 配额查询 ──
+    case "quota_list":
+      return (await request<unknown>("GET", "/api/quota")) as T;
+    case "quota_refresh":
+      return (await request<unknown>(
+        "POST",
+        `/api/quota/${seg(args.providerKey)}/refresh`,
+      )) as T;
+    case "quota_refresh_all":
+      return (await request<unknown>("POST", "/api/quota/refresh")) as T;
+    case "quota_test":
+      return (await request<unknown>("POST", "/api/quota/test", { body: args.provider })) as T;
 
     // ── 用量与链路追踪 ──
     case "usage_query":

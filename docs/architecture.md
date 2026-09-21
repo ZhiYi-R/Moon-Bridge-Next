@@ -259,15 +259,15 @@ SQLite（rusqlite, bundled + WAL），手写版本化 migration，每表一个 D
 | `models` | slug PK, display_name, context_window, **max_output_tokens（V8，可空；models.dev `limit.output`）**, modalities_json, reasoning_levels_json, extra_json。**注意：`pricing_json` 已由 V7 删除**，定价口径统一在 offers |
 | `offers` | provider_key + model_slug PK, pricing_json, **endpoint_protocol（V6，可空）** —— 非空时该模型只走 provider 中匹配该协议的端点，为空则全端点按 idx 故障转移 |
 | `routes` | alias PK, model_slug, provider_key, extra_json |
-| `plugins` | name PK, source(lua), script_ref, enabled, config_json, scopes_json, capabilities_json |
+| `plugins` | name PK, source(lua), script_ref, enabled, config_json, scopes_json, capabilities_json, **category（V14，`core`=请求链路 / `quota`=配额查询，缺省 core；注册表只收 core）** |
 | `plugin_bindings` | plugin_name + scope + scope_key PK, enabled, config_json |
 | `usage_records` | id PK, session_id, model, upstream_model, **provider_key（V9，可空）**, input/output/cache_read/cache_write/**reasoning**_tokens, cost, status, error, latency_ms, **ttft_ms**, created_at |
 | `settings` | key PK, value_json |
-| `balance_cards`（V10） | key PK, api_key, base_url, provider_label, script_ref（规则同插件：`.lua`=plugins_dir 内文件，否则内联脚本）, interval_secs（0=禁用，保存时 1..59 夹到 60）, enabled, extra_json, position, timestamps；V11 加 provider_key/display_mode |
-| `balance_results`（V12 重建） | (card_key, key_index) 联合 PK, key_label（掩码 key 标签，原文不落此表）, status(ok/error), payload_json（该 key 最近一次返回，引擎级失败时保留旧值）, error, queried_at —— 多 key 卡片按 key 拆行，删卡同事务级联 |
+| `quota_results`（V14） | (provider_key, key_index) 联合 PK, key_label（掩码 key 标签，原文不落此表）, status(ok/error), payload_json（该 key 最近一次返回，引擎级失败时保留旧值）, error, queried_at —— Provider 逐端点拆行，删 Provider 同事务级联 |
 
-- 凭据加密：默认文件数据库通过 `EncKey` 对 Provider 与余额查询凭据统一使用 AES-GCM，V13 在事务中迁移旧数据与加密元数据；不再以明文实现作为默认文件存储。字段加密不等于整库、配置、脚本或 trace 加密，前端编辑/查询仍可能处理凭据。
-- 历史自定义 `EncKey` 的 Provider 数据迁移须调用 `Database::open_with_legacy_key(path, target, legacy_provider_key)`，明确旧解密器后再加密，不能猜测密文前缀；旧余额凭据按明文迁移。解密或写入失败会回滚凭据及加密元数据；默认文件入口针对旧服务的明文存储迁移。
+- V14 起 `balance_cards`/`balance_results` 删除（旧数据废弃，无迁移），配额绑定直接长在 Provider 上：`quota_plugin_ref`（绑定的 `category="quota"` 插件名，空串=未绑定）、`quota_interval_secs`（0=禁用定时，保存时 1..59 夹到 60）、`quota_enabled`、`quota_config_enc`（配额插件实例配置，**整体 AES-GCM 加密**，密钥类字段与凭据同口径）。
+- 凭据加密：默认文件数据库通过 `EncKey` 对 Provider 凭据与配额配置统一使用 AES-GCM，V13 在事务中迁移旧数据与加密元数据；不再以明文实现作为默认文件存储。字段加密不等于整库、配置、脚本或 trace 加密，前端编辑/查询仍可能处理凭据。
+- 历史自定义 `EncKey` 的 Provider 数据迁移须调用 `Database::open_with_legacy_key(path, target, legacy_provider_key)`，明确旧解密器后再加密，不能猜测密文前缀。解密或写入失败会回滚凭据及加密元数据；默认文件入口针对旧服务的明文存储迁移。
 - 密钥默认 `<db>.key`，服务端可用 `--key-file` / `MOONBRIDGE_KEY_FILE` 指定；Unix 权限 `0600`，Windows 以当前用户 DPAPI 包装，恢复受该账户绑定限制。已有加密数据缺少/错误密钥时拒绝打开，不回退明文。
 - 数据库和密钥必须成对备份。升级前另存数据库备份；旧镜像不能直接使用新加密数据库回滚，必须恢复升级前数据库及匹配的凭据材料。
 - `status` 取值 `ok` / `error` / `aborted`（流未读尽即结束，如客户端断开）；`ttft_ms` 仅流式请求有值。
@@ -421,7 +421,7 @@ Client → axum: POST /v1/responses | /v1/messages | /v1/chat/completions
 | `--config-dir <D>` | — | 配置目录（默认与桌面端同位置） |
 | `--data-dir <D>` | — | 数据目录：数据库、插件、trace（默认与桌面端同位置） |
 | `--web-dir <D>` | `MOONBRIDGE_WEB_DIR` | 前端静态文件目录（默认 `./ui/dist`） |
-| — | `MOONBRIDGE_BALANCE_PRIVATE_ORIGINS` | 启动时读取的私网余额授权列表：精确 origin 的 JSON 数组；不是卡片 `extra` |
+| — | `MOONBRIDGE_QUOTA_PRIVATE_ORIGINS` | 启动时读取的私网余额授权列表：精确 origin 的 JSON 数组；不是卡片 `extra` |
 
 未知参数与位置参数一律报错；`--key value` 与 `--key=value` 均接受。
 
@@ -457,7 +457,7 @@ camelCase 契约，前端 `call()` 分发层据此在 IPC 与 REST 间透明切�
 | 插件 | `GET/PUT /api/plugins` · `GET/DELETE /api/plugins/:name` · `POST /api/plugins/import`（JSON `{files:[{name,content}]}`，不是 multipart）· `GET/PUT /api/plugins/:name/script` · `GET /api/plugins/:name/bindings` |
 | 绑定 | `GET/PUT /api/bindings` · `DELETE /api/bindings/:pluginName/:scope/:scopeKey` |
 | 用量 | `GET /api/usage` · `GET /api/usage/summary` |
-| 余额 | `GET/PUT /api/balance/cards` · `DELETE /api/balance/cards/:key` · `POST /api/balance/cards/:key/refresh`（可加 `?key_index=N` 只刷新单个 key） · `POST /api/balance/refresh` · `POST /api/balance/test`（dry-run） |
+| 配额 | `GET /api/quota` · `POST /api/quota/:key/refresh` · `POST /api/quota/refresh` · `POST /api/quota/test`（dry-run） |
 | Trace | `GET /api/traces` · `GET/DELETE /api/trace`（单数，路径经查询参数，含穿越校验） |
 | 设置 | `GET /api/settings` · `GET/PUT/DELETE /api/settings/:key` |
 
@@ -466,83 +466,70 @@ camelCase 契约，前端 `call()` 分发层据此在 IPC 与 REST 间透明切�
 `parse_script_ref` 规则）、trace 读取的路径校验、catalog 导入的定价回填。
 `/api/*` 下未匹配的路径返回 JSON 404，不会被 SPA fallback 吞掉。
 
-### 余额&健康看板（`gateway::balance` + `/api/balance/*`）
+### 配额查询（`gateway::quota` + `/api/quota/*`）
 
-每张余额卡片是一段**一次性 Lua 脚本**（不进插件注册表、不参与请求链路）：宿主加载脚本
-（复用 `LuaRuntime` 沙箱与全部 `mb.*` 宿主 API），调用 `MB.query(ctx)` 并把返回值落库。
+配额查询绑定直接长在 **Provider** 上：Provider 指定一个 `category = "quota"` 的插件
+（`quota_plugin_ref`），宿主加载插件脚本（复用 `LuaRuntime` 沙箱与全部 `mb.*` 宿主
+API），对 Provider 的**每个端点 key** 各调用一次 `MB.query(ctx)` 并把返回值按
+`(provider_key, key_index)` 拆行落库。
 
-- **ctx**（单 key 形状）：`{ name, key, keys, base_url, provider, extra }`（`extra` 为卡片
-  自定义 JSON，同时也作为 `mb.config`）；`keys` 恒为当前 key 的单元素数组。
-  `mb.http.request` 的响应 body 在上游返回 JSON 时已自动解析为 Lua table，脚本可直接
-  `r.body.xxx`。
-- **卡片 Key 来源**：新增/编辑支持手动单 Key 或换行分隔的 Key 列表，沿用
-  `api_key`（REST/IPC `apiKey`）字符串存储，不改变表结构。按行去首尾空白、忽略空行、
-  **去重保序**后非空则完全覆盖服务引用，不读取或混入 Provider 的 Key；此时
-  `provider_key` 可选，只作分组和 `ctx.provider` 的默认标签，引用失效也不影响手动查询。
-  手动输入为空时才从 Provider 端点解析 Key（空端点继承前一个非空 Key）并去重，
-  Provider 不存在则报引擎级错误。UI 保存/测试要求手动 Key 或服务引用至少一项；
-  后端保留两者均空时用空 Key 执行一次的公开查询兼容性。
-  **每个 Key 各执行一次脚本并拆成多张卡片展示**，`ctx.key` 与单元素 `ctx.keys`
-  契约不变，保存、测试拉取、单 Key 刷新和定时查询采用相同优先级。
-- **结果按 key 拆行落库**（V12）：`(card_key, key_index)` 联合主键，每行带
-  `key_label`（掩码展示标签：长度 ≤4 → `****`，≤10 → 前 2 位 + `…`，更长 →
-  前 6 位 + `…` + 后 4 位；key 原文不进结果表）。整卡执行后 `key_index >= 当前 key 数`
-  的残留行被剪掉（prune）；卡片「上次查询时刻」取各行 `queried_at` 的最大值（到期判定
-  口径）。前端逐 key 渲染一张卡（标题 = 卡片名 + 掩码 key chip），可整卡刷新也可
-  单 key 刷新（REST `?key_index=N` / IPC `keyIndex`）。
-- **查询 URL 是卡片自己的可选输入**（`base_url`，不从 Provider 端点继承）：配额接口
-  基准地址，脚本读 `ctx.base_url`，留空为空字符串。
-- **返回契约**：`{ status = "ok"|"error"（缺省=ok）, message?, quotas = { { label,
-  used_percent?, left_percent?, unit?, used_amount?, left_amount?, reset_at? } },
-  summary?, ... }`。返回 `nil` 或非法 `status` 均为错误，不计为成功。落库前 `quotas`
-  归一化为 camelCase 并补齐 used/left percent 互补值（amount 字段原样透传，amount 之间
-  及与 percent 之间均不做互补互推；None 字段不序列化）；`reset_at` 接受展示字符串或
-  unix 秒数字（归一为字符串，前端对纯数字按本地时间格式化——沙箱无 os 库，脚本拿到
-  毫秒时间戳只能除 1000 后给数字）；脚本自定义字段原样保留在 payload。
-- **内置脚本模板**（`ui/src/lib/balanceTemplates.ts`）：新建或编辑卡片时可从模板填充脚本与建议
-  默认值（查询 URL/额外参数/间隔）；应用模板会覆盖当前编辑中的脚本并切换到内联来源
-  （弹窗内已明示「覆盖脚本并切换到内联来源」）。模板按各服务真实接口编写：通用百分比/金额骨架 +
-  new-api（`/api/user/self`，当前 `data.quota / 500000` 作美元余额，不用 `used_quota`
-  代替余额）、DeepSeek、Moonshot/Kimi 开放平台、SiliconFlow、
-  OpenRouter（credits + key 限额双接口）、智谱 GLM Coding Plan（裸 key 鉴权 + Bearer 回退）、
-  Kimi Coding Plan（`usages.limit_5h/limit_7d` 的 `used_ratio * 100`、`reset_time`；允许
-  仅一个窗口可用，不因另一窗口缺失而丢弃可用结果）、
-  CommandCode（完整 URL `/alpha/billing/credits`；月度 `monthlyCredits` 剩余额度，
-  月上限默认 70；5H/Weekly 的 used/cap 金额与毫秒 resetAt，单位默认空）、Claude Code
-  订阅（OAuth usage 接口）、Sub2API（Bearer `GET /v1/usage`；优先 `quota.remaining`，
-  再回退 `balance` / `remaining`，附带 `rate_limits` 的周期剩余额度，单位 $；站点 URL
-  自动去尾斜杠及 `/v1`）。模板不携带账户密钥；应用模板只覆盖当前编辑中卡片的脚本，不改动其它已保存卡片。
-- **弹窗错误反馈**：新增/编辑表单的校验、保存失败和测试拉取错误显示在弹窗标题下，
-  通过 Modal 的可选 `notice` 插槽置于滚动内容区外，始终可见；多 Key 错误保留掩码标签，
-  支持脚本 `payload.message`，详情仍在测试预览。页面级刷新/删除错误独立展示。
-- **两种配额模式与显示切换**：百分比模式给 percent 字段，显示「{used}% · 剩余 {left}%」；
-  金额模式给 `unit` + `used_amount`（可再带 `left_amount`），显示
-  「消耗 {used}{unit} · 余额 {left}{unit}」。进度条比例：优先 percent，否则双 amount 时
-  `used/(used+left)*100`，都没有则不渲染。卡片 `display_mode`（`auto`/`percent`/`amount`，
-  保存时非法值归一为 auto）让用户在卡片上与编辑表单里切换显示样式：auto 按数据自动，
-  强制模式缺对应字段时显示「—」不渲染进度条。前端按 `providerKey || providerLabel(旧卡)`
-  分组展示卡片。
-- **dry-run 预览**：`POST /api/balance/test`（Tauri `balance_card_test`）以请求体里的
-  卡片配置逐 key 试跑脚本（卡片无需已保存），返回结果数组，**不写库、不读历史
-  结果**——编辑表单的「测试拉取」据此实现预览，引擎级失败时该 key 的 payload 为 None。
-- **失败分层（按 key 独立）**：引擎级失败（脚本读不到 / 无 `MB.query` / 抛错 / 超时 /
-  返回 `nil` 或非法 `status`）→ 该 key `status=error` 且保留旧成功 payload；有效 table
-  （含业务 error）更新 payload。整卡执行预算为 45s。`BalanceBridge` 仅实现 HTTP，
-  `provider_invoke` 直接拒绝；一次性入口为 `LuaRuntime::call_mb_once`，复用沙箱与配额。
-- **余额 HTTP 的 SSRF 边界**（`gateway::balance_http`）：只允许同源或已授权 origin；
-  默认拒绝私网与云元数据目标。私网例外由启动环境 `MOONBRIDGE_BALANCE_PRIVATE_ORIGINS`
-  的精确 origin JSON 数组授予，例如 `["https://balance.internal.example:8443"]`，不是
-  卡片 `extra`；元数据地址始终禁止。HTTP 不继承系统代理、不跟随重定向，解析并校验
+- **插件类别**（`plugins.category`，缺省 `core`）：`core` 进请求钩子注册表；`quota`
+  插件由配额引擎驱动，**永不进入请求链路**（注册表白名单式只收 `core`，新类别默认
+  不被当请求插件）。`MB.category` 在脚本元数据里声明，导入/保存时落到记录列。
+- **ctx**（单 key 形状）：`{ provider, name, key, keys, base_url, extra }`；`keys` 恒为
+  当前 key 的单元素数组，`base_url` 取该 key 所属端点的 base_url（无端点时为空串），
+  `extra` 为 Provider 的配额配置 `quota_config`（解密后下发，同时作为 `mb.config`）。
+  `mb.http.request` 的响应 body 在上游返回 JSON 时已自动解析为 Lua table。
+- **key 来源唯一**：`provider.endpoints` 的 `(base_url, api_key)` 对，按 `idx` 顺序逐对
+  执行；无端点 Provider 以空 key 执行一次（账号级查询场景）。
+- **结果按 key 拆行落库**：`(provider_key, key_index)` 联合主键，每行带 `key_label`
+  （掩码展示标签：长度 ≤4 → `****`，≤10 → 前 2 位 + `…`，更长 → 前 6 位 + `…` +
+  后 4 位；key 原文不进结果表）。全量执行后 `key_index >= 当前端点数` 的残留行被剪掉
+  （prune）；Provider「上次查询时刻」取各行 `queried_at` 的最大值（到期判定口径）。
+  删除 Provider 同事务级联删除结果行。
+- **返回契约**：`{ status = "ok"|"error"（缺省=ok）, message?, quotas = { { type, label,
+  ... } }, summary?, ... }`。`type` **必填**，取 `percentage`（`used_percent`/
+  `left_percent`）/ `quota`（`unit` + `used_amount`/`left_amount`）/ `counter`
+  （`used_amount`，前端不渲染计数行）；可选 `period_secs`（窗口秒数，驱动前端本地
+  消耗统计）、`reset_at`（展示字符串或 unix 秒数字，归一为字符串）。缺 `type` 或
+  缺该类型必填字段的配额项被剔除并把原因记入 `payload.warnings`。
+  落库前 `quotas` 归一化为 camelCase 并补齐 used/left percent 互补值（amount 字段原样
+  透传，amount 之间及与 percent 之间不做互补互推；None 字段不序列化）；脚本自定义
+  字段原样保留在 payload。返回 `nil` 或非法 `status` 均为错误，不计为成功。
+- **内置配额插件**（`plugins/quota/*.lua`）：首次启动时以内联 `script_ref` 播入
+  `plugins` 表（`category="quota"`、默认启用），Provider 编辑页直接下拉绑定；已播种
+  标记存 settings，用户删掉的内置插件不会复活。内置适配器：通用百分比/金额骨架 +
+  new-api（`/api/user/self`，`data.quota / quota_per_unit`（默认 500000）作余额）、
+  Sub2API（`GET /v1/usage`；优先 `quota.remaining`，回退 `balance`/`remaining`，附带
+  `rate_limits` 周期剩余）、DeepSeek（多币种 `balance_infos`）、Moonshot/Kimi 开放平台、
+  SiliconFlow、OpenRouter（credits + key 限额双接口）、智谱 GLM Coding Plan（裸 key
+  鉴权 + Bearer 回退）、Kimi Coding Plan（`usages.limit_5h/limit_7d.used_ratio`）、
+  CommandCode（`monthlyCredits` + `windowLimits`，月上限走配额配置 `monthly_cap`）、
+  Claude Code 订阅（OAuth usage 接口）。
+- **dry-run 预览**：`POST /api/quota/test`（Tauri `quota_test`）以请求体里的 Provider
+  配置逐端点试跑绑定脚本（Provider 无需已保存），返回结果数组，**不写库、不读历史
+  结果**——Provider 编辑表单的「测试查询」据此实现预览，引擎级失败时该端点 payload
+  为 None。
+- **失败分层（按端点独立）**：引擎级失败（插件缺失 / 非 quota 类 / 脚本读不到 / 无
+  `MB.query` / 抛错 / 超时 / 返回 `nil` 或非法 `status`）→ 该端点 `status=error` 且保留
+  旧成功 payload；有效 table（含业务 error）更新 payload。单 Provider 执行预算为 45s。
+  `QuotaBridge` 仅实现 HTTP，`provider_invoke` 直接拒绝；一次性入口为
+  `LuaRuntime::call_mb_once`，复用沙箱与配额。
+- **配额 HTTP 的 SSRF 边界**（`gateway::quota_http`）：只允许同源或已授权 origin；
+  默认拒绝私网与云元数据目标。私网例外由启动环境 `MOONBRIDGE_QUOTA_PRIVATE_ORIGINS`
+  的精确 origin JSON 数组授予，例如 `["https://quota.internal.example:8443"]`，不是
+  配额配置字段；元数据地址始终禁止。HTTP 不继承系统代理、不跟随重定向，解析并校验
   DNS 后钉住目标地址，解压后响应上限 1 MiB，单次 HTTP 最长 30s。
-- **代理限制**：显式 `egressProxy` 导致余额 HTTP 明确报不支持代理，不静默直连；
+- **代理限制**：显式 `egressProxy` 导致配额 HTTP 明确报不支持代理，不静默直连；
   网关推理请求的代理支持不受此限制影响。
-- **定时调度**：每代运行实例仅持有一个 `spawn_balance_scheduler`，重启取消旧任务。
-  每 30s 扫描 `enabled && interval_secs>0 && 已到期` 的卡片串行执行；单卡失败/panic
-  不影响循环。`interval_secs` 保存时夹逼：≤0 禁用，1..59 抬到 60。
-- **script_ref** 与插件同一套 `parse_script_ref` 规则（`.lua` 收敛到 `plugins_dir` 内）。
-- IPC 侧 commands `balance_card_* / balance_refresh_all` 与 REST 1:1（`balance_card_refresh`
-  带可选 `keyIndex`）；卡片与逐 key 结果以 `BalanceCardView`（卡片 flatten +
-  `results: BalanceKeyResult[]`）成对返回，前端一次拿全。
+- **定时调度**：每代运行实例仅持有一个 `spawn_quota_scheduler`，重启取消旧任务。
+  每 30s 扫描 `quota_enabled && quota_plugin_ref <> '' && quota_interval_secs > 0 &&
+  已到期` 的 Provider 串行执行；单 Provider 失败/panic 不影响循环。
+  `quota_interval_secs` 保存时夹逼：≤0 禁用，1..59 抬到 60。
+- IPC 侧 commands `quota_list / quota_refresh / quota_refresh_all / quota_test` 与 REST
+  1:1；Provider 视图（绑定字段 + `results: QuotaKeyResult[]`）以 `ProviderQuotaView`
+  成对返回，前端一次拿全。配额绑定保存走 Provider upsert，无独立绑定命令；
+  对未绑定 Provider 调刷新返回 400，不产生结果行。
 
 ### SPA 静态托管
 

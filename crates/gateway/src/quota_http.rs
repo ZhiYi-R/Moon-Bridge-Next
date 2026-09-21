@@ -23,19 +23,19 @@ const OFFICIAL_ORIGINS: &[&str] = &[
 ];
 
 #[derive(Clone, Debug, Default)]
-pub struct BalanceNetworkPolicy {
+pub struct QuotaNetworkPolicy {
     private_origins: HashSet<String>,
     denied_reason: Option<String>,
 }
 
-impl BalanceNetworkPolicy {
+impl QuotaNetworkPolicy {
     pub fn from_environment(egress_proxy: Option<String>) -> Self {
-        let configured = match std::env::var("MOONBRIDGE_BALANCE_PRIVATE_ORIGINS") {
+        let configured = match std::env::var("MOONBRIDGE_QUOTA_PRIVATE_ORIGINS") {
             Ok(value) => serde_json::from_str::<Vec<String>>(&value).map_err(|_| {
-                "MOONBRIDGE_BALANCE_PRIVATE_ORIGINS 必须是 origin 字符串的 JSON 数组".to_string()
+                "MOONBRIDGE_QUOTA_PRIVATE_ORIGINS 必须是 origin 字符串的 JSON 数组".to_string()
             }),
             Err(std::env::VarError::NotPresent) => Ok(Vec::new()),
-            Err(_) => Err("MOONBRIDGE_BALANCE_PRIVATE_ORIGINS 编码无效".to_string()),
+            Err(_) => Err("MOONBRIDGE_QUOTA_PRIVATE_ORIGINS 编码无效".to_string()),
         };
         match configured.and_then(|origins| Self::from_config(origins, egress_proxy)) {
             Ok(policy) => policy,
@@ -51,14 +51,14 @@ impl BalanceNetworkPolicy {
         egress_proxy: Option<String>,
     ) -> Result<Self, String> {
         if egress_proxy.is_some() {
-            return Err("余额查询不支持出站代理：无法安全校验代理侧 DNS".to_string());
+            return Err("配额查询不支持出站代理：无法安全校验代理侧 DNS".to_string());
         }
         let mut allowed = HashSet::new();
         for origin in private_origins {
             let url = parse_url(&origin)?;
             if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
                 return Err(
-                    "余额私网白名单必须是精确的 HTTP(S) origin，不能包含路径、查询或片段"
+                    "配额私网白名单必须是精确的 HTTP(S) origin，不能包含路径、查询或片段"
                         .to_string(),
                 );
             }
@@ -75,7 +75,7 @@ impl BalanceNetworkPolicy {
 
     /// 策略是否因配置问题被整体禁用（配置了出站代理，或私网白名单非法）。
     /// 一旦禁用，[`Self::request`] 会以该原因拒绝每一次查询——宿主应在启动时检查
-    /// 并告警，否则余额看板会"静默全红"，只能从逐卡错误里反推根因。
+    /// 并告警，否则配额看板会"静默全红"，只能从逐卡错误里反推根因。
     pub fn denied_reason(&self) -> Option<&str> {
         self.denied_reason.as_deref()
     }
@@ -95,7 +95,7 @@ impl BalanceNetworkPolicy {
         );
         tokio::time::timeout(timeout, self.request_inner(base_url, req))
             .await
-            .map_err(|_| "余额 HTTP 请求超时".to_string())?
+            .map_err(|_| "配额 HTTP 请求超时".to_string())?
     }
 
     async fn request_inner(
@@ -112,41 +112,41 @@ impl BalanceNetworkPolicy {
             parse_url(base_url.trim())?.origin() == url.origin()
         };
         if !same_origin && !private_allowed {
-            return Err("余额 HTTP 请求不在卡片同源或明确授权的 origin 内".to_string());
+            return Err("配额 HTTP 请求不在卡片同源或明确授权的 origin 内".to_string());
         }
         let mut headers = reqwest::header::HeaderMap::new();
         for (name, value) in &req.headers {
             let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
-                .map_err(|_| "余额 HTTP 请求头名称无效".to_string())?;
+                .map_err(|_| "配额 HTTP 请求头名称无效".to_string())?;
             if name == reqwest::header::HOST || name.as_str().starts_with("proxy-") {
-                return Err("余额 HTTP 请求不能覆写 Host 或代理请求头".to_string());
+                return Err("配额 HTTP 请求不能覆写 Host 或代理请求头".to_string());
             }
             let value = reqwest::header::HeaderValue::from_str(value)
-                .map_err(|_| "余额 HTTP 请求头值无效".to_string())?;
+                .map_err(|_| "配额 HTTP 请求头值无效".to_string())?;
             headers.append(name, value);
         }
         let method = reqwest::Method::from_bytes(req.method.to_uppercase().as_bytes())
-            .map_err(|_| "余额 HTTP 方法无效".to_string())?;
+            .map_err(|_| "配额 HTTP 方法无效".to_string())?;
         if method == reqwest::Method::CONNECT {
-            return Err("余额 HTTP 请求不支持 CONNECT".to_string());
+            return Err("配额 HTTP 请求不支持 CONNECT".to_string());
         }
-        let port = url.port_or_known_default().ok_or("余额 HTTP 端口无效")?;
+        let port = url.port_or_known_default().ok_or("配额 HTTP 端口无效")?;
         let host = match url.host() {
             Some(Host::Domain(host)) => host.to_string(),
             Some(Host::Ipv4(ip)) => ip.to_string(),
             Some(Host::Ipv6(ip)) => ip.to_string(),
-            None => return Err("余额 HTTP 主机无效".to_string()),
+            None => return Err("配额 HTTP 主机无效".to_string()),
         };
         let addresses: Vec<SocketAddr> = if let Some(ip) = literal_ip(&url) {
             vec![SocketAddr::new(ip, port)]
         } else {
             tokio::net::lookup_host((host.as_str(), port))
                 .await
-                .map_err(|_| "余额 HTTP DNS 解析失败".to_string())?
+                .map_err(|_| "配额 HTTP DNS 解析失败".to_string())?
                 .collect()
         };
         if addresses.is_empty() {
-            return Err("余额 HTTP DNS 解析未返回地址".to_string());
+            return Err("配额 HTTP DNS 解析未返回地址".to_string());
         }
         for address in &addresses {
             validate_ip(address.ip(), private_allowed)?;
@@ -158,7 +158,7 @@ impl BalanceNetworkPolicy {
             .timeout(HTTP_TIMEOUT)
             .resolve_to_addrs(&host, &addresses)
             .build()
-            .map_err(|_| "余额 HTTP 安全客户端创建失败".to_string())?;
+            .map_err(|_| "配额 HTTP 安全客户端创建失败".to_string())?;
         let mut builder = client.request(method, url).headers(headers);
         if let Some(body) = &req.body {
             builder = builder.json(body);
@@ -166,9 +166,9 @@ impl BalanceNetworkPolicy {
         let mut response = builder
             .send()
             .await
-            .map_err(|_| "余额 HTTP 请求失败".to_string())?;
+            .map_err(|_| "配额 HTTP 请求失败".to_string())?;
         if response.status().is_redirection() {
-            return Err("余额 HTTP 请求禁止重定向".to_string());
+            return Err("配额 HTTP 请求禁止重定向".to_string());
         }
         if response
             .headers()
@@ -180,7 +180,7 @@ impl BalanceNetworkPolicy {
                     .map_or(true, |value| !value.trim().eq_ignore_ascii_case("identity"))
             })
         {
-            return Err("余额 HTTP 响应使用不支持的压缩编码".to_string());
+            return Err("配额 HTTP 响应使用不支持的压缩编码".to_string());
         }
         let status = response.status().as_u16();
         let headers = response
@@ -192,10 +192,10 @@ impl BalanceNetworkPolicy {
         while let Some(chunk) = response
             .chunk()
             .await
-            .map_err(|_| "余额 HTTP 响应读取失败".to_string())?
+            .map_err(|_| "配额 HTTP 响应读取失败".to_string())?
         {
             if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(bytes.len()) {
-                return Err("余额 HTTP 响应超过 1 MiB 上限".to_string());
+                return Err("配额 HTTP 响应超过 1 MiB 上限".to_string());
             }
             bytes.extend_from_slice(&chunk);
         }
@@ -210,7 +210,7 @@ impl BalanceNetworkPolicy {
 }
 
 fn parse_url(raw: &str) -> Result<Url, String> {
-    let mut url = Url::parse(raw).map_err(|_| "余额 HTTP URL 无效".to_string())?;
+    let mut url = Url::parse(raw).map_err(|_| "配额 HTTP URL 无效".to_string())?;
     let authority = raw
         .split_once("://")
         .map(|(_, rest)| rest.split(['/', '?', '#', '\\']).next().unwrap_or(""))
@@ -224,12 +224,12 @@ fn parse_url(raw: &str) -> Result<Url, String> {
         || url.password().is_some()
         || authority.contains('@')
     {
-        return Err("余额 HTTP URL 必须使用 HTTP(S) 且不能包含用户信息".to_string());
+        return Err("配额 HTTP URL 必须使用 HTTP(S) 且不能包含用户信息".to_string());
     }
     if let Some(Host::Domain(domain)) = url.host() {
         let domain = domain.trim_end_matches('.').to_ascii_lowercase();
         if domain.is_empty() || domain.contains('*') {
-            return Err("余额 HTTP 主机无效".to_string());
+            return Err("配额 HTTP 主机无效".to_string());
         }
         if matches!(
             domain.as_str(),
@@ -238,10 +238,10 @@ fn parse_url(raw: &str) -> Result<Url, String> {
                 | "instance-data.ec2.internal"
                 | "metadata.azure.internal"
         ) {
-            return Err("余额 HTTP 请求禁止访问元数据服务".to_string());
+            return Err("配额 HTTP 请求禁止访问元数据服务".to_string());
         }
         url.set_host(Some(&domain))
-            .map_err(|_| "余额 HTTP 主机无效".to_string())?;
+            .map_err(|_| "配额 HTTP 主机无效".to_string())?;
     }
     Ok(url)
 }
@@ -263,7 +263,7 @@ fn validate_ip(ip: IpAddr, private_allowed: bool) -> Result<(), String> {
                 || [a, b, c, d] == [168, 63, 129, 16]
                 || [a, b, c, d] == [192, 0, 0, 192]
             {
-                return Err("余额 HTTP 请求禁止访问元数据服务".to_string());
+                return Err("配额 HTTP 请求禁止访问元数据服务".to_string());
             }
             let private =
                 ip.is_private() || ip.is_loopback() || (a == 100 && (64..=127).contains(&b));
@@ -273,7 +273,7 @@ fn validate_ip(ip: IpAddr, private_allowed: bool) -> Result<(), String> {
             if ip.to_ipv4_mapped().is_some()
                 || ip == Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254)
             {
-                return Err("余额 HTTP 请求禁止 IPv4 映射地址或元数据服务".to_string());
+                return Err("配额 HTTP 请求禁止 IPv4 映射地址或元数据服务".to_string());
             }
             let segments = ip.segments();
             let private = ip.is_loopback() || (segments[0] & 0xfe00 == 0xfc00);
@@ -288,7 +288,7 @@ fn validate_ip(ip: IpAddr, private_allowed: bool) -> Result<(), String> {
     if public || (private_allowed && private) {
         Ok(())
     } else {
-        Err("余额 HTTP 请求禁止访问私网或保留地址".to_string())
+        Err("配额 HTTP 请求禁止访问私网或保留地址".to_string())
     }
 }
 
@@ -427,11 +427,11 @@ mod tests {
             "http://[::ffff:127.0.0.1]",
         ] {
             assert!(
-                BalanceNetworkPolicy::from_config(vec![origin.into()], None).is_err(),
+                QuotaNetworkPolicy::from_config(vec![origin.into()], None).is_err(),
                 "{origin}"
             );
         }
-        let error = BalanceNetworkPolicy::from_config(
+        let error = QuotaNetworkPolicy::from_config(
             Vec::new(),
             Some("http://secret-token@proxy.example".into()),
         )
@@ -442,7 +442,7 @@ mod tests {
 
     #[tokio::test]
     async fn origin_mismatch_private_dns_and_denied_environment_fail_closed() {
-        let policy = BalanceNetworkPolicy::default();
+        let policy = QuotaNetworkPolicy::default();
         for url in [
             "https://other.example/path",
             "http://example.com/path",
@@ -458,7 +458,7 @@ mod tests {
             let error = policy.request(url, request(url)).await.unwrap_err();
             assert!(error.contains("私网"), "{url}: {error}");
         }
-        let denied = BalanceNetworkPolicy::from_environment(Some(
+        let denied = QuotaNetworkPolicy::from_environment(Some(
             "http://secret-token@proxy.example".into(),
         ));
         let error = denied
@@ -485,7 +485,7 @@ mod tests {
             }),
         );
         let (origin, server) = serve(app).await;
-        let policy = BalanceNetworkPolicy::from_config(vec![origin.clone()], None).unwrap();
+        let policy = QuotaNetworkPolicy::from_config(vec![origin.clone()], None).unwrap();
         let response = policy.request(&origin, request(&origin)).await.unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(response.body, json!({"left": 0}));
@@ -530,7 +530,7 @@ mod tests {
             }),
         ))
         .await;
-        let policy = BalanceNetworkPolicy::from_config(vec![origin.clone(), target], None).unwrap();
+        let policy = QuotaNetworkPolicy::from_config(vec![origin.clone(), target], None).unwrap();
         let error = policy.request(&origin, request(&origin)).await.unwrap_err();
         assert!(error.contains("重定向"), "{error}");
         assert_eq!(hits.load(Ordering::SeqCst), 0);
@@ -554,7 +554,7 @@ mod tests {
                 }),
             );
         let (origin, server) = serve(app).await;
-        let policy = BalanceNetworkPolicy::from_config(vec![origin.clone()], None).unwrap();
+        let policy = QuotaNetworkPolicy::from_config(vec![origin.clone()], None).unwrap();
         let response = policy
             .request(&origin, request(&format!("{origin}/limit")))
             .await
