@@ -7,7 +7,7 @@ const { state, settle } = useConfirm();
 </script>
 
 <template>
-  <Modal :open="state.open" :title="state.title" width="max-w-md" z-class="z-[70]" plain @close="settle(false)">
+  <Modal :open="state.open" :title="state.title" width="max-w-md" z-class="z-[70]" @close="settle(false)">
     <p class="text-sm leading-relaxed">{{ state.message }}</p>
     <template #footer>
       <Button variant="ghost" size="sm" @click="settle(false)">取消</Button>

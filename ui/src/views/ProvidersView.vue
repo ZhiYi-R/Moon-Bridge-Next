@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronDown, ChevronRight, Pencil, Plus, RefreshCw, Search, Server, Trash2, X } from "lucide-vue-next";
+import { ArrowLeft, ChevronDown, ChevronRight, Pencil, Plus, RefreshCw, Search, Server, Trash2, X } from "lucide-vue-next";
 import {
   computed,
   onActivated,
@@ -18,9 +18,9 @@ import Checkbox from "@/components/ui/Checkbox.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import Input from "@/components/ui/Input.vue";
 import Label from "@/components/ui/Label.vue";
-import Modal from "@/components/ui/Modal.vue";
 import Pagination from "@/components/ui/Pagination.vue";
 import Select from "@/components/ui/Select.vue";
+import Switch from "@/components/ui/Switch.vue";
 import { useConfirm } from "@/composables/useConfirm";
 import { useToast } from "@/composables/useToast";
 import {
@@ -43,9 +43,9 @@ const store = useProviderStore();
 const gateway = useGatewayStore();
 const { confirm } = useConfirm();
 const toast = useToast();
-/** 弹窗内错误（表单校验 / 保存失败） */
+/** 编辑器内错误（表单校验 / 保存失败） */
 const error = ref<string | null>(null);
-/** 列表操作错误（弹窗外展示） */
+/** 列表操作错误（编辑器外展示） */
 const listError = ref<string | null>(null);
 const editing = ref(false);
 
@@ -57,7 +57,6 @@ const pluginList = ref<PluginRecord[]>([]);
 const hookPlugins = computed(() =>
   pluginList.value.filter((p) => (p.category ?? "core") === "core"),
 );
-/** quota 类插件下拉（Provider 配额绑定的候选）。 */
 const quotaPluginOptions = computed(() => [
   { value: "", label: "不绑定" },
   ...pluginList.value
@@ -67,7 +66,7 @@ const quotaPluginOptions = computed(() => [
 /** 插件相对当前 provider 的三态：inherit=跟随全局 / on=启用 / off=禁用 */
 type TriState = "inherit" | "on" | "off";
 const pluginStates = reactive<Record<string, TriState>>({});
-/** 打开弹窗时已存在的 provider 维度 binding（用于保存时 diff 删除） */
+/** 打开编辑器时已存在的 provider 维度 binding（用于保存时 diff 删除） */
 const originalBindings = ref<Record<string, PluginBinding | undefined>>({});
 
 const TRI_OPTIONS = [
@@ -98,7 +97,6 @@ function emptyProvider(): Provider {
   };
 }
 
-/** 端点协议集合（去重，用于表格展示） */
 function endpointProtocols(p: Provider): string {
   return [...new Set(p.endpoints.map((e) => e.protocol))].join(" · ");
 }
@@ -179,7 +177,7 @@ watch(
   { flush: "sync" },
 );
 
-/** 用当前表单配置 dry-run 一次配额查询（不写库）。 */
+/** 用当前表单配置 dry-run 一次配额查询（不写入数据库）。 */
 async function runQuotaTest() {
   if (!normalizeQuotaConfig()) return;
   quotaTesting.value = true;
@@ -205,9 +203,10 @@ function removeEndpoint(i: number) {
 // ── 端点 ↔ 模型绑定：写入报价的 endpointProtocol，保存时统一 diff ──
 const allModels = ref<ModelDef[]>([]);
 const providerOffers = ref<Offer[]>([]);
-/** 打开弹窗时的报价快照，保存时对比出需要写入的绑定变更 */
+/** 打开编辑器时的报价快照，保存时对比出需要写入的绑定变更 */
 const originalOffers = ref<Offer[]>([]);
-const expandedEndpoint = ref<number | null>(null);
+/** 当前展开的协议绑定面板（绑定对象是协议组而非单个端点） */
+const expandedProtocol = ref<string | null>(null);
 const epModelQuery = ref("");
 const epModelPage = ref(1);
 /** 勾选面板每页行数：models.dev 全量导入后模型可达上万，避免一次渲染 */
@@ -227,11 +226,11 @@ const filteredEpModels = computed(() => {
     items: list.slice((epModelPage.value - 1) * EP_PAGE_SIZE, epModelPage.value * EP_PAGE_SIZE),
   };
 });
-watch([epModelQuery, expandedEndpoint], () => {
+watch([epModelQuery, expandedProtocol], () => {
   epModelPage.value = 1;
 });
-// 收起下拉只跟端点面板的展开态绑定：在搜索框里打字不能把下拉关掉
-watch(expandedEndpoint, () => {
+// 收起下拉只跟协议面板的展开态绑定：在搜索框里打字不能把下拉关掉
+watch(expandedProtocol, () => {
   epDropdownOpen.value = false;
 });
 watch(
@@ -241,17 +240,20 @@ watch(
   },
 );
 
-/** 当前展开端点协议下的已勾选模型集合（同协议端点共享） */
+/** 端点列表用到的协议集合（去重保序，模型绑定按协议组） */
+const endpointProtocolList = computed(() => [...new Set(form.endpoints.map((e) => e.protocol))]);
+
+/** 当前展开协议组下的已勾选模型集合（同协议端点共享） */
 const checkedModels = computed(() => {
-  const ep = expandedEndpoint.value != null ? form.endpoints[expandedEndpoint.value] : undefined;
-  return new Set(providerOffers.value.filter((o) => o.endpointProtocol === ep?.protocol).map((o) => o.modelSlug));
+  return new Set(
+    providerOffers.value.filter((o) => o.endpointProtocol === expandedProtocol.value).map((o) => o.modelSlug),
+  );
 });
 
 function boundCount(protocol: string): number {
   return providerOffers.value.filter((o) => o.endpointProtocol === protocol).length;
 }
 
-/** 当前展开端点协议下已勾选的模型 slug（按 slug 排序，供 chip 区展示）。 */
 const checkedModelSlugs = computed(() => [...checkedModels.value].sort((a, b) => a.localeCompare(b)));
 
 /** 下拉浮层：默认收起，仅聚焦/点击搜索框时展开；多选不自动收起。 */
@@ -267,7 +269,7 @@ function onEpDocPointerDown(e: MouseEvent) {
   if (!t?.closest("[data-ep-model-panel]")) closeEpDropdown();
 }
 
-/** 下拉期间拦截 Esc：捕获阶段先于 Modal 的关闭守卫，避免一次 Esc 同时收起下拉并弹丢弃确认。 */
+/** 下拉期间拦截 Esc：捕获阶段先收起下拉，避免误触发外层的返回/丢弃确认。 */
 function onEpKey(e: KeyboardEvent) {
   if (e.key !== "Escape" || !epDropdownOpen.value) return;
   closeEpDropdown();
@@ -297,11 +299,11 @@ function toggleEndpointModel(protocol: string, slug: string) {
   }
 }
 
-function toggleEndpointPanel(i: number) {
-  if (expandedEndpoint.value === i) {
-    expandedEndpoint.value = null;
+function toggleProtocolPanel(protocol: string) {
+  if (expandedProtocol.value === protocol) {
+    expandedProtocol.value = null;
   } else {
-    expandedEndpoint.value = i;
+    expandedProtocol.value = protocol;
     epModelQuery.value = "";
   }
 }
@@ -322,7 +324,7 @@ async function loadOfferBindings(providerKey: string) {
   originalOffers.value = list.map((o) => ({ ...o }));
 }
 
-/** 写入绑定 diff：仅保存 protocol 有变化的报价；新建 provider 时 form.key 已在前一步落库 */
+/** 写入绑定 diff：仅保存 protocol 有变化的报价；新建 provider 时 form.key 已在前一步写入数据库 */
 async function saveOfferChanges() {
   const orig = new Map(originalOffers.value.map((o) => [o.modelSlug, o]));
   for (const o of providerOffers.value) {
@@ -352,7 +354,7 @@ function resetPluginStates() {
   for (const p of hookPlugins.value) pluginStates[p.name] = "inherit";
 }
 
-// ── 未保存关闭守卫：弹窗打开并加载完绑定后拍快照，关闭时比对 ──
+// ── 未保存关闭确认：编辑器打开并加载完绑定后拍快照，离开时比对 ──
 const formSnapshot = ref("");
 
 function takeSnapshot() {
@@ -364,7 +366,6 @@ const dirty = computed(
     JSON.stringify({ f: form, o: providerOffers.value, p: pluginStates }) !== formSnapshot.value,
 );
 
-/** Modal guard：有未保存修改时先确认再关闭。 */
 async function closeGuard(): Promise<boolean> {
   if (!dirty.value) return true;
   return confirm({
@@ -375,7 +376,7 @@ async function closeGuard(): Promise<boolean> {
 }
 
 async function tryClose() {
-  if (await closeGuard()) closeModal();
+  if (await closeGuard()) closeEditor();
 }
 
 async function newProvider() {
@@ -385,7 +386,7 @@ async function newProvider() {
   quotaTestResult.value = null;
   error.value = null;
   editing.value = true;
-  expandedEndpoint.value = null;
+  expandedProtocol.value = null;
   providerOffers.value = [];
   originalOffers.value = [];
   void loadModelsOnce();
@@ -393,8 +394,7 @@ async function newProvider() {
   takeSnapshot();
 }
 
-/** 关闭弹窗并清除表单错误 */
-function closeModal() {
+function closeEditor() {
   editing.value = false;
   error.value = null;
 }
@@ -412,7 +412,7 @@ async function editProvider(p: Provider) {
   quotaTestResult.value = null;
   error.value = null;
   editing.value = true;
-  expandedEndpoint.value = null;
+  expandedProtocol.value = null;
   void loadModelsOnce();
   await loadOfferBindings(p.key);
   await loadPluginStates(p.key);
@@ -453,12 +453,11 @@ async function save() {
         bindingsChanged = true;
       }
     }
-    // binding 在网关启动时装配进门控表，变更后需重启生效
+    // binding 在网关启动时装配进绑定表，变更后需重启生效
     if (bindingsChanged) await gateway.restart();
-    // 端点勾选的模型绑定 diff 写入报价
     await saveOfferChanges();
     toast.success(`上游服务 “${form.key}” 已保存`);
-    closeModal();
+    closeEditor();
   } catch (e) {
     error.value = errMsg(e);
   }
@@ -481,7 +480,7 @@ onMounted(() => {
   void loadPluginList();
 });
 
-// keep-alive 下切回本页：第二次起静默重拉；弹窗编辑中不动，避免重置三态表
+// keep-alive 下切回本页：第二次起静默重拉；编辑器打开时不动，避免重置三态表
 let activated = false;
 onActivated(() => {
   document.addEventListener("pointerdown", onEpDocPointerDown);
@@ -493,7 +492,7 @@ onActivated(() => {
   activated = true;
 });
 
-// 视图被缓存后不再卸载：模型下拉的外部点击 / Esc 监听改在停用时摘除
+// 视图被缓存后不再卸载：模型下拉的外部点击 / Esc 监听改在停用时移除
 onDeactivated(() => {
   document.removeEventListener("pointerdown", onEpDocPointerDown);
   document.removeEventListener("keydown", onEpKey, true);
@@ -504,7 +503,6 @@ onUnmounted(() => {
   document.removeEventListener("keydown", onEpKey, true);
 });
 
-/** 插件全量列表：与 provider 列表互相独立，一次请求同时供弹窗与轮询复用。 */
 function loadPluginList() {
   return pluginApi
     .list()
@@ -520,247 +518,268 @@ function loadPluginList() {
   <div class="flex h-full min-h-0 flex-col">
     <Alert v-if="listError" class="shrink-0">{{ listError }}</Alert>
 
-    <!-- 编辑弹窗 -->
-    <Modal
-      :open="editing"
-      :title="form.createdAt ? '编辑上游服务' : '新建上游服务'"
-      :guard="closeGuard"
-      @close="closeModal"
-    >
-      <Alert v-if="error" class="mb-3 px-3">{{ error }}</Alert>
-      <div class="grid gap-4 grid-cols-[repeat(auto-fit,minmax(14rem,1fr))]">
-        <div class="space-y-1.5">
-          <Label for="p-key">唯一标识</Label>
-          <Input id="p-key" v-model="form.key" placeholder="如 deepseek" :disabled="!!form.createdAt" />
+    <!-- 编辑视图：满页切换（与插件编辑器同一惯例），列表↔编辑器淡出/淡入 -->
+    <Transition name="editor" mode="out-in">
+    <div v-if="editing" key="editor" class="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div class="flex shrink-0 items-center justify-between border-b px-5 py-3">
+        <div class="flex items-center gap-2">
+          <Button variant="ghost" size="icon" class="size-7" title="返回列表" @click="tryClose">
+            <ArrowLeft class="size-4" />
+          </Button>
+          <h3 class="card-title">{{ form.createdAt ? "编辑上游服务" : "新建上游服务" }}</h3>
+          <span v-if="form.key" class="truncate font-mono text-xs text-muted-foreground">
+            {{ form.key }}
+          </span>
         </div>
-        <div class="space-y-1.5">
-          <Label for="p-version">协议版本头</Label>
-          <Input id="p-version" v-model="form.version" placeholder="2023-06-01" />
-        </div>
-        <div class="flex items-center gap-2 col-span-full">
-          <Checkbox id="p-enabled" v-model:checked="form.enabled" />
-          <Label for="p-enabled">启用</Label>
+        <div class="flex items-center gap-3">
+          <label class="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Switch :checked="form.enabled" @update:checked="(v: boolean) => (form.enabled = v)" />
+            启用
+          </label>
+          <Button variant="ghost" size="sm" @click="tryClose">取消</Button>
+          <Button size="sm" @click="save">保存</Button>
         </div>
       </div>
 
-      <!-- 端点列表（协议绑定在端点上，按序故障转移） -->
-      <div class="mt-4 space-y-2">
-        <div class="flex items-center justify-between">
-          <Label>端点</Label>
-        </div>
-        <!-- 列头 -->
-        <div class="grid grid-cols-[8.5rem_minmax(0,1fr)_minmax(0,1fr)_2rem] items-center gap-2 text-xs text-muted-foreground">
-          <span>协议</span>
-          <span>Base URL</span>
-          <span>API Key</span>
-          <span />
-        </div>
-        <div
-          v-for="(ep, i) in form.endpoints"
-          :key="i"
-          class="grid grid-cols-[8.5rem_minmax(0,1fr)_minmax(0,1fr)_2rem] items-center gap-2"
-        >
-          <Select v-model="ep.protocol" :options="protocolOptions" />
-          <Input v-model="ep.baseUrl" placeholder="https://api.anthropic.com" />
-          <Input v-model="ep.apiKey" type="password" placeholder="sk-..." />
-          <Button variant="ghost" size="icon" class="size-8" @click="removeEndpoint(i)">
-            <Trash2 class="size-3.5 text-destructive" />
-          </Button>
-          <!-- 服务模型：写入报价的端点绑定；同协议端点共享同一组勾选 -->
-          <div class="col-span-4">
+      <div class="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
+        <div class="mx-auto w-full max-w-3xl px-5 py-4">
+          <Alert v-if="error" class="mb-4 px-3">{{ error }}</Alert>
+
+          <div class="grid gap-4 grid-cols-[repeat(auto-fit,minmax(14rem,1fr))]">
+            <div class="space-y-1.5">
+              <Label for="p-key">唯一标识</Label>
+              <Input id="p-key" v-model="form.key" placeholder="如 deepseek" :disabled="!!form.createdAt" />
+            </div>
+            <div class="space-y-1.5">
+              <Label for="p-version">协议版本头</Label>
+              <Input id="p-version" v-model="form.version" placeholder="2023-06-01" />
+            </div>
+          </div>
+
+          <!-- 端点：行序即故障转移顺序 -->
+          <div class="mt-6 border-t pt-4">
+            <div class="card-title">端点</div>
+            <div class="mt-3 grid grid-cols-[8.5rem_minmax(0,1fr)_minmax(0,1fr)_2rem] items-center gap-2 text-xs text-muted-foreground">
+              <span>协议</span>
+              <span>Base URL</span>
+              <span>API Key</span>
+              <span />
+            </div>
+            <div
+              v-for="(ep, i) in form.endpoints"
+              :key="i"
+              class="mt-2 grid grid-cols-[8.5rem_minmax(0,1fr)_minmax(0,1fr)_2rem] items-center gap-2"
+            >
+              <Select v-model="ep.protocol" :options="protocolOptions" />
+              <Input v-model="ep.baseUrl" placeholder="https://api.anthropic.com" />
+              <Input v-model="ep.apiKey" type="password" placeholder="sk-..." />
+              <Button variant="ghost" size="icon" class="size-8" @click="removeEndpoint(i)">
+                <Trash2 class="size-3.5 text-destructive" />
+              </Button>
+            </div>
+            <!-- 尾行：添加端点（与列表页新建入口同一惯例） -->
             <button
               type="button"
-              class="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
-              @click="toggleEndpointPanel(i)"
+              class="mt-2 flex w-full items-center gap-1.5 rounded-sm py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              @click="addEndpoint"
             >
-              <ChevronDown v-if="expandedEndpoint === i" class="size-3.5" />
-              <ChevronRight v-else class="size-3.5" />
-              可用模型（{{ boundCount(ep.protocol) }}）
+              <Plus class="size-3.5" /> 添加端点
             </button>
-            <div
-              v-if="expandedEndpoint === i"
-              data-ep-model-panel
-              class="mt-2 rounded-md border p-3"
-            >
-              <!-- 已选模型：chip 上的 × 复用勾选开关（取消该模型的协议绑定） -->
-              <div class="space-y-1.5">
-                <div class="text-xs text-muted-foreground">已选模型</div>
-                <div v-if="checkedModelSlugs.length === 0" class="text-xs text-muted-foreground">
-                  未选择模型
-                </div>
-                <div v-else class="flex flex-wrap gap-1.5">
-                  <span
-                    v-for="slug in checkedModelSlugs"
-                    :key="slug"
-                    class="inline-flex items-center gap-1 rounded-md border bg-muted/40 py-0.5 pl-2 pr-1 font-mono text-xs"
+
+            <!-- 模型绑定：绑定对象是协议组而非端点行——每个协议一条展开器 -->
+            <div class="mt-4 border-t border-dashed pt-3">
+              <div class="text-xs font-medium">模型绑定</div>
+              <div class="mt-2 space-y-1">
+                <div v-for="proto in endpointProtocolList" :key="proto">
+                  <button
+                    type="button"
+                    class="flex w-full items-center gap-1.5 py-1 text-xs transition-colors hover:text-foreground"
+                    @click="toggleProtocolPanel(proto)"
                   >
-                    {{ slug }}
-                    <button
-                      type="button"
-                      class="text-muted-foreground transition-colors hover:text-destructive"
-                      title="移除"
-                      @click="toggleEndpointModel(ep.protocol, slug)"
+                    <ChevronDown v-if="expandedProtocol === proto" class="size-3.5 shrink-0 text-muted-foreground" />
+                    <ChevronRight v-else class="size-3.5 shrink-0 text-muted-foreground" />
+                    <span class="font-mono">{{ proto }}</span>
+                    <span class="text-muted-foreground">
+                      {{ boundCount(proto) ? `已绑定 ${boundCount(proto)} 个模型` : "未绑定" }}
+                    </span>
+                  </button>
+                  <div
+                    v-if="expandedProtocol === proto"
+                    data-ep-model-panel
+                    class="mb-1 ml-5 space-y-3 pb-1"
+                  >
+                    <!-- 已选模型：chip 上的 × 复用勾选开关（取消该模型的协议绑定） -->
+                    <div class="space-y-1.5">
+                      <div v-if="checkedModelSlugs.length === 0" class="text-xs text-muted-foreground">
+                        未选择模型
+                      </div>
+                      <div v-else class="flex flex-wrap gap-1.5">
+                        <span
+                          v-for="slug in checkedModelSlugs"
+                          :key="slug"
+                          class="inline-flex items-center gap-1 rounded-md border bg-muted/40 py-0.5 pl-2 pr-1 font-mono text-xs"
+                        >
+                          {{ slug }}
+                          <button
+                            type="button"
+                            class="text-muted-foreground transition-colors hover:text-destructive"
+                            title="移除"
+                            @click="toggleEndpointModel(proto, slug)"
+                          >
+                            <X class="size-3" />
+                          </button>
+                        </span>
+                      </div>
+                    </div>
+
+                    <!-- 候选列表默认收起：聚焦/点击搜索框才展开 -->
+                    <div v-if="allModels.length > 0" class="relative">
+                      <Search class="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                      <Input
+                        v-model="epModelQuery"
+                        placeholder="搜索模型…"
+                        class="pl-8"
+                        @focus="epDropdownOpen = true"
+                        @click="epDropdownOpen = true"
+                      />
+                    </div>
+                    <div
+                      v-if="allModels.length === 0"
+                      class="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground"
                     >
-                      <X class="size-3" />
-                    </button>
+                      暂无模型定义，请先到「模型」页创建。
+                    </div>
+                    <div
+                      v-else-if="epDropdownOpen"
+                      class="scrollbar-thin max-h-48 space-y-1 overflow-y-auto rounded-md border bg-popover p-2 shadow-md"
+                    >
+                      <label
+                        v-for="m in filteredEpModels.items"
+                        :key="m.slug"
+                        class="flex cursor-pointer items-center gap-2 py-0.5 text-sm"
+                      >
+                        <Checkbox
+                          :checked="checkedModels.has(m.slug)"
+                          @update:checked="toggleEndpointModel(proto, m.slug)"
+                        />
+                        <span class="font-mono text-xs">{{ m.slug }}</span>
+                        <span v-if="m.displayName" class="text-xs text-muted-foreground">{{ m.displayName }}</span>
+                      </label>
+                      <div
+                        v-if="filteredEpModels.total > EP_PAGE_SIZE"
+                        class="border-t pt-2"
+                      >
+                        <Pagination
+                          v-model:page="epModelPage"
+                          :page-count="filteredEpModels.pageCount"
+                          :total="filteredEpModels.total"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 配额查询绑定：脚本在配额插件里，这里只选插件与间隔；配置按插件 config_schema -->
+          <div class="mt-6 border-t pt-4">
+            <div class="card-title">配额查询</div>
+            <div class="mt-3 grid gap-4 grid-cols-[repeat(auto-fit,minmax(14rem,1fr))]">
+              <div class="space-y-1.5">
+                <Label for="p-quota-plugin">配额插件</Label>
+                <Select
+                  id="p-quota-plugin"
+                  v-model="form.quotaPluginRef"
+                  :options="quotaPluginOptions"
+                  placeholder="不绑定"
+                />
+              </div>
+              <div class="space-y-1.5">
+                <Label for="p-quota-interval">查询间隔（秒）</Label>
+                <Input id="p-quota-interval" v-model="form.quotaIntervalSecs" type="number" min="0" />
+              </div>
+              <div class="flex items-center gap-2 pt-6">
+                <Checkbox id="p-quota-enabled" v-model:checked="form.quotaEnabled" />
+                <Label for="p-quota-enabled">启用定时查询</Label>
+              </div>
+            </div>
+            <template v-if="form.quotaPluginRef">
+              <!-- 实例配置：由插件 MB.config_schema 驱动；无 schema = 无需配置 -->
+              <div v-if="quotaSchemaFields.length" class="mt-3 grid gap-4 grid-cols-[repeat(auto-fit,minmax(14rem,1fr))]">
+                <div v-for="f in quotaSchemaFields" :key="f.name" class="space-y-1.5">
+                  <Label :for="'p-quota-cfg-' + f.name">{{ f.label }}</Label>
+                  <Input
+                    :id="'p-quota-cfg-' + f.name"
+                    v-model="(form.quotaConfig as Record<string, string | number>)[f.name]"
+                    :type="f.secret ? 'password' : f.type === 'number' ? 'number' : 'text'"
+                    :placeholder="f.default !== undefined ? String(f.default) : ''"
+                    autocomplete="off"
+                  />
+                  <p v-if="f.help" class="text-xs text-muted-foreground">{{ f.help }}</p>
+                </div>
+              </div>
+              <p v-else class="mt-3 text-xs text-muted-foreground">该插件未声明实例配置项。</p>
+              <p v-if="quotaSchemaFields.length" class="mt-1.5 text-xs text-muted-foreground">
+                实例配置整体加密写入数据库。
+              </p>
+
+              <!-- 测试查询：dry-run 当前表单配置，不写入数据库 -->
+              <div class="mt-3 flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  :disabled="quotaTesting"
+                  title="试跑当前表单配置，不写入数据库"
+                  @click="runQuotaTest"
+                >
+                  <RefreshCw class="size-3.5" :class="quotaTesting ? 'animate-spin' : ''" />
+                  {{ quotaTesting ? "查询中…" : "测试查询" }}
+                </Button>
+              </div>
+              <div v-if="quotaTestResult" class="mt-2 space-y-1.5">
+                <div v-for="r in quotaTestResult" :key="r.keyIndex" class="flex items-center gap-2 text-xs">
+                  <Badge v-if="r.keyLabel" variant="secondary" class="max-w-[10rem] truncate font-mono">
+                    {{ r.keyLabel }}
+                  </Badge>
+                  <Badge :variant="r.status === 'ok' ? 'success' : 'destructive'">
+                    {{ r.status === "ok" ? "成功" : "失败" }}
+                  </Badge>
+                  <span v-if="r.status === 'error'" class="text-destructive">{{ r.error || r.payload?.message }}</span>
+                  <span v-else-if="r.payload?.summary" class="text-muted-foreground">{{ r.payload.summary }}</span>
+                  <span v-else-if="r.payload?.quotas?.length" class="text-muted-foreground">
+                    {{ r.payload.quotas.map((q) => q.label).join("、") }}
                   </span>
                 </div>
               </div>
+            </template>
+          </div>
 
-              <!-- 候选列表默认收起：聚焦/点击搜索框才展开 -->
-              <div v-if="allModels.length > 0" class="relative mt-3">
-                <Search class="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  v-model="epModelQuery"
-                  placeholder="搜索模型…"
-                  class="pl-8"
-                  @focus="epDropdownOpen = true"
-                  @click="epDropdownOpen = true"
-                />
-              </div>
+          <!-- 插件三态开关（仅请求链路插件；配额插件在上方单独绑定） -->
+          <div v-if="hookPlugins.length > 0" class="mt-6 border-t pt-4">
+            <div class="card-title">插件</div>
+            <div class="mt-3 space-y-1.5">
               <div
-                v-if="allModels.length === 0"
-                class="mt-3 rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground"
+                v-for="p in hookPlugins"
+                :key="p.name"
+                class="flex items-center justify-between gap-4"
               >
-                暂无模型定义，请先到「模型」页创建。
-              </div>
-              <div
-                v-else-if="epDropdownOpen"
-                class="scrollbar-thin mt-2 max-h-48 space-y-1 overflow-y-auto rounded-md border bg-popover p-2 shadow-md"
-              >
-                <label
-                  v-for="m in filteredEpModels.items"
-                  :key="m.slug"
-                  class="flex cursor-pointer items-center gap-2 py-0.5 text-sm"
-                >
-                  <Checkbox
-                    :checked="checkedModels.has(m.slug)"
-                    @update:checked="toggleEndpointModel(ep.protocol, m.slug)"
-                  />
-                  <span class="font-mono text-xs">{{ m.slug }}</span>
-                  <span v-if="m.displayName" class="text-xs text-muted-foreground">{{ m.displayName }}</span>
-                </label>
-                <div
-                  v-if="filteredEpModels.total > EP_PAGE_SIZE"
-                  class="border-t pt-2"
-                >
-                  <Pagination
-                    v-model:page="epModelPage"
-                    :page-count="filteredEpModels.pageCount"
-                    :total="filteredEpModels.total"
-                  />
+                <span class="min-w-0 truncate font-mono text-xs text-muted-foreground">
+                  {{ p.name }}
+                  <span v-if="!p.enabled" class="text-amber-600 dark:text-amber-400">已全局停用</span>
+                </span>
+                <div class="w-32 shrink-0">
+                  <Select v-model="pluginStates[p.name]" :options="TRI_OPTIONS" small />
                 </div>
               </div>
             </div>
           </div>
         </div>
-        <Button variant="outline" size="sm" @click="addEndpoint">
-          <Plus class="size-4" /> 添加端点
-        </Button>
       </div>
-
-      <!-- 配额查询绑定：脚本在配额插件里，这里只选插件与间隔；配置按插件 config_schema -->
-      <div class="mt-4 border-t pt-4">
-        <Label>配额查询</Label>
-        <div class="mt-2 grid gap-4 grid-cols-[repeat(auto-fit,minmax(14rem,1fr))]">
-          <div class="space-y-1.5">
-            <Label for="p-quota-plugin">配额插件</Label>
-            <Select
-              id="p-quota-plugin"
-              v-model="form.quotaPluginRef"
-              :options="quotaPluginOptions"
-              placeholder="不绑定"
-            />
-          </div>
-          <div class="space-y-1.5">
-            <Label for="p-quota-interval">查询间隔（秒）</Label>
-            <Input id="p-quota-interval" v-model="form.quotaIntervalSecs" type="number" min="0" />
-          </div>
-          <div class="flex items-center gap-2 pt-6">
-            <Checkbox id="p-quota-enabled" v-model:checked="form.quotaEnabled" />
-            <Label for="p-quota-enabled">启用定时查询</Label>
-          </div>
-        </div>
-        <p class="mt-1.5 text-xs text-muted-foreground">
-          对每个端点 Key 各执行一次插件的 MB.query；间隔 0 = 仅手动刷新。
-        </p>
-
-        <template v-if="form.quotaPluginRef">
-          <!-- 实例配置：由插件 MB.config_schema 驱动；无 schema = 无需配置 -->
-          <div v-if="quotaSchemaFields.length" class="mt-3 grid gap-4 grid-cols-[repeat(auto-fit,minmax(14rem,1fr))]">
-            <div v-for="f in quotaSchemaFields" :key="f.name" class="space-y-1.5">
-              <Label :for="'p-quota-cfg-' + f.name">{{ f.label }}</Label>
-              <Input
-                :id="'p-quota-cfg-' + f.name"
-                v-model="(form.quotaConfig as Record<string, string | number>)[f.name]"
-                :type="f.secret ? 'password' : f.type === 'number' ? 'number' : 'text'"
-                :placeholder="f.default !== undefined ? String(f.default) : ''"
-                autocomplete="off"
-              />
-              <p v-if="f.help" class="text-xs text-muted-foreground">{{ f.help }}</p>
-            </div>
-          </div>
-          <p v-else class="mt-3 text-xs text-muted-foreground">该插件未声明实例配置项。</p>
-          <p v-if="quotaSchemaFields.length" class="mt-1.5 text-xs text-muted-foreground">
-            实例配置整体加密落库。
-          </p>
-
-          <!-- 测试查询：dry-run 当前表单配置，不写库 -->
-          <div class="mt-3 flex items-center gap-2">
-            <Button variant="outline" size="sm" :disabled="quotaTesting" @click="runQuotaTest">
-              <RefreshCw class="size-3.5" :class="quotaTesting ? 'animate-spin' : ''" />
-              {{ quotaTesting ? "查询中…" : "测试查询" }}
-            </Button>
-            <span class="text-xs text-muted-foreground">用当前表单配置试跑一次，不影响线上结果</span>
-          </div>
-          <div v-if="quotaTestResult" class="mt-2 space-y-1.5">
-            <div v-for="r in quotaTestResult" :key="r.keyIndex" class="flex items-center gap-2 text-xs">
-              <Badge v-if="r.keyLabel" variant="secondary" class="max-w-[10rem] truncate font-mono">
-                {{ r.keyLabel }}
-              </Badge>
-              <Badge :variant="r.status === 'ok' ? 'success' : 'destructive'">
-                {{ r.status === "ok" ? "成功" : "失败" }}
-              </Badge>
-              <span v-if="r.status === 'error'" class="text-destructive">{{ r.error || r.payload?.message }}</span>
-              <span v-else-if="r.payload?.summary" class="text-muted-foreground">{{ r.payload.summary }}</span>
-              <span v-else-if="r.payload?.quotas?.length" class="text-muted-foreground">
-                {{ r.payload.quotas.map((q) => q.label).join("、") }}
-              </span>
-            </div>
-          </div>
-        </template>
-      </div>
-
-      <!-- 插件三态开关（仅请求链路插件；配额插件在上方单独绑定） -->
-      <div v-if="hookPlugins.length > 0" class="mt-4 border-t pt-4">
-        <div class="flex items-center justify-between">
-          <Label>插件</Label>
-        </div>
-        <div class="mt-2 space-y-1.5">
-          <div
-            v-for="p in hookPlugins"
-            :key="p.name"
-            class="flex items-center justify-between gap-4"
-          >
-            <span class="min-w-0 truncate font-mono text-xs text-muted-foreground">
-              {{ p.name }}
-              <span v-if="!p.enabled" class="text-amber-600 dark:text-amber-400">已全局停用</span>
-            </span>
-            <div class="w-32 shrink-0">
-              <Select v-model="pluginStates[p.name]" :options="TRI_OPTIONS" small />
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <template #footer>
-        <Button variant="ghost" size="sm" @click="tryClose">取消</Button>
-        <Button size="sm" @click="save">保存</Button>
-      </template>
-    </Modal>
+    </div>
 
     <!-- 上游服务：满版面板（直接铺进 main，不套卡片外壳） -->
-    <div class="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <div v-else key="list" class="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div class="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">
         <EmptyState v-if="store.loading && store.providers.length === 0">加载中…</EmptyState>
         <EmptyState v-else-if="store.providers.length === 0" :icon="Server">
@@ -819,5 +838,6 @@ function loadPluginList() {
         </table>
       </div>
     </div>
+    </Transition>
   </div>
 </template>

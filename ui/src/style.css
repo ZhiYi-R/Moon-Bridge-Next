@@ -79,7 +79,7 @@
 /* 细滚动条，贴合桌面工具观感 */
 @layer utilities {
   .scrollbar-thin {
-    /* Firefox：webkit 伪元素不生效，用标准属性兜底 */
+    /* Firefox：webkit 伪元素不生效，走标准属性 */
     scrollbar-width: thin;
     scrollbar-color: hsl(var(--muted-foreground) / 0.3) transparent;
   }
@@ -94,7 +94,7 @@
     background: transparent;
   }
 
-  /* 毛玻璃：只用于悬浮层（下拉浮层/Toast）。默认近实底兜底；
+  /* 毛玻璃：只用于悬浮层（下拉浮层/Toast）。不支持 backdrop-filter 时保持近实底；
      支持 backdrop-filter 时降为半透明加模糊，模糊半径取中段值避免「隐私屏」观感。
      大面积区域不使用（GPU 开销），sticky 表头维持实底（既有否决结论）。 */
   .glass {
@@ -189,4 +189,22 @@
       opacity var(--dur-micro) var(--ease-out);
     pointer-events: none;
   }
+}
+
+/* 列表 ↔ 编辑器整页互换：旧页快速淡出，新页淡入并轻微上浮
+   （PluginsView / ProvidersView 共用，须全局生效不能 scoped） */
+.editor-enter-active {
+  transition:
+    opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
+}
+.editor-leave-active {
+  transition: opacity calc(var(--dur-base) * 0.6) var(--ease-in);
+}
+.editor-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+.editor-leave-to {
+  opacity: 0;
 }
