@@ -8,6 +8,8 @@
 mod commands;
 mod config;
 pub mod headless;
+mod auth_plugins;
+mod presets;
 mod state;
 mod tray;
 
@@ -123,6 +125,7 @@ pub fn run() {
             commands::gateway::gateway_status,
             // Provider
             commands::provider::provider_list,
+            commands::provider::preset_list,
             commands::provider::provider_get,
             commands::provider::provider_save,
             commands::provider::provider_delete,
@@ -137,6 +140,13 @@ pub fn run() {
             // 模型目录（models.dev 拉取 + 导入）
             commands::catalog::catalog_fetch,
             commands::catalog::catalog_import,
+            commands::catalog::provider_detect_models,
+            // OAuth 账户登录（通用编排，平台细节在 CAP_AUTH 插件）
+            commands::oauth::oauth_describe,
+            commands::oauth::oauth_begin,
+            commands::oauth::oauth_status,
+            commands::oauth::oauth_cancel,
+            commands::oauth::oauth_paste,
             // Route
             commands::route::route_list,
             commands::route::route_get,

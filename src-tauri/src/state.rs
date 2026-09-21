@@ -4,6 +4,7 @@
 //! oneshot 优雅关闭信号驱动，实现「启动 / 停止 / 查询状态」。
 
 use std::sync::{Arc, Mutex, RwLock};
+use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use moonbridge_store::Database;
@@ -47,6 +48,44 @@ pub struct ManagedState {
     /// 恰好抹掉胜者刚存的句柄 ⇒ 网关在跑却停不掉、status 显示未运行、
     /// 再启动必报「地址被占用」。start/stop 全程持此锁即消除该 TOCTOU。
     lifecycle: tokio::sync::Mutex<()>,
+    /// 进行中的 OAuth 登录流程（flowId → 句柄；见 `commands::oauth`）。
+    pub oauth_flows: Mutex<HashMap<String, OAuthFlow>>,
+    /// models.dev 目录缓存（4.5MB JSON 的解析结果；TTL 见 `commands::catalog`）。
+    pub catalog_cache: Mutex<Option<CatalogCacheEntry>>,
+    /// models.dev 拉取单飞锁（并发目录页/检测只走一次网络；tokio Mutex 可跨 await）。
+    pub catalog_lock: tokio::sync::Mutex<()>,
+}
+
+/// OAuth 登录流程状态（前端轮询；camelCase DTO）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OAuthFlowStatus {
+    /// pending / done / error / cancelled
+    pub state: String,
+    /// 进度提示或错误原因（粘贴无效时的提示也走这里，state 保持 pending）。
+    pub message: Option<String>,
+    /// done 时的 provider key。
+    pub provider_key: Option<String>,
+}
+
+impl OAuthFlowStatus {
+    pub fn pending() -> Self {
+        Self { state: "pending".to_string(), message: None, provider_key: None }
+    }
+}
+
+/// OAuth 登录流程句柄：状态共享给 status 轮询；abort/paste 控制后台任务。
+/// 从注册表移除（cancel）即触发中止：sender Drop 使后台 select 的取消分支生效。
+pub struct OAuthFlow {
+    pub status: Arc<Mutex<OAuthFlowStatus>>,
+    pub abort: tokio::sync::oneshot::Sender<()>,
+    pub paste: tokio::sync::mpsc::UnboundedSender<String>,
+}
+
+/// models.dev 目录缓存条目（Arc 共享避免克隆大 JSON）。
+pub struct CatalogCacheEntry {
+    pub fetched_at: std::time::Instant,
+    pub root: Arc<serde_json::Value>,
 }
 
 impl ManagedState {
@@ -55,6 +94,9 @@ impl ManagedState {
         paths.ensure_dirs().context("初始化应用目录失败")?;
         let db = Database::open(&paths.db_path)
             .with_context(|| format!("打开数据库失败: {}", paths.db_path.display()))?;
+        let db = Arc::new(db);
+        // 内置认证插件种子（幂等，不覆盖用户修改）
+        crate::auth_plugins::seed_auth_plugins(&db);
         let config = AppConfig::load_or_default(&paths.config_file).unwrap_or_else(|e| {
             tracing::warn!(error = %e, "引导配置加载失败，使用默认配置");
             AppConfig::default()
@@ -68,12 +110,15 @@ impl ManagedState {
             config.gateway.plugins_dir = Some(paths.plugins_dir.to_string_lossy().to_string());
         }
         Ok(Arc::new(Self {
-            db: Arc::new(db),
+            db,
             paths,
             config: RwLock::new(config),
             gateway: Mutex::new(None),
             last_error: Mutex::new(None),
             lifecycle: tokio::sync::Mutex::new(()),
+            oauth_flows: Mutex::new(HashMap::new()),
+            catalog_cache: Mutex::new(None),
+            catalog_lock: tokio::sync::Mutex::new(()),
         }))
     }
 
