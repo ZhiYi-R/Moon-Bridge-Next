@@ -17,6 +17,9 @@ pub const CAP_RAW_REQUEST: &str = "raw_request";
 pub const CAP_RAW_RESPONSE: &str = "raw_response";
 /// 能力：流式 SSE chunk 报文钩子（高频，未声明则完全跳过）。
 pub const CAP_RAW_STREAM: &str = "raw_stream";
+/// 能力：认证钩子（auth_describe/auth_begin/auth_poll/auth_refresh/auth_headers）。
+/// provider 作用域绑定生效；不进入报文链路，由宿主按 provider 解析后显式调用。
+pub const CAP_AUTH: &str = "auth";
 
 /// 插件清单。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +41,10 @@ pub struct Manifest {
     /// 入口提示（可选）。
     #[serde(default)]
     pub entry: Option<String>,
+    /// `mb.fs.read` 可读路径白名单（home 相对，`~` 开头；精确匹配，不支持通配）。
+    /// 未声明即完全禁止插件读文件。
+    #[serde(default)]
+    pub fs_read_allow: Vec<String>,
 }
 
 fn default_version() -> String {

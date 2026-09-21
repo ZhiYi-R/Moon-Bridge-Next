@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn migrates_and_reports_version() {
         let db = Database::open_in_memory().unwrap();
-        assert_eq!(db.version().unwrap(), 13);
+        assert_eq!(db.version().unwrap(), 14);
         assert_eq!(db.enc.scheme(), "plaintext");
         assert_eq!(db.enc.encrypt("memory-secret").unwrap(), "memory-secret");
         let state: (String, String) = db
@@ -349,6 +349,28 @@ mod tests {
         db.delete_provider("deepseek").unwrap();
         assert!(db.get_provider("deepseek").unwrap().is_none());
         assert!(db.list_endpoints("deepseek").unwrap().is_empty());
+    }
+
+    /// 删除 provider 级联清理 secrets 表中 `provider:{key}` 作用域的令牌包。
+    #[test]
+    fn delete_provider_cascades_secrets() {
+        let db = Database::open_in_memory().unwrap();
+        db.secret_set("provider:k", "oauth", "bundle-json").unwrap();
+        db.secret_set("plugin:auth-kimi", "device_id", "d1")
+            .unwrap();
+        db.delete_provider("k").unwrap();
+        assert_eq!(
+            db.secret_get("provider:k", "oauth").unwrap(),
+            None,
+            "令牌包随账户删除销毁"
+        );
+        assert_eq!(
+            db.secret_get("plugin:auth-kimi", "device_id")
+                .unwrap()
+                .as_deref(),
+            Some("d1"),
+            "其它作用域不受影响"
+        );
     }
 
     #[test]
