@@ -92,7 +92,8 @@ mod tests {
         let db = enc_db();
         assert_eq!(db.secret_get("provider:a", "oauth").unwrap(), None);
         db.secret_set("provider:a", "oauth", "token-1").unwrap();
-        db.secret_set("plugin:auth-kimi", "device_id", "dev-1").unwrap();
+        db.secret_set("plugin:auth-kimi", "device_id", "dev-1")
+            .unwrap();
         assert_eq!(
             db.secret_get("provider:a", "oauth").unwrap().as_deref(),
             Some("token-1")
@@ -110,7 +111,9 @@ mod tests {
         db.secret_delete("provider:a", "oauth").unwrap();
         assert_eq!(db.secret_get("provider:a", "oauth").unwrap(), None);
         assert_eq!(
-            db.secret_get("plugin:auth-kimi", "device_id").unwrap().as_deref(),
+            db.secret_get("plugin:auth-kimi", "device_id")
+                .unwrap()
+                .as_deref(),
             Some("dev-1")
         );
         // 落库的是密文不是明文

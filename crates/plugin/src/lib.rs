@@ -917,7 +917,11 @@ mod tests {
         )
         .unwrap();
         let v = rt.call_mb_once("probe", &json!({})).await.unwrap();
-        assert_eq!(v["state"].as_str().unwrap().len(), 32, "state 为 16 字节 hex");
+        assert_eq!(
+            v["state"].as_str().unwrap().len(),
+            32,
+            "state 为 16 字节 hex"
+        );
         assert_eq!(v["state"], "abababababababababababababababab");
         assert_eq!(v["back"], v["state"]);
         // scope 强制冠以插件名：宿主侧看到的是 kimi-auth/meta
@@ -961,7 +965,10 @@ mod tests {
         // 白名单外 / 越界：在校验层拒绝，到不了桥
         let err = rt.call_mb_once("read_evil", &json!({})).await.unwrap_err();
         assert!(err.to_string().contains("白名单"), "{err}");
-        let err = rt.call_mb_once("read_escape", &json!({})).await.unwrap_err();
+        let err = rt
+            .call_mb_once("read_escape", &json!({}))
+            .await
+            .unwrap_err();
         assert!(
             err.to_string().contains("home 相对") || err.to_string().contains("白名单"),
             "{err}"
@@ -979,7 +986,8 @@ mod tests {
                 &format!(
                     r#"MB = {{ name = "{name}", capabilities = {{ "auth" }} }}
                     function MB.auth_headers(ctx, b) return {{}} end"#,
-            ));
+                ),
+            );
             rt.enabled = false;
             Arc::new(rt)
         };
@@ -1018,4 +1026,4 @@ mod tests {
             "全局启用的 auth 插件无绑定不得命中"
         );
     }
- }
+}

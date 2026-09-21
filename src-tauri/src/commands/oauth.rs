@@ -12,8 +12,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use moonbridge_gateway::oauth::{self, CallbackRegistry};
 use moonbridge_gateway::bridge::GatewayBridge;
+use moonbridge_gateway::oauth::{self, CallbackRegistry};
 use moonbridge_plugin::{LuaRuntime, SandboxLimits};
 use moonbridge_protocol::builtin_registry;
 use moonbridge_store::{Database, Endpoint, PluginBinding, Provider};
@@ -567,7 +567,10 @@ mod tests {
         assert!(!p.extra.to_string().contains("tok-done"));
         let raw = st
             .db
-            .secret_get(&oauth::provider_scope("command-code-auth"), oauth::BUNDLE_KEY)
+            .secret_get(
+                &oauth::provider_scope("command-code-auth"),
+                oauth::BUNDLE_KEY,
+            )
             .unwrap()
             .unwrap();
         assert!(raw.contains("tok-done"));

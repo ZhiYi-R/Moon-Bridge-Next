@@ -237,6 +237,11 @@ mod tests {
         ));
         std::fs::write(&outside, "{}").unwrap();
         let err = resolve_within(&root, &outside.to_string_lossy()).unwrap_err();
+        // Windows 上带盘符的绝对路径在路径解析早期即判越界（400）；Unix 上则是
+        // 「拼进 root 后不存在」（404）。两者都是正确的 4xx 拒绝，按平台断言。
+        #[cfg(windows)]
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        #[cfg(not(windows))]
         assert_eq!(err.status, StatusCode::NOT_FOUND);
         assert!(outside.exists(), "不得触及根之外的文件");
         let _ = std::fs::remove_file(&outside);

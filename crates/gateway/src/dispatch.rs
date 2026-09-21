@@ -320,83 +320,83 @@ pub async fn handle_request(
         'send: loop {
             let send_res = send_with_timeout(&state, &u, core_req.stream).await;
             match send_res {
-            Ok(r) => {
-                let status = r.status();
-                // 401 且绑定 auth 插件：强制刷新认证头并重发本端点（每请求至多
-                // 一次，不消耗故障转移名额）；刷新失败则保留原 401 走常规路径
-                if status.as_u16() == 401 && !auth_refreshed_on_401 {
-                    if let Some(rt) = &auth_rt {
-                        auth_refreshed_on_401 = true;
-                        match crate::oauth::force_refresh_headers(
-                            &state,
-                            rt,
-                            &resolved.provider_key,
-                        )
-                        .await
-                        {
-                            Ok(fresh) => {
-                                let _ = read_body_capped(r, state.config.max_body_bytes).await;
-                                crate::oauth::merge_headers(&mut u.headers, &fresh);
-                                tracing::info!(
-                                    provider = %resolved.provider_key,
-                                    "上游 401，认证已强制刷新并重发本端点"
-                                );
-                                continue 'send;
-                            }
-                            Err(e2) => {
-                                tracing::warn!(
-                                    provider = %resolved.provider_key,
-                                    error = %e2,
-                                    "401 后强制刷新认证失败，按原 401 失败处理"
-                                );
+                Ok(r) => {
+                    let status = r.status();
+                    // 401 且绑定 auth 插件：强制刷新认证头并重发本端点（每请求至多
+                    // 一次，不消耗故障转移名额）；刷新失败则保留原 401 走常规路径
+                    if status.as_u16() == 401 && !auth_refreshed_on_401 {
+                        if let Some(rt) = &auth_rt {
+                            auth_refreshed_on_401 = true;
+                            match crate::oauth::force_refresh_headers(
+                                &state,
+                                rt,
+                                &resolved.provider_key,
+                            )
+                            .await
+                            {
+                                Ok(fresh) => {
+                                    let _ = read_body_capped(r, state.config.max_body_bytes).await;
+                                    crate::oauth::merge_headers(&mut u.headers, &fresh);
+                                    tracing::info!(
+                                        provider = %resolved.provider_key,
+                                        "上游 401，认证已强制刷新并重发本端点"
+                                    );
+                                    continue 'send;
+                                }
+                                Err(e2) => {
+                                    tracing::warn!(
+                                        provider = %resolved.provider_key,
+                                        error = %e2,
+                                        "401 后强制刷新认证失败，按原 401 失败处理"
+                                    );
+                                }
                             }
                         }
                     }
+                    let retryable = status.as_u16() == 429 || status.is_server_error();
+                    if retryable && attempt + 1 < total {
+                        // 排空响应体（有界）：连接可复用且异常上游的大 body 不会拖垮内存
+                        let _ = read_body_capped(r, state.config.max_body_bytes).await;
+                        tracing::warn!(
+                            provider = %resolved.provider_key,
+                            endpoint = %ep.base_url,
+                            status = status.as_u16(),
+                            "端点失败，故障转移到下一端点"
+                        );
+                        continue 'ep;
+                    }
+                    up = Some(u);
+                    resp = Some(r);
+                    used_protocol = ep.protocol;
+                    // 必须跳出外层端点循环：只出内层重发循环会继续下一端点
+                    // （隐性故障转移，401 语义被吃）
+                    break 'ep;
                 }
-                let retryable = status.as_u16() == 429 || status.is_server_error();
-                if retryable && attempt + 1 < total {
-                    // 排空响应体（有界）：连接可复用且异常上游的大 body 不会拖垮内存
-                    let _ = read_body_capped(r, state.config.max_body_bytes).await;
-                    tracing::warn!(
-                        provider = %resolved.provider_key,
-                        endpoint = %ep.base_url,
-                        status = status.as_u16(),
-                        "端点失败，故障转移到下一端点"
+                Err(e) => {
+                    if attempt + 1 < total {
+                        tracing::warn!(
+                            provider = %resolved.provider_key,
+                            endpoint = %ep.base_url,
+                            error = %e,
+                            "端点请求失败，故障转移到下一端点"
+                        );
+                        continue 'ep;
+                    }
+                    // 末位端点传输失败：整条链在没有任何上游响应的情况下终结——
+                    // 仍须落 usage + trace，否则失败请求对用量/Traces 完全不可见。
+                    let t = new_trace(
+                        &ctx,
+                        client_request_snapshot.clone(),
+                        core_req.stream,
+                        resolved.upstream_model.clone(),
+                        resolved.provider_key.clone(),
+                        Some(ep.protocol),
+                        upstream_request_snapshot(&u),
                     );
-                    continue 'ep;
+                    return Err(fail_audit(&state, &ctx, start, t, e));
                 }
-                up = Some(u);
-                resp = Some(r);
-                used_protocol = ep.protocol;
-                // 必须跳出外层端点循环：只出内层重发循环会继续下一端点
-                // （隐性故障转移，401 语义被吃）
-                break 'ep;
-            }
-            Err(e) => {
-                if attempt + 1 < total {
-                    tracing::warn!(
-                        provider = %resolved.provider_key,
-                        endpoint = %ep.base_url,
-                        error = %e,
-                        "端点请求失败，故障转移到下一端点"
-                    );
-                    continue 'ep;
-                }
-                // 末位端点传输失败：整条链在没有任何上游响应的情况下终结——
-                // 仍须落 usage + trace，否则失败请求对用量/Traces 完全不可见。
-                let t = new_trace(
-                    &ctx,
-                    client_request_snapshot.clone(),
-                    core_req.stream,
-                    resolved.upstream_model.clone(),
-                    resolved.provider_key.clone(),
-                    Some(ep.protocol),
-                    upstream_request_snapshot(&u),
-                );
-                return Err(fail_audit(&state, &ctx, start, t, e));
             }
         }
-    }
     }
     // 路由器保证 endpoints 非空，循环必以成功或提前 return 结束
     let up = up.expect("endpoints 非空");

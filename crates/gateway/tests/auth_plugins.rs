@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{Json, Router};
-use moonbridge_gateway::oauth::CallbackRegistry;
 use moonbridge_gateway::bridge::GatewayBridge;
+use moonbridge_gateway::oauth::CallbackRegistry;
 use moonbridge_plugin::{HostBridge, LuaRuntime, SessionStore};
 use moonbridge_protocol::builtin_registry;
 use moonbridge_store::Database;

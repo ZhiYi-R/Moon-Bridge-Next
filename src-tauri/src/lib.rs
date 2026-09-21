@@ -5,10 +5,10 @@
 //!
 //! 依赖方向：app → gateway, store, core（不反向）。
 
+mod auth_plugins;
 mod commands;
 mod config;
 pub mod headless;
-mod auth_plugins;
 mod presets;
 mod state;
 mod tray;

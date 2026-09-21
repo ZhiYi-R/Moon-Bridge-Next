@@ -7,7 +7,10 @@
 
 use std::sync::Arc;
 
-use base64::{engine::general_purpose::STANDARD as B64, engine::general_purpose::URL_SAFE_NO_PAD as B64URL, Engine as _};
+use base64::{
+    engine::general_purpose::STANDARD as B64, engine::general_purpose::URL_SAFE_NO_PAD as B64URL,
+    Engine as _,
+};
 use hmac::{Hmac, Mac};
 use mlua::{HookTriggers, Lua, LuaSerdeExt, Thread, Value as LuaValue, VmState};
 use serde_json::Value;
@@ -75,7 +78,15 @@ fn hex(bytes: &[u8]) -> String {
 /// 已确认 `plugins/**`、余额模板与 crate 内测试均不使用这些名字；LSP 桩
 /// （`plugins/moonbridge.lua`）本就声明「沙箱中 os/io/loadfile/dofile 不可用」。
 const DANGEROUS_GLOBALS: [&str; 9] = [
-    "os", "io", "loadfile", "dofile", "require", "package", "debug", "load", "loadstring",
+    "os",
+    "io",
+    "loadfile",
+    "dofile",
+    "require",
+    "package",
+    "debug",
+    "load",
+    "loadstring",
 ];
 
 /// 协程钩子补丁：把宿主装的指令计数/超时钩子传导到插件新建的线程。
@@ -335,7 +346,11 @@ pub fn register(
             lua.create_async_function(move |_, (scope, key): (String, String)| {
                 let h = h.clone();
                 let scope = format!("{n}/{scope}");
-                async move { h.secret_get(&scope, &key).await.map_err(mlua::Error::external) }
+                async move {
+                    h.secret_get(&scope, &key)
+                        .await
+                        .map_err(mlua::Error::external)
+                }
             })?,
         )?;
         let n = plugin_name.to_string();
@@ -455,8 +470,8 @@ pub fn register(
             lua.create_async_function(move |lua, path: String| {
                 let h = h.clone();
                 async move {
-                    let resolved = resolve_fs_whitelist(&lua, &path)
-                        .map_err(mlua::Error::external)?;
+                    let resolved =
+                        resolve_fs_whitelist(&lua, &path).map_err(mlua::Error::external)?;
                     h.fs_read(&resolved, FS_READ_MAX_BYTES)
                         .await
                         .map_err(mlua::Error::external)
@@ -622,7 +637,9 @@ mod tests {
         spec.path = "/callback".to_string();
         spec.origins = vec!["javascript:alert(1)".to_string()];
         assert!(validate_callback_spec(&spec).is_err());
-        spec.origins = (0..9).map(|i| format!("https://o{i}.example.com")).collect();
+        spec.origins = (0..9)
+            .map(|i| format!("https://o{i}.example.com"))
+            .collect();
         assert!(validate_callback_spec(&spec).is_err());
     }
 }

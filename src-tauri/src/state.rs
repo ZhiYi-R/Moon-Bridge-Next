@@ -3,8 +3,8 @@
 //! commands 与 tray 通过 `State<Arc<ManagedState>>` 访问；网关以 tokio task +
 //! oneshot 优雅关闭信号驱动，实现「启动 / 停止 / 查询状态」。
 
-use std::sync::{Arc, Mutex, RwLock};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{Context, Result};
 use moonbridge_store::Database;
@@ -70,7 +70,11 @@ pub struct OAuthFlowStatus {
 
 impl OAuthFlowStatus {
     pub fn pending() -> Self {
-        Self { state: "pending".to_string(), message: None, provider_key: None }
+        Self {
+            state: "pending".to_string(),
+            message: None,
+            provider_key: None,
+        }
     }
 }
 
