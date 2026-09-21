@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronDown, ChevronRight, Pencil, Plus, Search, Trash2, X } from "lucide-vue-next";
+import { ChevronDown, ChevronRight, Pencil, Plus, ScanSearch, Search, Trash2, X } from "lucide-vue-next";
 import {
   computed,
   onActivated,
@@ -23,14 +23,22 @@ import { useConfirm } from "@/composables/useConfirm";
 import { useToast } from "@/composables/useToast";
 import {
   errMsg,
+  catalogApi,
   modelApi,
+  oauthApi,
+  openExternal,
   pluginApi,
+  providerApi,
   type ModelDef,
+  type OAuthBegin,
+  type OAuthFlowStatus,
   type Offer,
   type PluginBinding,
   type PluginRecord,
   type Provider,
   type ProviderEndpoint,
+  type ProviderPreset,
+  type DetectResult,
 } from "@/lib/api";
 import { useGatewayStore } from "@/stores/gateway";
 import { useProviderStore } from "@/stores/provider";
@@ -64,6 +72,272 @@ const TRI_OPTIONS = [
 function emptyEndpoint(): ProviderEndpoint {
   return { protocol: "anthropic", baseUrl: "", apiKey: "" };
 }
+
+// ── 预设选择器：新建先选预设（API/账户顶层标签）或走自定义 ──
+const picking = ref(false);
+const presetQuery = ref("");
+const presets = ref<ProviderPreset[]>([]);
+/** 顶层标签：API 直连 / 账户登录（对齐 ocx 的弹窗标签形态） */
+const PRESET_TABS = [
+  { id: "api", label: "API Key 直连" },
+  { id: "account", label: "账户登录（OAuth）" },
+] as const;
+const presetTab = ref<(typeof PRESET_TABS)[number]["id"]>("api");
+
+async function loadPresets() {
+  try {
+    presets.value = await providerApi.presets();
+  } catch {
+    presets.value = [];
+  }
+}
+
+/** 预设按 label/id 过滤（分组保持原顺序）。 */
+function presetFilter(list: ProviderPreset[]): ProviderPreset[] {
+  const q = presetQuery.value.trim().toLowerCase();
+  if (!q) return list;
+  return list.filter(
+    (p) => p.label.toLowerCase().includes(q) || p.id.toLowerCase().includes(q),
+  );
+}
+/** 当前标签下的预设列表（搜索过滤在标签内生效） */
+const activePresets = computed(() =>
+  presetFilter(presets.value.filter((p) => p.category === presetTab.value)),
+);
+
+function openPicker() {
+  presetQuery.value = "";
+  presetTab.value = "api";
+  picking.value = true;
+}
+
+/** 打开预设的取 Key 页面（空值不动作）。 */
+function openDashboard(url?: string | null) {
+  if (url) openExternal(url);
+}
+
+function choosePreset(p: ProviderPreset) {
+  // 账户组：走 OAuth 登录编排（describe 元数据驱动的通用弹窗）
+  if (p.category === "account") {
+    void startLogin(p);
+    return;
+  }
+  picking.value = false;
+  void newProvider(p);
+}
+
+function chooseCustom() {
+  picking.value = false;
+  void newProvider(null);
+}
+
+// ── 模型检测：实时探测 + 目录 enrich，勾选后导入 ──
+const detectOpen = ref(false);
+const detectProvider = ref<Provider | null>(null);
+const detectLoading = ref(false);
+const detectError = ref<string | null>(null);
+const detectResult = ref<DetectResult | null>(null);
+const detectQuery = ref("");
+/** 勾选集合（默认全选） */
+const checkedIds = ref<string[]>([]);
+const importing = ref(false);
+
+const detectFiltered = computed(() => {
+  const list = detectResult.value?.models ?? [];
+  const q = detectQuery.value.trim().toLowerCase();
+  if (!q) return list;
+  return list.filter(
+    (m) => m.id.toLowerCase().includes(q) || (m.name ?? "").toLowerCase().includes(q),
+  );
+});
+
+async function openDetect(p: Provider) {
+  detectProvider.value = p;
+  detectOpen.value = true;
+  detectLoading.value = true;
+  detectError.value = null;
+  detectResult.value = null;
+  detectQuery.value = "";
+  try {
+    const r = await providerApi.detectModels(p.key);
+    detectResult.value = r;
+    checkedIds.value = r.models.map((m) => m.id);
+  } catch (e) {
+    detectError.value = errMsg(e);
+  } finally {
+    detectLoading.value = false;
+  }
+}
+
+/** 只勾选尚未导入的（已导入的重复导入无意义：offer 已存在不覆盖定价）。 */
+function selectNewDetected() {
+  checkedIds.value = (detectResult.value?.models ?? [])
+    .filter((m) => !m.exists)
+    .map((m) => m.id);
+}
+
+function selectAllDetected() {
+  checkedIds.value = (detectResult.value?.models ?? []).map((m) => m.id);
+}
+
+function selectNoneDetected() {
+  checkedIds.value = [];
+}
+
+function toggleDetect(id: string) {
+  checkedIds.value = checkedIds.value.includes(id)
+    ? checkedIds.value.filter((x) => x !== id)
+    : [...checkedIds.value, id];
+}
+
+async function importDetected() {
+  const selected = (detectResult.value?.models ?? []).filter((m) => checkedIds.value.includes(m.id));
+  if (selected.length === 0) return;
+  importing.value = true;
+  try {
+    // 去掉前端附加的 exists 标记，还原为 CatalogModel 入参
+    const key = detectProvider.value?.key ?? "";
+    const r = await catalogApi.import(selected.map(({ exists: _exists, ...rest }) => rest));
+    toast.success(
+      r.skipped > 0
+        ? "已从 “" + key + "” 导入 " + r.imported + " 个模型，跳过 " + r.skipped + " 个（无变化）"
+        : "已从 “" + key + "” 导入 " + r.imported + " 个模型",
+    );
+    detectOpen.value = false;
+  } catch (e) {
+    detectError.value = errMsg(e);
+  } finally {
+    importing.value = false;
+  }
+}
+
+// ── OAuth 登录：describe 元数据驱动的通用登录弹窗（无平台分支） ──
+const loginOpen = ref(false);
+const loginPreset = ref<ProviderPreset | null>(null);
+const loginDescribe = ref<Awaited<ReturnType<typeof oauthApi.describe>>["describe"] | null>(null);
+const loginSource = ref<string | null>(null);
+const loginBegin = ref<OAuthBegin | null>(null);
+const loginStatus = ref<OAuthFlowStatus | null>(null);
+const loginError = ref<string | null>(null);
+const loginPaste = ref("");
+const loginBusy = ref(false);
+let loginTimer: ReturnType<typeof setInterval> | null = null;
+
+function stopLoginPolling() {
+  if (loginTimer !== null) {
+    clearInterval(loginTimer);
+    loginTimer = null;
+  }
+}
+
+function resetLogin() {
+  stopLoginPolling();
+  loginDescribe.value = null;
+  loginSource.value = null;
+  loginBegin.value = null;
+  loginStatus.value = null;
+  loginError.value = null;
+  loginPaste.value = "";
+  loginBusy.value = false;
+}
+
+async function startLogin(p: ProviderPreset) {
+  picking.value = false;
+  loginPreset.value = p;
+  resetLogin();
+  loginOpen.value = true;
+  loginBusy.value = true;
+  try {
+    const d = await oauthApi.describe(p.id);
+    loginDescribe.value = d.describe;
+    // 单来源或未提供来源：直接 begin；多来源则停在来源选择步
+    if (!d.describe.sources || d.describe.sources.length <= 1) {
+      await beginLogin(d.describe.sources?.[0]?.id ?? null);
+    }
+  } catch (e) {
+    loginError.value = errMsg(e);
+  } finally {
+    loginBusy.value = false;
+  }
+}
+
+async function beginLogin(source: string | null) {
+  const p = loginPreset.value;
+  if (!p) return;
+  loginSource.value = source;
+  loginError.value = null;
+  loginBusy.value = true;
+  try {
+    const b = await oauthApi.begin(p.id, source);
+    if (b.alreadyDone) {
+      loginOpen.value = false;
+      await store.load();
+      toast.success("上游服务 “" + (b.providerKey ?? p.id) + "” 已登录");
+      resetLogin();
+      return;
+    }
+    loginBegin.value = b;
+    startLoginPolling(b.flowId);
+  } catch (e) {
+    loginError.value = errMsg(e);
+  } finally {
+    loginBusy.value = false;
+  }
+}
+
+function startLoginPolling(flowId: string) {
+  stopLoginPolling();
+  loginTimer = setInterval(async () => {
+    try {
+      const s = await oauthApi.status(flowId);
+      loginStatus.value = s;
+      if (s.state === "done") {
+        stopLoginPolling();
+        loginOpen.value = false;
+        await store.load();
+        toast.success("上游服务 “" + (s.providerKey ?? "") + "” 已登录");
+        resetLogin();
+      } else if (s.state === "error") {
+        stopLoginPolling();
+        loginError.value = s.message ?? "登录失败";
+      }
+      // pending：继续轮询（message 作为进度提示展示）
+    } catch (e) {
+      // 轮询失败是显式错误（流程丢失/后端异常），不是静默死循环
+      stopLoginPolling();
+      loginError.value = errMsg(e);
+    }
+  }, 2000);
+}
+
+async function cancelLogin() {
+  const flowId = loginBegin.value?.flowId;
+  stopLoginPolling();
+  if (flowId) {
+    try {
+      await oauthApi.cancel(flowId);
+    } catch {
+      /* 取消尽力而为 */
+    }
+  }
+  loginOpen.value = false;
+  resetLogin();
+}
+
+async function submitLoginPaste() {
+  const flowId = loginBegin.value?.flowId;
+  const text = loginPaste.value.trim();
+  if (!flowId || !text) return;
+  try {
+    await oauthApi.paste(flowId, text);
+    loginPaste.value = "";
+    loginError.value = null;
+  } catch (e) {
+    loginError.value = errMsg(e);
+  }
+}
+
+onUnmounted(stopLoginPolling);
 
 function emptyProvider(): Provider {
   return {
@@ -271,8 +545,13 @@ async function tryClose() {
   if (await closeGuard()) closeModal();
 }
 
-async function newProvider() {
+async function newProvider(preset: ProviderPreset | null = null) {
   Object.assign(form, emptyProvider());
+  // 预设预填：名称/协议/Base URL 就位，只剩 API Key 待输入
+  if (preset) {
+    form.key = preset.id;
+    form.endpoints = [{ protocol: preset.protocol, baseUrl: preset.baseUrl, apiKey: "" }];
+  }
   error.value = null;
   editing.value = true;
   expandedEndpoint.value = null;
@@ -360,6 +639,7 @@ onMounted(() => {
   document.addEventListener("keydown", onEpKey, true);
   void store.load();
   void loadPluginList();
+  void loadPresets();
 });
 
 // keep-alive 下切回本页：第二次起静默重拉；弹窗编辑中不动，避免重置三态表
@@ -583,9 +863,252 @@ function loadPluginList() {
     </Modal>
 
     <!-- 上游服务：满版单卡 -->
+    <!-- 预设选择器：API 直连预填，账户组 OAuth 登录编排 -->
+    <Modal :open="picking" title="新建上游服务" @close="picking = false">
+      <div class="relative mb-3">
+        <Search class="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+        <Input v-model="presetQuery" placeholder="搜索预设…" class="pl-8" />
+      </div>
+
+      <!-- 顶层标签切换：API / 账户（对齐 ocx 弹窗形态） -->
+      <div class="mb-3 flex gap-4 border-b">
+        <button
+          v-for="t in PRESET_TABS"
+          :key="t.id"
+          type="button"
+          class="-mb-px border-b-2 px-1 pb-2 text-sm transition-colors"
+          :class="
+            presetTab === t.id
+              ? 'border-primary font-medium text-foreground'
+              : 'border-transparent text-muted-foreground hover:text-foreground'
+          "
+          @click="presetTab = t.id"
+        >
+          {{ t.label }}
+        </button>
+      </div>
+
+      <div class="space-y-2">
+        <button
+          v-for="p in activePresets"
+          :key="p.id"
+          type="button"
+          :disabled="!p.enabled"
+          class="w-full rounded-md border p-3 text-left transition-colors"
+          :class="
+            p.enabled ? 'hover:border-primary/60 hover:bg-accent/40' : 'cursor-not-allowed opacity-60'
+          "
+          @click="choosePreset(p)"
+        >
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-sm font-medium">{{ p.label }}</span>
+            <span class="flex items-center gap-1">
+              <Badge v-if="!p.enabled" variant="warning">后续支持</Badge>
+              <Badge v-else variant="secondary" class="font-mono">{{ p.protocol }}</Badge>
+              <Badge v-if="p.keyOptional" variant="outline">Key 可空</Badge>
+            </span>
+          </div>
+          <div v-if="p.note" class="mt-1 text-xs text-muted-foreground">{{ p.note }}</div>
+          <div v-if="p.baseUrl" class="mt-0.5 font-mono text-xs text-muted-foreground/70">
+            {{ p.baseUrl }}
+          </div>
+          <button
+            v-if="p.dashboardUrl"
+            type="button"
+            class="mt-1 text-xs text-primary hover:underline"
+            @click.stop="openDashboard(p.dashboardUrl)"
+          >
+            获取 API Key ↗
+          </button>
+        </button>
+        <div
+          v-if="activePresets.length === 0"
+          class="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground"
+        >
+          无匹配预设
+        </div>
+      </div>
+
+      <template #footer>
+        <Button variant="ghost" size="sm" @click="picking = false">取消</Button>
+        <Button variant="outline" size="sm" @click="chooseCustom">自定义上游</Button>
+      </template>
+    </Modal>
+
+    <!-- OAuth 登录：describe 元数据驱动的通用流程（来源选择 → 授权指引 → 轮询） -->
+    <Modal
+      :open="loginOpen"
+      :title="'账户登录 — ' + (loginDescribe?.label ?? loginPreset?.label ?? '')"
+      @close="cancelLogin"
+    >
+      <div
+        v-if="loginBusy && !loginBegin"
+        class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
+      >
+        正在发起登录…
+      </div>
+      <template v-else>
+        <div class="space-y-3">
+          <!-- 来源选择（describe.sources 多来源时先选来源） -->
+          <div v-if="!loginBegin && loginDescribe?.sources && loginDescribe.sources.length > 1" class="space-y-2">
+            <p class="text-xs text-muted-foreground">选择凭据来源：</p>
+            <button
+              v-for="s in loginDescribe.sources"
+              :key="s.id"
+              type="button"
+              class="w-full rounded-md border p-3 text-left text-sm transition-colors hover:border-primary/60 hover:bg-accent/40"
+              @click="beginLogin(s.id)"
+            >
+              {{ s.label }}
+            </button>
+          </div>
+
+          <template v-if="loginBegin">
+            <p v-if="loginBegin.instructions" class="text-sm text-muted-foreground">
+              {{ loginBegin.instructions }}
+            </p>
+            <div
+              v-if="loginBegin.notice"
+              class="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-500"
+            >
+              {{ loginBegin.notice }}
+            </div>
+            <div v-if="loginBegin.userCode" class="rounded-md border bg-muted/40 p-4 text-center">
+              <div class="text-xs text-muted-foreground">验证码</div>
+              <div class="mt-1 font-mono text-2xl font-semibold tracking-widest">
+                {{ loginBegin.userCode }}
+              </div>
+            </div>
+            <Button
+              v-if="loginBegin.verificationUrl"
+              variant="outline"
+              class="w-full"
+              @click="openExternal(loginBegin.verificationUrl!)"
+            >
+              打开验证页面
+            </Button>
+            <div v-if="loginBegin.supportsPaste" class="space-y-2">
+              <Label for="login-paste">手动粘贴（回调信息 / API Key）</Label>
+              <div class="flex gap-2">
+                <Input
+                  id="login-paste"
+                  v-model="loginPaste"
+                  placeholder="粘贴回调 JSON / URL / API Key"
+                  @keyup.enter="submitLoginPaste"
+                />
+                <Button variant="outline" :disabled="!loginPaste.trim()" @click="submitLoginPaste">
+                  提交
+                </Button>
+              </div>
+            </div>
+            <p class="text-xs text-muted-foreground">
+              {{ loginStatus?.message ?? "等待授权完成…" }}
+            </p>
+          </template>
+
+          <div
+            v-if="loginError"
+            class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          >
+            {{ loginError }}
+          </div>
+        </div>
+      </template>
+      <template #footer>
+        <Button v-if="loginBegin && loginError" variant="outline" size="sm" @click="beginLogin(loginSource)">
+          重新开始
+        </Button>
+        <Button variant="ghost" size="sm" @click="cancelLogin">取消</Button>
+      </template>
+    </Modal>
+
+    <!-- 模型检测：实时探测/目录回退 + 勾选导入 -->
+    <Modal
+      :open="detectOpen"
+      :title="'模型检测 — ' + (detectProvider?.key ?? '')"
+      width="max-w-3xl"
+      @close="detectOpen = false"
+    >
+      <div
+        v-if="detectLoading"
+        class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
+      >
+        正在探测远端模型列表…
+      </div>
+      <div
+        v-else-if="detectError"
+        class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+      >
+        {{ detectError }}
+      </div>
+      <template v-else-if="detectResult">
+        <div class="mb-3 flex items-center gap-2">
+          <Badge :variant="detectResult.source === 'live' ? 'success' : 'warning'">
+            {{ detectResult.source === "live" ? "实时探测" : "目录回退" }}
+          </Badge>
+          <span class="text-xs text-muted-foreground">共 {{ detectResult.models.length }} 个模型</span>
+        </div>
+        <div
+          v-if="detectResult.warning"
+          class="mb-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-500"
+        >
+          {{ detectResult.warning }}
+        </div>
+        <template v-if="detectResult.models.length > 0">
+          <div class="relative mb-2">
+            <Search class="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+            <Input v-model="detectQuery" placeholder="搜索模型…" class="pl-8" />
+          </div>
+          <div class="mb-2 flex items-center justify-between text-xs text-muted-foreground">
+            <div class="flex gap-3">
+              <button type="button" class="hover:text-foreground" @click="selectAllDetected">全选</button>
+              <button type="button" class="hover:text-foreground" @click="selectNoneDetected">清空</button>
+              <button type="button" class="hover:text-foreground" @click="selectNewDetected">仅未导入</button>
+            </div>
+            <span>已选 {{ checkedIds.length }} / {{ detectResult.models.length }}</span>
+          </div>
+          <div class="scrollbar-thin max-h-80 space-y-0.5 overflow-y-auto rounded-md border p-2">
+            <label
+              v-for="m in detectFiltered"
+              :key="m.id"
+              class="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 hover:bg-accent/40"
+            >
+              <input
+                type="checkbox"
+                class="size-4 shrink-0 accent-primary"
+                :checked="checkedIds.includes(m.id)"
+                @change="toggleDetect(m.id)"
+              />
+              <span class="min-w-0 flex-1 truncate font-mono text-xs">{{ m.id }}</span>
+              <span v-if="m.name" class="hidden max-w-44 truncate text-xs text-muted-foreground sm:inline">{{ m.name }}</span>
+              <span v-if="m.contextWindow" class="shrink-0 font-mono text-xs text-muted-foreground">
+                {{ m.contextWindow.toLocaleString() }}
+              </span>
+              <Badge v-if="m.exists" variant="outline" class="shrink-0">已导入</Badge>
+            </label>
+            <div v-if="detectFiltered.length === 0" class="p-4 text-center text-xs text-muted-foreground">
+              无匹配模型
+            </div>
+          </div>
+        </template>
+        <div
+          v-else
+          class="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"
+        >
+          未检测到模型
+        </div>
+      </template>
+      <template #footer>
+        <Button variant="ghost" size="sm" @click="detectOpen = false">取消</Button>
+        <Button size="sm" :disabled="checkedIds.length === 0 || importing" @click="importDetected">
+          {{ importing ? "导入中…" : "导入 " + checkedIds.length + " 个" }}
+        </Button>
+      </template>
+    </Modal>
+
     <Card class="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div class="flex shrink-0 items-center justify-end border-b px-5 py-3">
-        <Button size="sm" @click="newProvider">
+        <Button size="sm" @click="openPicker">
           <Plus class="size-4" /> 新建
         </Button>
       </div>
@@ -627,6 +1150,9 @@ function loadPluginList() {
               </td>
               <td class="py-2">
                 <div class="flex justify-center gap-0.5">
+                  <Button variant="ghost" size="icon" class="size-7" title="模型检测" @click="openDetect(p)">
+                    <ScanSearch class="size-3.5" />
+                  </Button>
                   <Button variant="ghost" size="icon" class="size-7" title="编辑" @click="editProvider(p)">
                     <Pencil class="size-3.5" />
                   </Button>
