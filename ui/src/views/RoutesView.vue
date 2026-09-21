@@ -134,7 +134,6 @@ onActivated(() => {
   <div class="flex h-full min-h-0 flex-col">
     <Alert v-if="error" class="shrink-0">{{ error }}</Alert>
 
-    <!-- 路由别名：满版面板 -->
     <div class="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div class="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">
         <EmptyState v-if="loading && routes.length === 0">加载中…</EmptyState>
@@ -210,7 +209,6 @@ onActivated(() => {
                 </button>
               </td>
             </tr>
-            <!-- 新增虚拟行 -->
             <tr v-else class="row-edit-in border-b last:border-0" @keydown="onRowKeydown($event, true)">
               <td class="py-1 pr-2">
                 <Input v-model="form.alias" class="h-7 px-2 font-mono text-xs" placeholder="别名" autofocus />
@@ -241,7 +239,7 @@ onActivated(() => {
 
 <style scoped>
 /* 行内编辑进入：从上轻坠+淡入，读起来像行被「撑开」。
-   tr 的 transform 在部分 WebKit 内核不生效，届时优雅降级为纯淡入。 */
+   tr 的 transform 在部分 WebKit 内核不生效，届时降级为纯淡入。 */
 .row-edit-in {
   animation: row-edit-in var(--dur-base) var(--ease-out) both;
 }

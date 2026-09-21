@@ -106,7 +106,7 @@ pub async fn handle_request(
     // 头经插件转为身份源）优先于 extract_session 的结果——它是更显式的通道；
     // 置 nil 即否决宿主提取值，回退到水印/新分配路径。
     ctx.session_id = inbound.session_id.take().filter(|s| !s.is_empty());
-    // 留存入站请求快照供 trace 落盘（inbound.body 随后被 take_json_body 消费，
+    // 留存入站请求快照供 trace 写入磁盘（inbound.body 随后被 take_json_body 消费，
     // 失败路径也需要它构造 trace）
     let client_request_snapshot = body_snapshot(&inbound.body);
     let raw_body = match take_json_body(inbound.body, client_protocol) {
@@ -300,7 +300,7 @@ pub async fn handle_request(
 
         // 非流式请求施加 request_timeout_secs 总超时（流式刻意不设——长生成
         // 不应被网关截断）。send 只覆盖到响应头；body 读取在 non_stream 里
-        // 以剩余预算再套一次超时 + read_body_capped 的大小上限兜底。
+        // 以剩余预算再套一次超时 + read_body_capped 的大小上限作回退。
         let send_res = if core_req.stream {
             upstream::send(&state.client, &u).await
         } else {
@@ -396,7 +396,7 @@ pub async fn handle_request(
             .unwrap_or_else(|_| text.clone());
         trace.status = "error".to_string();
         // 完整响应体归位 upstream_response 快照；error 只留简短摘要，
-        // 否则上游 4xx/5xx 的 HTML 错误页会整页塞进 trace.error。
+        // 否则上游 4xx/5xx 的 HTML 错误页会整页写进 trace.error。
         trace.upstream_response = body_snapshot(&RawBody::Text { text });
         trace.error = Some(format!("上游返回 HTTP {status}"));
         finish_audit(&state, &ctx, &mut trace, start, &Usage::default(), "error");
@@ -473,7 +473,7 @@ async fn forget_sessions(state: &Arc<AppState>, evicted: Vec<String>) {
 }
 
 /// 非流式回程编排。`upstream_protocol` 为实际命中端点的协议；
-/// `session_tag` 为本次要附加的会话水印（`None` = 不打标）。
+/// `session_tag` 为本次要附加的会话水印（`None` = 不打标记）。
 async fn non_stream(
     state: Arc<AppState>,
     ctx: ReqCtx,
@@ -558,7 +558,6 @@ async fn non_stream(
             trace.upstream_response = body_snapshot(&inbound_resp.body);
             // 上游响应已含真实 usage（token 实际消耗、上游已计费）——被插件
             // 替换前尽力解析出来记账，否则这轮成本记 0 且账单对不上。
-            // 解析失败（非标准响应体）回落 0。
             let usage = match inbound_resp.body.as_json().cloned() {
                 Some(v) => provider_adapter
                     .to_core_response(&ctx, v)
@@ -618,7 +617,7 @@ async fn non_stream(
         }
         core_resp.content = kept;
     }
-    // ── 会话水印：嵌进首个非 redacted 推理块的明文首部（无推理块的轮次不打标）──
+    // ── 会话水印：嵌进首个非 redacted 推理块的明文首部（无推理块的轮次不打标记）──
     if let Some(payload) = &session_tag {
         session::tag_response(&mut core_resp, payload);
     }
@@ -733,7 +732,7 @@ fn apply_outbound(up: &mut UpstreamRequest, outbound: RawMessage) -> Result<()> 
     Ok(())
 }
 
-/// 构造 trace 骨架。路由前后的字段差异用参数表达：路由前上游信息尚不存在 ⇒ 传空串 / `None` / `Null`。
+/// 路由前后的字段差异用参数表达：路由前上游信息尚不存在 ⇒ 传空串 / `None` / `Null`。
 #[allow(clippy::too_many_arguments)]
 fn new_trace(
     ctx: &ReqCtx,
@@ -895,7 +894,7 @@ fn body_snapshot(body: &RawBody) -> Value {
 }
 
 /// trace 快照中的请求头脱敏：疑似鉴权头的值整体替换为 `[REDACTED]`，
-/// 防止 Bearer Token / API Key / Cookie 泄漏进落盘的 trace 文件。
+/// 防止 Bearer Token / API Key / Cookie 泄漏进写入磁盘的 trace 文件。
 fn redact_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
     headers
         .iter()
@@ -951,8 +950,8 @@ fn finish_audit(
     usage: &Usage,
     usage_status: &str,
 ) {
-    // 请求/响应体可选记录：关闭时只留元数据（方法/URL/头/用量），体一律不落盘。
-    // 在收口处统一抹除，覆盖成功/错误/短路/故障转移全部路径。
+    // 请求/响应体可选记录：关闭时只留元数据（方法/URL/头/用量），体一律不写入磁盘。
+    // 在统一收尾处抹除，覆盖成功/错误/短路/故障转移全部路径。
     if !state.config.trace_record_bodies {
         crate::trace::strip_bodies(trace);
     }
@@ -996,7 +995,7 @@ fn answered(
     short_circuit(status, headers, body)
 }
 
-/// 请求处理中途失败的统一收口：落 usage + trace 后返回原错误。
+/// 请求处理中途失败的统一收尾：落 usage + trace 后返回原错误。
 /// 让各 `?` 点位写成 `.map_err(|e| fail_audit(...))?`，不留无审计的失败路径。
 fn fail_audit(
     state: &Arc<AppState>,
@@ -1026,8 +1025,6 @@ fn aborted(
     GatewayError::Other(message)
 }
 
-/// 由报文钩子的短路判定构造直接应答。
-///
 /// header 名/值来自插件，可能是非法字符序列——`Response::builder` 对非法
 /// header 静默吞错但会把 builder 置为失败态，随后 `body()` 返回 Err，
 /// 原先在此 `.unwrap()` 直接 panic。非法头丢弃 + 构造失败回退 500。

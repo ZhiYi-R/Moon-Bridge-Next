@@ -20,7 +20,6 @@ fn row_to_route(r: &rusqlite::Row) -> rusqlite::Result<Route> {
 }
 
 impl Database {
-    /// 列出全部路由。
     pub fn list_routes(&self) -> Result<Vec<Route>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
@@ -39,7 +38,6 @@ impl Database {
         self.get_route(alias)
     }
 
-    /// 按 alias 获取路由。
     pub fn get_route(&self, alias: &str) -> Result<Option<Route>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
@@ -53,7 +51,6 @@ impl Database {
         }
     }
 
-    /// 插入或更新路由。
     pub fn upsert_route(&self, rt: &Route) -> Result<()> {
         let conn = self.conn.lock();
         let extra = if rt.extra.is_null() {

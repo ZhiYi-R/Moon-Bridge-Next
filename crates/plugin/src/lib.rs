@@ -3,7 +3,7 @@
 //! 以 `mlua`（Lua 5.4 + async + send + serialize）承载插件脚本，实现 protocol 层
 //! 定义的 [`moonbridge_protocol::PluginHooks`]。核心组件：
 //! - [`runtime::LuaRuntime`]：单插件运行时，加载脚本并按引用语义调用钩子。
-//! - [`registry::LuaPluginRegistry`]：串联多插件，按 capability 门控，impl PluginHooks。
+//! - [`registry::LuaPluginRegistry`]：串联多插件，按 capability 过滤，impl PluginHooks。
 //! - [`host`]：`mb.*` 白名单宿主 API 与 Lua 沙箱。
 //! - [`quota`]：沙箱配额（指令计数 / 内存上限 / 执行超时 / body 降级）。
 //! - [`bridge::HostBridge`]：受控宿主能力契约（HTTP 子请求 / 跨 provider 调用），
@@ -483,15 +483,15 @@ mod tests {
         );
     }
 
-    /// 沙箱硬化：死循环放进协程也必须被指令配额掐断。
+    /// 沙箱硬化：死循环放进协程也必须被指令配额中止。
     ///
     /// 历史缺陷：Lua debug hook 按线程生效且不被新建协程继承，
     /// `coroutine.wrap(function() while true do end end)()` 绕过 `max_instructions`
-    /// 与 `call_timeout`，把该插件的 `Mutex<Lua>`（守卫跨 await 持有）永久卡死。
+    /// 与 `call_timeout`，把该插件的 `Mutex<Lua>`（`MutexGuard` 跨 await 持有）永久卡死。
     ///
     /// 判定方式：每个用例产出一个「返回 (ok, err)」的表达式来起协程死循环。
     /// 若配额生效，必然 `ok == false` 且 err 含配额文案；循环真的跑完则为 SURVIVED，
-    /// 出错但不是配额（说明是被别的路径掐断）则为 OTHER。注意 `coroutine.resume`
+    /// 出错但不是配额（说明是被别的路径中止）则为 OTHER。注意 `coroutine.resume`
     /// 本身吞错误、以 (false, err) 返回，故不能靠 pcall 一律包裹。
     #[tokio::test]
     async fn coroutine_loop_aborted_by_instruction_limit() {

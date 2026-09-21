@@ -8,7 +8,6 @@ use moonbridge_core::{
 };
 use serde_json::{json, Value};
 
-/// Chat Completions 路径。
 pub const CHAT_PATH: &str = "/v1/chat/completions";
 
 /// finish_reason → Core StopReason。
@@ -289,7 +288,7 @@ pub fn core_to_chat_messages(system: &[ContentBlock], messages: &[Message]) -> V
                     // tool 消息只承载文本：内嵌图片/文档按原顺序提升为随后的
                     // user 内容（与客户端「reattach recent images」同形），并附
                     // 一行来源标注保持与 tool_call 的关联。直接丢弃会让上游收到
-                    // 空 tool 结果——模型只能靠每轮末尾的客户端重附兜底，
+                    // 空 tool 结果——模型只能靠客户端在每轮末尾重附来补救，
                     // 把同一批图当新附件反复处理。
                     let mut hoisted = false;
                     for b in content {
@@ -315,7 +314,7 @@ pub fn core_to_chat_messages(system: &[ContentBlock], messages: &[Message]) -> V
 
         if !tool_results.is_empty() {
             // 同消息含 ToolUse + ToolResult 时（Core IR 允许的混排）：调用
-            // 先落成 assistant 消息，否则 continue 会静默丢弃 tool_calls。
+            // 先写入 assistant 消息，否则 continue 会静默丢弃 tool_calls。
             if !tool_calls.is_empty() {
                 let mut m = json!({
                     "role": "assistant", "content": "", "tool_calls": tool_calls
@@ -328,7 +327,7 @@ pub fn core_to_chat_messages(system: &[ContentBlock], messages: &[Message]) -> V
             }
             // 混排消息（tool_result + 普通文本同处一条 user 消息）：
             // 结果照旧展开为 tool 消息，文本另发 user 消息保留——
-            // 直接 continue 会把用户文本静默吞掉。
+            // 直接 continue 会把用户文本静默丢弃。
             if !text_parts.is_empty() {
                 out.push(json!({
                     "role": "user",
@@ -344,7 +343,7 @@ pub fn core_to_chat_messages(system: &[ContentBlock], messages: &[Message]) -> V
             Role::Tool => "tool",
             Role::User => "user",
         };
-        // tool_calls 只能挂 assistant 消息——混排（如 user 消息内含 ToolUse）
+        // tool_calls 只能挂载在 assistant 消息上——混排（如 user 消息内含 ToolUse）
         // 时强制 assistant，否则上游按非法 schema 整请求 400。
         let role = if !tool_calls.is_empty() {
             "assistant"
@@ -455,7 +454,6 @@ pub fn core_to_chat_tools(tools: &[Tool]) -> Vec<Value> {
         .collect()
 }
 
-/// 解析 Chat tool_choice。
 pub fn parse_tool_choice(v: &Value) -> Option<ToolChoice> {
     if let Some(str_v) = v.as_str() {
         return match str_v {
@@ -502,7 +500,7 @@ pub fn chat_choice_to_core(choice: &Value) -> (Vec<ContentBlock>, Option<StopRea
         .filter(|s| !s.is_empty())
     {
         let (text, mut signature) = split_mb_cot(raw);
-        // Chat 上游无独立凭据字段：推理明文本体即回传凭据（thinking 模式
+        // Chat 上游无独立凭据字段：推理明文本身即回传凭据（thinking 模式
         // 上游要求 reasoning_content 随历史带回，缺失 400）。打 chat:
         // 自凭据标记——客户端方向据此下发可回传凭据（Responses 的
         // encrypted_content），异源上游则按外源凭据降级不透传。
@@ -577,9 +575,9 @@ fn split_mb_cot(s: &str) -> (String, Option<String>) {
 }
 
 /// 组装回传用推理字段值：各 Reasoning 块明文拼接；异源凭据（ant:/oai:/
-/// gem:/无前缀）以 `<mb-cot>…</mb-cot>` 定界搭车，跨协议回程由归属上游
-/// 还原；`chat:` 自凭据的 payload 即推理明文本体——明文缺失时以它还原，
-/// 且不再搭车（再打标记下游会看到双倍文本）。
+/// gem:/无前缀）以 `<mb-cot>…</mb-cot>` 定界携带，跨协议回程由归属上游
+/// 还原；`chat:` 自凭据的 payload 即推理明文本身——明文缺失时以它还原，
+/// 且不再携带（再打标记下游会看到双倍文本）。
 fn reasoning_field<'a>(blocks: impl Iterator<Item = &'a ContentBlock>) -> String {
     let mut text = String::new();
     let mut credential: Option<&str> = None;
@@ -627,7 +625,7 @@ fn attach_reasoning(msg: &mut Value, reasoning: &str) {
 /// Reasoning 下发：`reasoning_content`/`reasoning`（明文展示，双写两种生态约定）；
 /// 凭据（不可读文本）以 `<mb-cot>…</mb-cot>` 定界标记拼在字段尾部——chat 协议
 /// 无凭据承载字段、tool result 也无法由响应侧闭合，reasoning_content 是
-/// assistant 消息上唯一可控的搭车位，客户端回传历史时凭据随之返回。
+/// assistant 消息上唯一可控的携带位，客户端回传历史时凭据随之返回。
 pub fn core_to_chat_response_message(content: &[ContentBlock]) -> Value {
     let mut tool_calls = Vec::new();
     let mut text_parts: Vec<ContentBlock> = Vec::new();
@@ -674,7 +672,7 @@ pub fn usage_from_chat(v: &Value) -> Usage {
     }
 }
 
-/// 构造 usage 对象（Chat 命名，缓存命中/推理 token 放 *_details 子对象）。
+/// Chat 的 usage 命名；缓存命中/推理 token 放 *_details 子对象。
 pub fn usage_object(u: &Usage) -> Value {
     json!({
         "prompt_tokens": u.input_tokens,
@@ -728,7 +726,7 @@ mod tests {
             other => panic!("expected text, got {other:?}"),
         }
 
-        // 上游 reasoning_content 自带 <mb-cot> 凭据（嵌套网关）时不重复打标
+        // 上游 reasoning_content 自带 <mb-cot> 凭据（嵌套网关）时不重复打标记
         let choice = json!({
             "message": {
                 "role": "assistant",
@@ -760,7 +758,7 @@ mod tests {
         assert!(matches!(&content[0], ContentBlock::Text { text } if text == "hi"));
     }
 
-    /// 凭据搭车：signature 以 <mb-cot> 定界拼入 reasoning_content 下发；
+    /// 凭据携带：signature 以 <mb-cot> 定界拼入 reasoning_content 下发；
     /// 客户端回传 assistant 历史 → 标记解析拆出凭据（signature）与展示明文。
     #[test]
     fn reasoning_credential_roundtrips_via_mb_cot_marker() {
@@ -885,7 +883,7 @@ mod tests {
     /// chat 的 tool 消息只承载文本，图片提升为随后的 user 消息（与客户端
     /// 「reattach recent images」同形），并带来源标注保持与 tool_call 的关联。
     /// 历史缺陷实证：上游只剩空 tool 结果，模型只能靠每轮末尾的客户端重附
-    /// 兜底，把同一批图当新附件反复读取。
+    /// 回退，把同一批图当新附件反复读取。
     #[test]
     fn tool_result_images_hoist_to_user_message() {
         let msgs = vec![Message {
@@ -1071,7 +1069,7 @@ mod tests {
     }
 
     /// 回归：同一 Core 消息混排 ToolUse + ToolResult 时出站不得丢调用——
-    /// tool_calls 先落成 assistant 消息再发 tool 结果。
+    /// tool_calls 先合成 assistant 消息再发 tool 结果。
     #[test]
     fn mixed_tool_use_and_result_keep_both() {
         let msgs = vec![Message {
@@ -1133,7 +1131,7 @@ mod tests {
         assert_eq!(out[0]["reasoning"], "thought");
         assert_eq!(out[0]["tool_calls"][0]["id"], "c1");
 
-        // user 消息不挂推理字段
+        // user 消息不挂载推理字段
         let out = core_to_chat_messages(
             &[],
             &[Message {
@@ -1201,7 +1199,7 @@ mod tests {
     }
 
     /// chat: 自凭据（推理明文即凭据）不搭 <mb-cot> 车；明文缺失时以
-    /// 凭据 payload 还原 reasoning_content。异源凭据仍按 mb-cot 搭车。
+    /// 凭据 payload 还原 reasoning_content。异源凭据仍按 mb-cot 携带。
     #[test]
     fn chat_self_credential_restores_and_skips_marker() {
         // 明文与凭据同体：只发明文
@@ -1230,7 +1228,7 @@ mod tests {
         );
         assert_eq!(msgs[0]["reasoning_content"], "ORIG");
 
-        // 异源凭据（Anthropic 签名经 chat 通道搭车回 Anthropic 上游）仍走 mb-cot
+        // 异源凭据（Anthropic 签名经 chat 通道携带回 Anthropic 上游）仍走 mb-cot
         let msgs = core_to_chat_messages(
             &[],
             &[Message {

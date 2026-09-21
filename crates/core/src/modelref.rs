@@ -5,7 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 解析后的模型引用。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelRef {
     /// 模型名（不含 provider 后缀）。
@@ -41,7 +40,6 @@ impl ModelRef {
         }
     }
 
-    /// 构造一个带 provider 的引用。
     pub fn with_provider(model: impl Into<String>, provider: impl Into<String>) -> Self {
         ModelRef {
             model: model.into(),
@@ -49,7 +47,6 @@ impl ModelRef {
         }
     }
 
-    /// 构造一个裸模型引用。
     pub fn bare(model: impl Into<String>) -> Self {
         ModelRef {
             model: model.into(),

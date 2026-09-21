@@ -5,7 +5,7 @@
 --   x-deepseek-harness-user-id     安装级匿名 id——粒度太粗，不作身份源
 --   x-deepseek-harness-compact     压缩轮次标记，与会话无关
 -- body 扩展字段 dsh_session_log.session.id 是同一份会话 id，作头缺失时的
--- 兜底（该字段属上游会话日志语义，照常转发不剥）。
+-- 回退来源（该字段属上游会话日志语义，照常转发不剥）。
 
 MB = {
   version = "0.1.0",

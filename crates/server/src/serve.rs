@@ -3,7 +3,7 @@
 //! 三个 Router 各自 `with_state` 后 merge 为一个 `Router<()>`：LLM 网关路由、
 //! `/api/*` 管理 API、前端静态文件（SPA fallback）。语义复刻
 //! [`moonbridge_gateway::server::serve_with_shutdown`]：绑定端口成功 → 插件
-//! `init` → serve → 优雅关闭 → 插件 `shutdown`。
+//! `init` → serve → 平滑关闭 → 插件 `shutdown`。
 
 use std::path::Path;
 use std::sync::{Arc, RwLock};
@@ -108,7 +108,7 @@ async fn serve_generations(web_dir: &Path, admin_state: AdminState) -> Result<()
         let shutdown = lifecycle.clone();
         let server = axum::serve(listener, merged)
             .with_graceful_shutdown(async move { shutdown.wait_for_drain().await });
-        // 兜底：drain 信号到达后给在途连接 DRAIN_GRACE 收尾，超时则丢弃 server future
+        // 回退：drain 信号到达后给在途连接 DRAIN_GRACE 收尾，超时则丢弃 server future
         // （关闭监听与剩余连接）。否则一个卡住的长连 SSE 流会让重启 / SIGTERM 永久挂起。
         let force = lifecycle.clone();
         let served = tokio::select! {
@@ -119,7 +119,7 @@ async fn serve_generations(web_dir: &Path, admin_state: AdminState) -> Result<()
             } => {
                 tracing::warn!(
                     grace_secs = DRAIN_GRACE.as_secs(),
-                    "优雅 drain 超时，强制关闭剩余在途连接"
+                    "drain 超时，强制关闭剩余在途连接"
                 );
                 Ok(())
             }
@@ -307,7 +307,7 @@ mod tests {
         assert_eq!(persisted.gateway.addr, AppConfig::default().gateway.addr);
         assert!(persisted.gateway.trace_dir.is_none());
         assert!(persisted.gateway.plugins_dir.is_none());
-        assert!(!paths.config_file.exists(), "启动覆盖不得落盘");
+        assert!(!paths.config_file.exists(), "启动覆盖不得写入磁盘");
         assert_eq!(
             cfg.gateway.trace_dir.as_deref(),
             Some(paths.trace_dir.to_string_lossy().as_ref())

@@ -109,7 +109,7 @@ impl Database {
     }
 
     /// 插入或更新 provider（按 key upsert），并整体重写其端点列表。
-    /// 各端点 api_key 落库前加密。
+    /// 各端点 api_key 写入数据库前加密。
     pub fn upsert_provider(&self, p: &Provider) -> Result<()> {
         let mut conn = self.conn.lock();
         let now = crate::now_unix();
@@ -120,7 +120,7 @@ impl Database {
             p.extra.to_string()
         };
         let created = if p.created_at > 0 { p.created_at } else { now };
-        // 配额配置整段加密落库（含密钥类字段）；空配置存空串，读回按空对象处理。
+        // 配额配置整段加密写入数据库（含密钥类字段）；空配置存空串，读回按空对象处理。
         let quota_config_enc = if p.quota_config.is_null()
             || p.quota_config.as_object().is_some_and(|o| o.is_empty())
         {

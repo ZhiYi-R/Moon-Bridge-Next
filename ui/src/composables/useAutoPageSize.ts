@@ -41,7 +41,7 @@ export function useAutoPageSize(container: Ref<HTMLElement | null>, page?: Ref<n
     availHeight.value = Math.max(0, avail);
     if (!table || rowHeight <= 0) return;
     // 下限为 1：只要高于实际可容纳行数，渲染就会溢出——滚动条和翻页同时出现。
-    // 连 1 行都放不下的极端矮容器才有滚动兜底；上限防超大表一次渲染过多。
+    // 连 1 行都放不下的极端矮容器才回退为滚动；上限防超大表一次渲染过多。
     const next = Math.max(1, Math.min(200, Math.floor(avail / rowHeight)));
     if (next === pageSize.value) return;
     if (page) {

@@ -40,7 +40,7 @@ pub struct SandboxLimits {
 impl Default for SandboxLimits {
     fn default() -> Self {
         SandboxLimits {
-            // 2 亿指令：足够正常插件跑完，又能秒级掐断死循环
+            // 2 亿指令：足够正常插件跑完，又能秒级中止死循环
             max_instructions: 200_000_000,
             instruction_step: 2000,
             // 1024 MB：单插件 Lua 状态内存上限。网关 max_body_bytes 默认

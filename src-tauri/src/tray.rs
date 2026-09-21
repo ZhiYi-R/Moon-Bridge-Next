@@ -21,7 +21,6 @@ const TABS: &[(&str, &str)] = &[
     ("设置", "/settings"),
 ];
 
-/// 构建系统托盘图标与菜单。
 pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     let mut tab_items = Vec::with_capacity(TABS.len());
     for (title, path) in TABS {
@@ -76,7 +75,6 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 显示并聚焦主窗口。
 fn show_main_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
@@ -91,7 +89,7 @@ fn open_tab(app: &AppHandle, path: &str) {
     let _ = app.emit("navigate-tab", path);
 }
 
-/// 优雅退出：先优雅关闭网关（发 shutdown 信号 → serve_with_shutdown 尾部跑
+/// 平滑退出：先平滑关闭网关（发 shutdown 信号 → serve_with_shutdown 尾部跑
 /// 插件 shutdown_all），再退进程。直接 `app.exit` 会跳过插件收尾钩子。
 fn quit_app(app: &AppHandle) {
     let app = app.clone();
@@ -102,7 +100,6 @@ fn quit_app(app: &AppHandle) {
     });
 }
 
-/// 切换网关运行状态（运行中则停止，否则启动）。
 fn toggle_gateway(app: &AppHandle) {
     let state = app.state::<Arc<ManagedState>>().inner().clone();
     let running = state.status().running;

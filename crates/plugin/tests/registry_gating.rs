@@ -1,4 +1,4 @@
-//! LuaPluginRegistry provider 维度三态门控单测。
+//! LuaPluginRegistry provider 维度三态过滤单测。
 //!
 //! 覆盖：禁用覆盖、强制启用（全局停用 + binding 启用）、无 binding 跟随全局、
 //! 客户端阶段（provider 未知）按全局开关执行。
@@ -13,7 +13,6 @@ use moonbridge_plugin::{
 };
 use moonbridge_protocol::{PluginHooks, ReqCtx};
 
-/// 不做任何事的 HostBridge 桩。
 struct DummyBridge;
 
 #[async_trait]
@@ -176,7 +175,6 @@ fn ctx_for(provider: Option<&str>) -> ReqCtx {
     }
 }
 
-/// 造只含一组 provider 绑定的覆盖表。
 fn provider_overrides(
     bindings: &[(&str, bool)],
 ) -> std::collections::HashMap<String, ScopeOverrides> {
@@ -305,5 +303,5 @@ async fn nearest_scope_wins() {
     ctx.provider_key = Some("other".to_string());
     let mut req = CoreRequest::new("m");
     registry.on_request(&ctx, &mut req).await.unwrap();
-    assert_eq!(req.temperature, Some(0.5), "global 维度应兜底");
+    assert_eq!(req.temperature, Some(0.5), "global 维度应回退");
 }

@@ -115,7 +115,6 @@ const controlCls =
         <RotateCw class="size-3.5" :class="gateway.loading ? 'animate-spin' : ''" />
       </button>
 
-      <!-- 主题切换：亮/暗 -->
       <Button
         variant="ghost"
         size="icon"
@@ -127,7 +126,6 @@ const controlCls =
         <Moon v-else class="size-4" />
       </Button>
 
-      <!-- 窗口控制（仅 Tauri 壳内） -->
       <div v-if="appWindow" class="-mr-6 ml-2 flex items-center self-stretch">
         <button :class="controlCls" title="最小化" @click="minimize">
           <Minus class="size-4" />

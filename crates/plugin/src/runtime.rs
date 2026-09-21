@@ -24,17 +24,15 @@ use crate::manifest::Manifest;
 use crate::quota::{ExecutionBudget, SandboxLimits};
 use crate::session::SessionStore;
 
-/// 单个 Lua 插件的运行时。
 pub struct LuaRuntime {
     /// 插件名（来自 store 配置，权威）。
     pub name: String,
     /// 从脚本 `MB` 表解析出的清单。
     pub manifest: Manifest,
     /// 插件全局开关（store `plugins.enabled`）。Provider 维度的三态覆盖
-    /// 由 [`LuaPluginRegistry`] 的 bindings 门控表决定。
+    /// 由 [`LuaPluginRegistry`] 的 bindings 绑定表决定。
     pub enabled: bool,
     lua: Arc<Mutex<Lua>>,
-    /// 沙箱配额上限。
     limits: SandboxLimits,
     /// 每次钩子调用前重置的执行预算（指令计数 + 截止时间）。
     budget: Arc<ExecutionBudget>,
@@ -53,7 +51,6 @@ fn prepare(lua: &Lua, ctx: &ReqCtx) -> Result<()> {
 }
 
 impl LuaRuntime {
-    /// 以默认沙箱配额加载并初始化一个插件运行时。
     pub fn new(
         name: &str,
         script: &str,
@@ -71,7 +68,6 @@ impl LuaRuntime {
         )
     }
 
-    /// 以指定沙箱配额加载并初始化一个插件运行时。
     pub fn new_with_limits(
         name: &str,
         script: &str,
@@ -136,7 +132,6 @@ impl LuaRuntime {
         )
     }
 
-    /// 加锁 + 写入会话 + 重置本次调用的执行预算。
     async fn enter(&self, ctx: &ReqCtx) -> Result<tokio::sync::MutexGuard<'_, Lua>> {
         let lua = self.lua.lock().await;
         prepare(&lua, ctx)?;
@@ -224,11 +219,11 @@ impl LuaRuntime {
 
     /// 以全局 `MB.<name>` 函数为入口执行一次调用：JSON 入参、JSON 出参。
     ///
-    /// 面向「不进插件注册表的一次性脚本」（余额卡片查询）：脚本加载、`mb.*` 宿主
+    /// 面向「不进插件注册表的一次性脚本」（如配额查询的 `MB.query`）：脚本加载、`mb.*` 宿主
     /// API、沙箱配额与协程钩子路径完全复用本运行时，只是入口名由调用方指定
     /// （如 `query`），返回值交调用方按自己的契约解释。脚本未定义该入口即报错；
     /// 返回 `nil` 得到 `Value::Null`，返回不可序列化之物（函数/线程等）同样报错，
-    /// 而不是静默降级成 `null` 把问题藏到落库之后。
+    /// 而不是静默降级成 `null` 把问题藏到写入数据库之后。
     pub async fn call_mb_once(
         &self,
         name: &str,
@@ -248,7 +243,6 @@ impl LuaRuntime {
 
     // ── Core IR 语义层 ──────────────────────────────────────────────
 
-    /// on_request：修改 CoreRequest。
     pub async fn on_request(&self, ctx: &ReqCtx, req: &mut CoreRequest) -> Result<()> {
         let lua = self.enter(ctx).await?;
         let Some(f) = mb_fn(&lua, "on_request") else {
@@ -280,7 +274,6 @@ impl LuaRuntime {
         }
     }
 
-    /// on_response：修改 CoreResponse。
     pub async fn on_response(&self, ctx: &ReqCtx, resp: &mut CoreResponse) -> Result<()> {
         let lua = self.enter(ctx).await?;
         let Some(f) = mb_fn(&lua, "on_response") else {
@@ -348,7 +341,6 @@ impl LuaRuntime {
         }
     }
 
-    /// transform_error：转换错误消息。
     pub async fn transform_error(&self, ctx: &ReqCtx, msg: &str) -> Result<String> {
         let lua = self.enter(ctx).await?;
         let Some(f) = mb_fn(&lua, "transform_error") else {
@@ -408,7 +400,6 @@ impl LuaRuntime {
         Ok(convert::parse_chunk_action(ret))
     }
 
-    /// on_client_request_raw。
     pub async fn on_client_request_raw(
         &self,
         ctx: &ReqCtx,
@@ -417,7 +408,6 @@ impl LuaRuntime {
         self.call_raw_message("on_client_request_raw", ctx, msg)
             .await
     }
-    /// on_upstream_request_raw。
     pub async fn on_upstream_request_raw(
         &self,
         ctx: &ReqCtx,
@@ -426,7 +416,6 @@ impl LuaRuntime {
         self.call_raw_message("on_upstream_request_raw", ctx, msg)
             .await
     }
-    /// on_upstream_response_raw。
     pub async fn on_upstream_response_raw(
         &self,
         ctx: &ReqCtx,
@@ -435,7 +424,6 @@ impl LuaRuntime {
         self.call_raw_message("on_upstream_response_raw", ctx, msg)
             .await
     }
-    /// on_client_response_raw。
     pub async fn on_client_response_raw(
         &self,
         ctx: &ReqCtx,
@@ -444,7 +432,6 @@ impl LuaRuntime {
         self.call_raw_message("on_client_response_raw", ctx, msg)
             .await
     }
-    /// on_upstream_chunk_raw。
     pub async fn on_upstream_chunk_raw(
         &self,
         ctx: &ReqCtx,
@@ -453,7 +440,6 @@ impl LuaRuntime {
         self.call_raw_chunk("on_upstream_chunk_raw", ctx, chunk)
             .await
     }
-    /// on_client_chunk_raw。
     pub async fn on_client_chunk_raw(
         &self,
         ctx: &ReqCtx,

@@ -244,7 +244,6 @@ onUnmounted(() => {
         :style="floatStyle"
         @keydown.escape="close()"
       >
-      <!-- 预设列 -->
       <div class="scrollbar-thin w-28 shrink-0 overflow-y-auto p-1">
         <button
           v-for="p in PRESETS"

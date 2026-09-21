@@ -18,7 +18,6 @@ use crate::adapter::{
 use crate::context::ReqCtx;
 use crate::raw::{ChunkStage, RawChunk};
 
-/// 构造一个客户端方向的 SSE chunk。
 fn sse(event_name: &str, data: Value) -> RawChunk {
     RawChunk::json(
         ChunkStage::ClientChunk,
@@ -192,7 +191,7 @@ impl ClientStreamAdapter for OpenAiResponsesAdapter {
                             "summary": [{ "type": "summary_text", "text": text }],
                         });
                         // 本家凭据还原原文；异源凭据带标记原样下发（opaque，
-                        // 客户端存入历史、回传后回到归属协议再解标）。
+                        // 客户端存入历史、回传后回到归属协议再解除标记）。
                         if let Some(enc) = signature.as_deref().map(|s| {
                             crate::adapters::emit_signature(crate::adapters::SIG_OPENAI, s)
                         }) {
@@ -458,7 +457,7 @@ impl ProviderStreamAdapter for OpenAiResponsesAdapter {
                         input: json!({}),
                         signature: None,
                     },
-                    // reasoning item：后续 summary/reasoning 文本增量挂同一 output_index
+                    // reasoning item：后续 summary/reasoning 文本增量挂载到同一 output_index
                     Some("reasoning") => ContentBlock::Reasoning {
                         text: String::new(),
                         signature: None,
@@ -1001,7 +1000,7 @@ mod tests {
         let output = completed["response"]["output"].as_array().unwrap();
         assert_eq!(output.len(), 2);
         assert_eq!(output[0]["type"], "reasoning");
-        assert_eq!(output[0]["encrypted_content"], "ENC", "本家凭据出站解标");
+        assert_eq!(output[0]["encrypted_content"], "ENC", "本家凭据出站解除标记");
         assert_eq!(output[1]["type"], "message");
         assert_eq!(output[1]["content"][0]["text"], "Hi");
     }

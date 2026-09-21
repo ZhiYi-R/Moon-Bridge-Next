@@ -27,7 +27,7 @@ const CAPABILITIES = ["core", "raw_request", "raw_response", "raw_stream"] as co
 const SCOPES = ["global", "provider", "model", "route"] as const;
 
 const DEFAULT_SCRIPT = `-- Moon Bridge Next 插件
--- 暴露全局 MB 表：既承载清单，也承载钩子；程序提供的 API 挂在全局 mb（小写）。
+-- 暴露全局 MB 表：既承载清单，也承载钩子；程序提供的 API 挂载在全局 mb（小写）。
 MB = {
   version = "0.1.0",
   scopes = { "global" },
@@ -76,7 +76,6 @@ const needsRestart = ref(false);
 const editing = ref(false);
 const isNew = ref(false);
 const busy = ref(false);
-/** 编辑器内折叠状态：元信息默认收起，脚本默认展开。 */
 // 元信息/脚本为互斥手风琴：同时至多一个展开（也可全收起），切换时 flex-grow 过渡
 const metaOpen = ref(false);
 const scriptOpen = ref(true);
@@ -119,7 +118,7 @@ watch(
   },
 );
 
-// ── 编辑器未保存守卫：进入编辑时拍快照，返回/取消时比对 ──
+// ── 编辑器未保存确认：进入编辑时拍快照，返回/取消时比对 ──
 const editorSnapshot = ref("");
 const editorDirty = computed(
   () => JSON.stringify({ f: form, s: script.value }) !== editorSnapshot.value,
@@ -239,7 +238,7 @@ async function save() {
   }
 }
 
-/** 启用门控：`MB.requires` 未满足时后端返回该前缀的结构化错误，弹提示框而非横幅。 */
+/** 启用条件：`MB.requires` 未满足时后端返回该前缀的结构化错误，弹提示框而非横幅。 */
 const REQUIREMENTS_PREFIX = "REQUIREMENTS";
 const reqError = ref<string[] | null>(null);
 
@@ -521,7 +520,6 @@ onActivated(() => {
       </div>
     </div>
 
-    <!-- 插件列表：满版面板 -->
     <div v-else key="list" class="flex min-h-0 flex-1 flex-col overflow-hidden">
       <input ref="fileInput" type="file" accept=".lua" multiple class="hidden" @change="onFilesPicked" />
       <div class="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">
@@ -604,7 +602,7 @@ onActivated(() => {
     </div>
     </Transition>
 
-    <!-- 启用门控：插件 MB.requires 声明的设置未满足时弹框提示，不自动修改 -->
+    <!-- 启用条件：插件 MB.requires 声明的设置未满足时弹框提示，不自动修改 -->
     <Modal :open="reqError !== null" title="无法启用插件" width="max-w-md" @close="reqError = null">
       <p class="text-sm text-muted-foreground">以下网关设置未满足插件要求，请在「设置」中调整后重试：</p>
       <ul class="mt-3 space-y-1.5 text-sm">
@@ -622,7 +620,7 @@ onActivated(() => {
 
 <style scoped>
 /* 手风琴折叠区：flex-grow 可插值——互斥切换时一区收一区放同步进行，
-   比 height/max-height 方案顺滑且无魔法数。 */
+   比 height/max-height 方案平滑且无硬编码数值。 */
 .collapse-body {
   flex: 0 1 0%;
   min-height: 0;
@@ -631,22 +629,5 @@ onActivated(() => {
 }
 .collapse-body.collapse-open {
   flex-grow: 1;
-}
-
-/* 列表 ↔ 编辑器整页互换：旧页快速淡出，新页淡入并轻微上浮 */
-.editor-enter-active {
-  transition:
-    opacity var(--dur-base) var(--ease-out),
-    transform var(--dur-base) var(--ease-out);
-}
-.editor-leave-active {
-  transition: opacity calc(var(--dur-base) * 0.6) var(--ease-in);
-}
-.editor-enter-from {
-  opacity: 0;
-  transform: translateY(6px);
-}
-.editor-leave-to {
-  opacity: 0;
 }
 </style>

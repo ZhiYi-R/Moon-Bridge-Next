@@ -55,8 +55,6 @@ pub use state::AppState;
 use crate::bridge::GatewayBridge;
 use crate::upstream::build_client;
 
-/// 从引导配置派生插件沙箱配额。
-///
 /// `max_body_bytes` 直接采用配置（兼现“报文层 body 上限”语义）；`call_timeout`
 /// 以上游请求超时为基准再加缓冲，避免误伤插件内合法的 `provider_invoke` 长调用；
 /// 指令上限/内存上限/计数步长沿用 [`SandboxLimits::default`]。
@@ -70,7 +68,6 @@ fn sandbox_limits(config: &GatewayConfig) -> SandboxLimits {
     }
 }
 
-/// 脚本引用的解析结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScriptRef {
     /// 文件脚本：已归一化的路径。
@@ -82,7 +79,7 @@ pub enum ScriptRef {
 }
 
 /// 对可能**尚不存在**的路径做解析：向上找到最近的已存在祖先做 `canonicalize`，
-/// 再把剩余片段原样拼回。这样既能校验「UI 新建、还没落盘的子目录脚本」
+/// 再把剩余片段原样拼回。这样既能校验「UI 新建、还没写入磁盘的子目录脚本」
 /// （如 `sub/x.lua`），又能识破中间层的符号链接绕行。
 fn canonicalize_pending(path: &std::path::Path) -> Option<std::path::PathBuf> {
     let mut suffix: Vec<std::ffi::OsString> = Vec::new();
@@ -121,7 +118,7 @@ pub fn is_within_root(path: &std::path::Path, root: &std::path::Path) -> bool {
 /// 后缀、gateway 看 `Path::exists()`），导致相对路径 `x.lua` 在 UI 里归一到
 /// `plugins_dir`、在运行时却按进程 CWD 判断，不一致时被静默当作 Lua 源码编译失败。
 ///
-/// 给了 `plugins_dir` 时，相对路径挂到其下、绝对路径必须落在其内，越界一律
+/// 给了 `plugins_dir` 时，相对路径挂载到其下、绝对路径必须落在其内，越界一律
 /// [`ScriptRef::Rejected`]（切断了「把 `script_ref` 写成任意绝对路径 → 让网关去
 /// 读/执行该文件」这条逃逸路）。未给 `plugins_dir` 时不做包含性校验（CLI/测试场景）。
 pub fn parse_script_ref(script_ref: &str, plugins_dir: Option<&std::path::Path>) -> ScriptRef {
@@ -147,7 +144,7 @@ pub fn parse_script_ref(script_ref: &str, plugins_dir: Option<&std::path::Path>)
 ///
 /// 加载条件：插件全局启用，或存在任一维度（route/model/provider/global）
 /// enabled=1 的 binding（全局停用但被某作用域强制启用的插件仍需加载）。
-/// 运行时门控：由 [`LuaPluginRegistry`] 按「就近作用域覆盖」逐请求过滤。
+/// 运行时过滤：由 [`LuaPluginRegistry`] 按「就近作用域覆盖」逐请求过滤。
 /// 无插件或全部加载失败时回退 [`NoopHooks`]。单个插件加载失败仅记录错误，
 /// 不影响其它插件与网关启动。
 pub fn load_plugins(
@@ -166,7 +163,7 @@ pub fn load_plugins(
     ));
     let mut runtimes: Vec<Arc<LuaRuntime>> = Vec::new();
 
-    // 全维度三态门控表：plugin_name → 各作用域绑定
+    // 全维度三态绑定表：plugin_name → 各作用域绑定
     let mut overrides: std::collections::HashMap<String, ScopeOverrides> =
         std::collections::HashMap::new();
     match db.list_bindings_all() {
@@ -418,7 +415,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 尚未落盘的子目录脚本必须判为合法 `File`——否则 `plugin_write_script`
+    /// 尚未写入磁盘的子目录脚本必须判为合法 `File`——否则 `plugin_write_script`
     /// 永远建不出新子目录（先校验后建目录）。
     #[test]
     fn not_yet_created_nested_path_is_accepted() {

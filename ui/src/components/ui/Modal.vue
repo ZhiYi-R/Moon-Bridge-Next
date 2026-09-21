@@ -14,15 +14,15 @@ const props = defineProps<{
   title: string;
   /** 内容区最大宽度类，默认 max-w-2xl。 */
   width?: string;
-  /** 层级类，默认 z-50；需要盖在其它弹窗之上时（如表单守卫确认框）传更高值。 */
+  /** 层级类，默认 z-50；需要盖在其它弹窗之上时（如表单确认框）传更高值。 */
   zClass?: string;
-  /** 关闭守卫：遮罩点击 / Esc / X 触发，resolve false 则拦截关闭（用于有未保存修改的表单）。 */
+  /** 关闭前确认：遮罩点击 / Esc / X 均触发，resolve false 则拦截关闭（用于有未保存修改的表单）。 */
   guard?: () => boolean | Promise<boolean>;
 }>();
 
 const emit = defineEmits<{ close: [] }>();
 
-/** 所有关闭入口统一走守卫。 */
+/** 所有关闭入口统一走 guard。 */
 async function requestClose() {
   if (props.guard && !(await props.guard())) return;
   emit("close");
@@ -100,9 +100,7 @@ onUnmounted(() => {
   <Teleport to="body">
     <Transition name="modal" :duration="{ enter: 200, leave: 150 }">
       <div v-if="open" class="fixed inset-0 flex items-center justify-center p-4" :class="props.zClass ?? 'z-50'">
-        <!-- 遮罩 -->
         <div class="modal-overlay absolute inset-0 bg-black/60" @click="requestClose" />
-        <!-- 面板 -->
         <div
           ref="panelRef"
           role="dialog"

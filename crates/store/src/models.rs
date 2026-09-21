@@ -12,18 +12,15 @@ use serde_json::Value;
 pub struct Endpoint {
     /// 上游协议标识（对应 `moonbridge_core::Protocol::as_str`）。
     pub protocol: String,
-    /// 基础 URL。
     pub base_url: String,
-    /// API Key（明文；落库时由 `EncKey` 加密）。
+    /// API Key（明文；写入数据库时由 `EncKey` 加密）。
     #[serde(default)]
     pub api_key: String,
 }
 
-/// 上游 Provider 配置。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Provider {
-    /// 唯一 key。
     pub key: String,
     /// 端点列表（按序故障转移；至少一个；协议绑定在端点上）。
     #[serde(default)]
@@ -31,29 +28,26 @@ pub struct Provider {
     /// 协议版本头（如 Anthropic `2023-06-01`）。
     #[serde(default)]
     pub version: Option<String>,
-    /// 自定义 User-Agent。
     #[serde(default)]
     pub user_agent: Option<String>,
     /// Web Search 配置（原始 JSON）。
     #[serde(default)]
     pub web_search: Option<Value>,
-    /// 协议特定额外字段。
     #[serde(default)]
     pub extra: Value,
-    /// 是否启用。
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// 配额查询插件引用（`plugins.name`，category=quota）；空串 = 未绑定配额查询。
     #[serde(default)]
     pub quota_plugin_ref: String,
-    /// 配额定时查询间隔（秒）；`0` = 禁用定时、只手动刷新。保存时 `1..=59` 夹到 60。
+    /// 配额定时查询间隔（秒）；`0` = 禁用定时、只手动刷新。保存时 `1..=59` 限制为 60。
     #[serde(default)]
     pub quota_interval_secs: i64,
     /// 配额查询开关（独立于 quota_plugin_ref，便于临时停用）。
     #[serde(default)]
     pub quota_enabled: bool,
-    /// 配额插件实例配置（解密后的 JSON；落库为 AES 密文 `quota_config_enc`）。
-    /// 插件 `config_schema` 声明的字段值都在里面（含密钥类），明文不落库。
+    /// 配额插件实例配置（解密后的 JSON；写入数据库为 AES 密文 `quota_config_enc`）。
+    /// 插件 `config_schema` 声明的字段值都在里面（含密钥类），明文不写入数据库。
     #[serde(default)]
     pub quota_config: Value,
     /// 创建时间（unix 秒）。
@@ -78,7 +72,7 @@ pub struct ModelDef {
     #[serde(default)]
     pub context_window: Option<i64>,
     /// 输出 token 上限（models.dev `limit.output`）。Anthropic 等要求必填
-    /// `max_tokens` 的上游协议在客户端未设上限时以此兜底，不凭空注入小值。
+    /// `max_tokens` 的上游协议在客户端未设上限时以此回退，不凭空注入小值。
     #[serde(default)]
     pub max_output_tokens: Option<i64>,
     #[serde(default)]
@@ -89,7 +83,6 @@ pub struct ModelDef {
     pub extra: Value,
 }
 
-/// Provider 提供的模型报价。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Offer {
@@ -114,7 +107,6 @@ pub struct Route {
     pub extra: Value,
 }
 
-/// 插件记录。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginRecord {
@@ -153,7 +145,6 @@ fn default_source() -> String {
     "lua".to_string()
 }
 
-/// 插件在具体作用域上的启用/配置覆盖。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginBinding {
@@ -204,7 +195,7 @@ where
 /// 配额脚本返回的单条配额（`payload.quotas` 的元素）。
 ///
 /// 判别字段 `type` 必填：`percentage`（百分比额度）| `quota`（带金额的额度）|
-/// `counter`（无界计数器，前端不渲染）。脚本按 Lua 习惯写 snake_case，引擎落库前
+/// `counter`（无界计数器，前端不渲染）。脚本按 Lua 习惯写 snake_case，引擎写入数据库前
 /// 归一为 camelCase（本结构的序列化形状）；`used_percent` / `left_percent` 互补，
 /// 脚本只给一个时由引擎补另一个。amount 字段之间以及与 percent 之间不做互补互推。
 /// 脚本自定义的额外字段经 `extra` 原样保留。
@@ -224,14 +215,12 @@ pub struct QuotaEntry {
         alias = "period_secs"
     )]
     pub period_secs: Option<i64>,
-    /// 已用百分比。
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         alias = "used_percent"
     )]
     pub used_percent: Option<f64>,
-    /// 剩余百分比。
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -264,7 +253,6 @@ pub struct QuotaEntry {
         deserialize_with = "de_opt_string_or_number"
     )]
     pub reset_at: Option<String>,
-    /// 脚本自定义字段。
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,
 }
@@ -281,7 +269,6 @@ pub struct ProviderQuotaView {
     pub quota_plugin_ref: String,
     /// 定时查询间隔（秒）；`0` = 只手动刷新。
     pub quota_interval_secs: i64,
-    /// 配额查询开关。
     pub quota_enabled: bool,
     /// 端点数量（key 行数上限）。
     pub key_count: i64,
@@ -302,12 +289,10 @@ pub struct QuotaKeyResult {
     /// 掩码后的 key 展示标签；无端点 key 时为空串。
     #[serde(default)]
     pub key_label: String,
-    /// 本次查询结果。
     #[serde(flatten)]
     pub result: QuotaResult,
 }
 
-/// 用量记录。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageRecord {
@@ -347,7 +332,6 @@ pub struct UsageRecord {
     pub created_at: i64,
 }
 
-/// 用量查询过滤条件。
 #[derive(Debug, Clone, Default)]
 pub struct UsageQuery {
     pub model: Option<String>,
@@ -360,7 +344,6 @@ pub struct UsageQuery {
     pub offset: i64,
 }
 
-/// 键值设置项。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Setting {

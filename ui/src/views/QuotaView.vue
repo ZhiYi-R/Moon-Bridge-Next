@@ -106,7 +106,7 @@ function visibleQuotas(payload: QuotaPayload | null | undefined): QuotaEntry[] {
   return (payload?.quotas ?? []).filter((q) => q.type !== "counter");
 }
 
-/** 无环配额的兜底文字：percentage 给百分比，quota/counter 给金额与余额。 */
+/** 无环配额的回退文字：percentage 给百分比，quota/counter 给金额与余额。 */
 function quotaText(q: QuotaEntry): string {
   const parts: string[] = [];
   if (q.type === "percentage") {
@@ -346,12 +346,10 @@ onActivated(() => store.list());
       </div>
     </EmptyState>
 
-    <!-- 各端点 Key 的信息卡网格；「全部」模式下卡片带 provider 名 -->
     <div v-else-if="filteredViews.length > 0" class="flex min-h-0 flex-1 flex-col">
       <section ref="gridWrap" class="min-h-0 flex-1 overflow-hidden">
         <div class="grid grid-cols-[repeat(auto-fill,minmax(13rem,1fr))] gap-2 pb-1">
         <template v-for="item in pagedCards" :key="item.result ? `${item.v.providerKey}:${item.result.keyIndex}` : `${item.v.providerKey}:empty`">
-          <!-- 未查询占位卡 -->
           <div
             v-if="!item.result"
             class="rounded-md border border-dashed p-3 text-xs text-muted-foreground"
@@ -363,7 +361,6 @@ onActivated(() => store.list());
             </div>
             <p class="mt-2">尚未查询</p>
           </div>
-          <!-- key 卡：掩码 key + 状态 + 配额环图；明细与本地统计进悬停 -->
           <div
             v-else
             class="rounded-md border p-2.5"
@@ -381,7 +378,6 @@ onActivated(() => store.list());
               <span v-else />
               <span class="shrink-0 tabular-nums" :title="formatTime(item.result.queriedAt)">{{ shortTime(item.result.queriedAt) }}</span>
             </div>
-            <!-- 配额：纵向交错堆叠「标签+数值」文本行与全宽细进度条 -->
             <div class="mt-2 space-y-1.5">
               <div
                 v-for="(q, i) in visibleQuotas(item.result.payload)"

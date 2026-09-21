@@ -19,14 +19,13 @@ pub struct AppPaths {
     pub config_file: PathBuf,
     /// SQLite 数据库：`data_dir/moonbridge.db`。
     pub db_path: PathBuf,
-    /// trace 落盘目录：`data_dir/traces`。
+    /// trace 文件目录：`data_dir/traces`。
     pub trace_dir: PathBuf,
     /// 用户插件目录：`data_dir/plugins`。
     pub plugins_dir: PathBuf,
 }
 
 impl AppPaths {
-    /// 由 Tauri 提供的配置/数据目录派生全部路径。
     pub fn resolve(config_dir: PathBuf, data_dir: PathBuf) -> Self {
         Self {
             config_file: config_dir.join("config.toml"),
@@ -38,7 +37,6 @@ impl AppPaths {
         }
     }
 
-    /// 确保数据/插件/trace 目录存在。
     pub fn ensure_dirs(&self) -> Result<()> {
         std::fs::create_dir_all(&self.config_dir).context("创建配置目录失败")?;
         std::fs::create_dir_all(&self.data_dir).context("创建数据目录失败")?;
@@ -48,17 +46,14 @@ impl AppPaths {
     }
 }
 
-/// 应用引导配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
-    /// 网关运行参数。
     #[serde(default)]
     pub gateway: GatewayConfig,
     /// 日志级别（trace/debug/info/warn/error）。
     #[serde(default = "default_log_level")]
     pub log_level: String,
-    /// 应用启动时是否自动开启网关。
     #[serde(default = "default_true")]
     pub auto_start: bool,
 }

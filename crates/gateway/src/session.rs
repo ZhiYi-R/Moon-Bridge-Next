@@ -12,7 +12,7 @@
 //! 为什么嵌推理块而非正文：
 //! - thinking 回传是硬语义——thinking 模式上游缺 `reasoning_content`/thinking 块
 //!   直接 400，客户端必然原样带回，与 `<mb-cot>` 凭据机制同一条可靠通道；
-//! - 每个 thinking 响应都带推理块（含 tool_use 轮），首轮起即可打标；
+//! - 每个 thinking 响应都带推理块（含 tool_use 轮），首轮起即可打标记；
 //! - 正文是用户可见输出且会被客户端包进 tool_result 等结构，不再被 marker 污染。
 //!
 //! marker 形态：`[mb:<载荷>]`。载荷即会话身份本身——
@@ -33,13 +33,13 @@ const CLOSE: char = ']';
 /// 短 tag 长度（6 位 hex = 24 bit；外部身份派生 tag 用，活跃表深度上限内碰撞概率可忽略）。
 const TAG_LEN: usize = 6;
 
-/// marker 本体（`[mb:<载荷>]`）。
+/// marker 本身（`[mb:<载荷>]`）。
 pub fn marker_inline(payload: &str) -> String {
     format!("{OPEN}{payload}{CLOSE}")
 }
 
 /// 推理块首部嵌入形态：`" [mb:<载荷>]"`——前置空格与 marker 同属可剥片段，
-/// 剥除后字节还原（见 [`strip_text`] 吃掉紧邻空格的逻辑）。
+/// 剥除后字节还原（见 [`strip_text`] 去除紧邻空格的逻辑）。
 pub fn marker_head(payload: &str) -> String {
     format!(" {}", marker_inline(payload))
 }
@@ -96,7 +96,7 @@ fn strip_text(s: &str) -> (String, Vec<String>) {
         match after.find(CLOSE) {
             Some(end) if valid_payload(&after[..end]) => {
                 tags.push(after[..end].to_string());
-                // 一并吃掉 marker 前紧邻的那个空格（若有），避免留下悬挂空白
+                // 一并移除 marker 前紧邻的那个空格（若有），避免留下悬挂空白
                 if out.ends_with(' ') {
                     out.pop();
                 }
@@ -189,7 +189,7 @@ pub fn extract_from_request(req: &mut CoreRequest) -> Option<String> {
 
 /// 把 marker 嵌进首个非 redacted 推理块的**明文首部**。返回是否嵌入成功。
 ///
-/// 无可用推理块则不打标（纯 CoT 方案）：不向正文注水，也不凭空造块——
+/// 无可用推理块则不打标记（纯 CoT 方案）：不向正文插入无关文本，也不凭空造块——
 /// 无 thinking 的轮次让会话身份顺延到下一个有推理块的响应。
 pub fn tag_response(resp: &mut CoreResponse, payload: &str) -> bool {
     match resp.content.iter_mut().find_map(|b| match b {
@@ -214,7 +214,7 @@ pub fn tag_response(resp: &mut CoreResponse, payload: &str) -> bool {
 /// `BlockStop`——客户端编码器按既有推理增量路径自然把它编进 thinking 块开头
 /// （Anthropic 的惰性开块、`reasoning_content` 增量、responses 摘要增量同理）。
 /// redacted/凭据先行的块不可注入：入口编码器会把它们开成 redacted_thinking
-/// 完整块，再补明文增量会顶撞客户端块状态机。
+/// 完整块，再补明文增量会扰乱客户端块状态机。
 pub fn marker_reasoning_delta(payload: &str, index: usize) -> CoreStreamEvent {
     CoreStreamEvent::BlockDelta {
         index,
@@ -227,7 +227,7 @@ pub fn marker_reasoning_delta(payload: &str, index: usize) -> CoreStreamEvent {
 /// 活跃会话表：marker 载荷 → session id，按命中刷新热度（LRU）淘汰，深度可配。
 ///
 /// uuid 载荷自带身份（登记 `uuid→uuid` 仅为淘汰簿记）；短 tag 载荷须经表还原
-/// 外部 id。淘汰即代表该会话「不再活跃」：被挤出的 session id 反馈给调用方去
+/// 外部 id。淘汰即代表该会话「不再活跃」：被淘汰的 session id 反馈给调用方去
 /// 清理插件侧的会话状态。
 pub struct SessionTable {
     depth: usize,
@@ -250,12 +250,12 @@ impl SessionTable {
     }
 
     /// 用已有 session id 占位（供 `session_id` 字段 / `X-Codex-Window-Id` 等外部来源复用）。
-    /// 返回 `(marker 载荷, 被挤出的 session id 列表)`。
+    /// 返回 `(marker 载荷, 被淘汰的 session id 列表)`。
     pub fn note_external(&self, session_id: &str) -> (String, Vec<String>) {
         self.register(tag_from_id(session_id), session_id.to_string())
     }
 
-    /// 新分配一个会话。返回 `(session_id, 被挤出的 session id 列表, marker 载荷)`；
+    /// 新分配一个会话。返回 `(session_id, 被淘汰的 session id 列表, marker 载荷)`；
     /// 载荷即 session id 本身（uuid），入站回带时不查表即可还原身份。
     pub fn new_session(&self) -> (String, Vec<String>, String) {
         let id = uuid::Uuid::new_v4().to_string();
@@ -263,7 +263,7 @@ impl SessionTable {
         (id.clone(), evicted, id)
     }
 
-    /// 解析客户端带回的 marker 载荷，返回 `(session id, 被挤出的 session id 列表)`。
+    /// 解析客户端带回的 marker 载荷，返回 `(session id, 被淘汰的 session id 列表)`。
     ///
     /// - 命中表（外部身份绑定的短 tag，或已登记的 uuid）→ 返回映射的 id 并刷新热度；
     /// - 未命中 → 载荷就地成身份：uuid 原样采用、短 tag 合成 `mb-{tag}`——两种都
@@ -291,7 +291,6 @@ impl SessionTable {
         self.inner.lock().map(|i| i.order.len()).unwrap_or(0)
     }
 
-    /// 表是否为空。
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -305,7 +304,7 @@ impl SessionTable {
         Some(id)
     }
 
-    /// 登记 `载荷 → id`，超深则按 LRU 挤出最久未命中的，返回**实际生效的载荷** 与被挤出的 session id。
+    /// 登记 `载荷 → id`，超深则按 LRU 淘汰最久未命中的，返回**实际生效的载荷** 与被淘汰的 session id。
     fn register(&self, key: String, id: String) -> (String, Vec<String>) {
         let Ok(mut g) = self.inner.lock() else {
             return (key, Vec::new());
@@ -316,8 +315,8 @@ impl SessionTable {
             g.order.push_back(key.clone());
             return (key, Vec::new());
         }
-        // 短 tag 撞车（不同 id 抢同一 tag）：重新摇一个，别把已有会话顶掉。
-        // 先按 id+序号确定性重摇（可复现），连撞 32 次才退化到随机 uuid——表深远小于
+        // 短 tag 冲突（不同 id 抢同一 tag）：重新生成一个，不要覆盖掉已有会话。
+        // 先按 id+序号确定性重生成（可复现），连续冲突 32 次才退化到随机 uuid——表深远小于
         // tag 空间（16.7M），这条路实际走不到，只是保证不会静默覆盖别人的会话。
         let mut key = key;
         let mut tries = 0u32;
@@ -380,7 +379,7 @@ mod tests {
         let ContentBlock::Text { text } = &req.messages[0].content[0] else {
             panic!("应为文本块");
         };
-        assert_eq!(text, "hello", "marker 与其前置空格都应剥净: {text:?}");
+        assert_eq!(text, "hello", "marker 与其前置空格都应剥除干净: {text:?}");
     }
 
     /// uuid 载荷（自带身份的 marker 形态）也要认得、剥得净。
@@ -466,7 +465,7 @@ mod tests {
         assert_eq!(
             signature.as_deref(),
             Some("chat:"),
-            "凭据内 marker 应剥净: {signature:?}"
+            "凭据内 marker 应剥除干净: {signature:?}"
         );
     }
 
@@ -595,7 +594,7 @@ mod tests {
             usage: Default::default(),
             ext: Default::default(),
         };
-        assert!(tag_response(&mut resp, UUID), "tool_use 轮含推理块也应打标");
+        assert!(tag_response(&mut resp, UUID), "tool_use 轮含推理块也应打标记");
         let ContentBlock::Reasoning {
             text: think,
             signature,
@@ -621,10 +620,10 @@ mod tests {
         let ContentBlock::Reasoning { text: back, .. } = &req.messages[0].content[0] else {
             panic!()
         };
-        assert_eq!(back, "hmm", "打标→剥除应还原原文");
+        assert_eq!(back, "hmm", "打标记→剥除应还原原文");
     }
 
-    /// 纯 CoT 方案：无可用推理块即不打标——不向正文注水、不凭空造块。
+    /// 纯 CoT 方案：无可用推理块即不打标记——不向正文插入无关文本、不凭空造块。
     #[test]
     fn tag_response_skips_without_reasoning_and_redacted() {
         use moonbridge_core::CoreResponse;
@@ -687,8 +686,8 @@ mod tests {
         let (_b, ev_b, _b_p) = t.new_session();
         assert!(ev_a.is_empty() && ev_b.is_empty(), "未超深不应淘汰");
         let (_c, ev_c, _c_p) = t.new_session();
-        assert_eq!(ev_c, vec![a], "LRU 应挤出最久未命中的那个");
-        assert_eq!(t.len(), 2, "表深被钳在 2");
+        assert_eq!(ev_c, vec![a], "LRU 应淘汰最久未命中的那个");
+        assert_eq!(t.len(), 2, "表深被限制在 2");
     }
 
     #[test]
@@ -711,7 +710,7 @@ mod tests {
         let t = SessionTable::new(1);
         let (a, _e, a_p) = t.new_session();
         let (_b, _e, _b_p) = t.new_session();
-        assert!(t.lookup(&a_p).is_none(), "a 已被挤出");
+        assert!(t.lookup(&a_p).is_none(), "a 已被淘汰");
         let (id, _ev) = t.resolve(&a_p);
         assert_eq!(id, a, "淘汰后带回同一 uuid 仍须还原同一 session id");
     }
@@ -741,7 +740,7 @@ mod tests {
         let (tag, _e) = t.note_external("ext-a");
         let first_id = t.lookup(&tag).expect("外部 id 应已登记");
         let (second_tag, _ev) = t.register(tag.clone(), uuid::Uuid::new_v4().to_string());
-        assert_ne!(second_tag, tag, "不得顶掉已有 tag");
+        assert_ne!(second_tag, tag, "不得覆盖已有 tag");
         assert_eq!(t.lookup(&tag).as_deref(), Some(first_id.as_str()));
     }
 
@@ -780,7 +779,7 @@ mod tests {
         let ContentBlock::Text { text } = &req.messages[0].content[0] else {
             panic!()
         };
-        assert_eq!(text, "body", "水印应被剥净、正文不受损");
+        assert_eq!(text, "body", "水印应被剥除干净、正文不受损");
         let (id, _e) = t.resolve(&tag);
         assert_eq!(id, "ext-sess-1", "短 tag 应还原外部 id");
     }
@@ -793,7 +792,7 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for i in 0..512u32 {
             let id = format!("session-{i:08x}-fixed-sample");
-            assert!(seen.insert(tag_from_id(&id)), "id {id} 的 tag 撞车异常频繁");
+            assert!(seen.insert(tag_from_id(&id)), "id {id} 的 tag 冲突异常频繁");
         }
         assert_eq!(seen.len(), 512);
     }

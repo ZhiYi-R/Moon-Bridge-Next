@@ -27,7 +27,7 @@ const emit = defineEmits<{ "update:modelValue": [string] }>();
 const host = ref<HTMLElement | null>(null);
 let view: EditorView | null = null;
 
-/** 浅色主题：透明底接入卡片背景，语法高亮走 basicSetup 内置的 defaultHighlightStyle 兜底。 */
+/** 浅色主题：透明底接入卡片背景，语法高亮走 basicSetup 内置的 defaultHighlightStyle 回退。 */
 const lightTheme = EditorView.theme(
   {
     "&": { backgroundColor: "transparent", color: "hsl(var(--foreground))" },

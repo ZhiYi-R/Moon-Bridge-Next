@@ -3,7 +3,7 @@
 //!
 //! 输出采用 axum 原生 [`Sse`]，流项为 `Result<Event, Infallible>`。
 //!
-//! 收尾审计（usage 落库 + trace 落盘）由 [`StreamAudit`] 的 `Drop` 承担，
+//! 收尾审计（usage 写入数据库 + trace 写入磁盘）由 [`StreamAudit`] 的 `Drop` 承担，
 //! 见其文档——流可能以三种方式结束（正常、中途出错、客户端断开），只有 Drop
 //! 能同时覆盖。
 
@@ -55,7 +55,7 @@ fn error_event(msg: &str) -> Event {
 
 /// 流事件聚合器：把 Core 事件流还原成「最终响应消息」快照。
 ///
-/// trace 的 `upstream_response` / `client_response` 在流式下用它落盘：
+/// trace 的 `upstream_response` / `client_response` 在流式下用它写入磁盘：
 /// 体积上界 = 最终消息体（不含逐 chunk 时序与协议帧开销）。
 #[derive(Default)]
 struct StreamAssembler {
@@ -247,7 +247,7 @@ struct StreamAudit {
     ctx: ReqCtx,
     upstream_model: String,
     trace_dir: Option<String>,
-    /// 请求/响应体可选记录：关闭时落盘前抹掉报文体。
+    /// 请求/响应体可选记录：关闭时写入磁盘前抹掉报文体。
     record_bodies: bool,
     /// trace 保留条数（0 = 不清理）。
     trace_retention: usize,
@@ -259,9 +259,9 @@ struct StreamAudit {
     failed: Option<String>,
     /// 上游流是否自然读尽（未读尽且无失败 = 客户端断开等提前终止）。
     completed: bool,
-    /// 上游侧聚合：decode 后、Core 钩子前喂入——记录上游实际发送的内容。
+    /// 上游侧聚合：decode 后、Core 钩子前送入——记录上游实际发送的内容。
     up_asm: StreamAssembler,
-    /// 客户端侧聚合：仅喂入实际编码下发的事件——记录客户端实际收到的内容
+    /// 客户端侧聚合：仅送入实际编码下发的事件——记录客户端实际收到的内容
     /// （含插件过滤、会话水印注入的效果，可与上游侧对比插件行为）。
     down_asm: StreamAssembler,
 }
@@ -317,7 +317,7 @@ impl Drop for StreamAudit {
 // `audit.failed` / `audit.completed` 在本函数的生成器内写入、仅由
 // `StreamAudit::Drop` 读取。rustc 的 `unused_assignments` 只做字段级数据流分析、
 // 不把 Drop glue 算作一次读取，故在此误报「assigned value is never read」。
-// `e2e_stream_responses_to_anthropic` 断言正常读尽的流落库为 status="ok"
+// `e2e_stream_responses_to_anthropic` 断言正常读尽的流写入数据库为 status="ok"
 // （而非 Drop 默认的 "aborted"），实证这些写入确实到达了 Drop。
 #[allow(unused_assignments)]
 pub fn build_stream_response(
@@ -364,10 +364,10 @@ pub fn build_stream_response(
             std::collections::HashSet::new();
         // 会话水印状态：marker 嵌进第一个可承载推理块的明文首部（同 index 的
         // 推理增量）。凭据先行 / redacted 的推理块不可注入——入口编码器会把
-        // 凭据先行的块开成 redacted_thinking 完整块，再补明文增量会顶撞
-        // 客户端块状态机。整流无可用推理块则不打标（纯 CoT 方案）。
+        // 凭据先行的块开成 redacted_thinking 完整块，再补明文增量会扰乱
+        // 客户端块状态机。整流无可用推理块则不打标记（纯 CoT 方案）。
         let mut tagged = session_tag.is_none();
-        // 打标落到的块 index：其 BlockStop 携带的完整块（chat 上游的 chat:
+        // 打标记落到的块 index：其 BlockStop 携带的完整块（chat 上游的 chat:
         // 自凭据、responses 的 reasoning item 组装）也要补上 marker——
         // 只存 done item 的客户端靠它把水印带进 transcript。
         let mut marker_idx: Option<usize> = None;
@@ -378,14 +378,14 @@ pub fn build_stream_response(
         // decode 每流状态（Gemini 上游的块索引跨 chunk 分配依赖它）
         let mut dec_state = StreamDecodeState::default();
         // 终结状态：上游协议（Chat 的 [DONE]、Gemini 的 finishReason）可能
-        // 不发任何终帧就结束——客户端协议状态机需要一个 MessageStop 兜底。
+        // 不发任何终帧就结束——客户端协议状态机需要一帧 MessageStop 作回退。
         let mut saw_stop = false;
         // 是否已见过「真正的收尾 delta」（stop_reason 非空）。usage-only 的
         // MessageDelta 不算——那种帧之后客户端仍等不到 finish_reason。
         let mut saw_finish = false;
         let mut saw_start = false;
         // 上游带内错误帧（协议级 error event，非 decode 失败）：流被上游宣告
-        // 失败——兜底收尾只补 MessageStop，不再伪造 completed 组装帧。
+        // 失败——回退收尾只补 MessageStop，不再伪造 completed 组装帧。
         let mut saw_err = false;
 
         // 'stream 标签：解码/编码任一环节出错都要**真正终止**整条流。
@@ -515,7 +515,7 @@ pub fn build_stream_response(
             }
 
             for mut ev in events {
-                // 打标块的 BlockStop 若携带完整块（chat 上游收尾的 BlockStop
+                // 打标记块的 BlockStop 若携带完整块（chat 上游收尾的 BlockStop
                 // 带累积全文 + chat: 自凭据），其明文同样补上 marker 首部——
                 // responses 入口用它组装 done item，只存完成态的客户端靠它
                 // 把水印带进 transcript。凭据不补：chat: 自凭据在 decode 态
@@ -567,7 +567,7 @@ pub fn build_stream_response(
                 let mut sent = false;
                 for mut cc in cchunks {
                     // [RAW] 客户端 chunk 钩子（可改写/丢弃）。
-                    // 出错时与上游侧对称地记 warn 后放行——原先被 `if let Ok(..)` 静默吞掉。
+                    // 出错时与上游侧对称地记 warn 后放行——原先被 `if let Ok(..)` 静默丢弃。
                     match hooks.on_client_chunk_raw(&ctx, &mut cc).await {
                         Ok(ChunkVerdict::Drop) => continue,
                         Err(e) => tracing::warn!(error = %e, "on_client_chunk_raw 失败，放行"),
@@ -593,8 +593,8 @@ pub fn build_stream_response(
                 // 不再补 completed/delta——错误帧之后再说「完成」自相矛盾。
                 tail.push(CoreStreamEvent::MessageStop);
             } else {
-                // 无 MessageStart 的兜底上游（罕见）：先补一帧，客户端才有
-                // 消息头可挂
+                // 无 MessageStart 的罕见上游（罕见）：先补一帧，客户端才有
+                // 消息头可挂载
                 if !saw_start {
                     tail.push(CoreStreamEvent::MessageStart {
                         id: String::new(),
@@ -620,7 +620,7 @@ pub fn build_stream_response(
                 tail.push(CoreStreamEvent::MessageStop);
             }
             for mut ev in tail {
-                // 与主循环同理：兜底合成的 BlockStop 若带打标块的完整推理块，
+                // 与主循环同理：回退合成的 BlockStop 若带打标记块的完整推理块，
                 // 其明文补上 marker 首部，保证 done-item 形态也含水印。
                 if let (Some(mi), Some(payload)) = (marker_idx, session_tag.as_deref()) {
                     if let CoreStreamEvent::BlockStop { index, block: Some(b) } = &mut ev {
@@ -719,7 +719,7 @@ mod tests {
     }
 
     /// Drop 必须真正落一行 usage——客户端断开时生成器被 drop，
-    /// 旧实现把落库写在循环之后，那种情况下什么都不记。
+    /// 旧实现把写入数据库写在循环之后，那种情况下什么都不记。
     #[test]
     fn drop_records_usage_row() {
         let a = audit(None, false);

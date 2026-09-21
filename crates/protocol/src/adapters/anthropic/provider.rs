@@ -30,7 +30,7 @@ pub(super) fn block_to_anthropic_client(block: &ContentBlock) -> Option<Value> {
 }
 
 /// `for_client` 区分两条出站路径的凭据语义：
-///   * 上游（false）：只放行 Anthropic 原生签名（ant: 解标），异源凭据透传必 400；
+///   * 上游（false）：只放行 Anthropic 原生签名（ant: 解除标记），异源凭据透传必 400；
 ///   * 客户端（true）：Reasoning 始终还原 thinking/redacted_thinking 形态，
 ///     签名经 emit_signature 透传（本家还原、异源带标记），不做降级。
 fn block_to_anthropic_ex(block: &ContentBlock, for_client: bool) -> Option<Value> {
@@ -451,7 +451,7 @@ fn build_messages(req: &CoreRequest) -> Vec<Value> {
         .map(|(role, content)| json!({ "role": role, "content": content }))
         .collect();
     // Anthropic 要求 messages 非空（空数组直接 400）：上游过滤/插件可能把
-    // 全部内容清空，兜底一条占位 user 消息，宁可语义损失也不构造必拒请求。
+    // 全部内容清空，回退一条占位 user 消息，宁可语义损失也不构造必拒请求。
     if msgs.is_empty() {
         vec![json!({
             "role": "user",
@@ -511,7 +511,7 @@ impl ProviderAdapter for AnthropicAdapter {
         );
 
         // max_tokens 必填：取值优先级为 客户端显式值 > 模型元数据输出上限
-        // （dispatch 由 models 表回填到 ctx）> 常量兜底——不凭空注入小值截断输出。
+        // （dispatch 由 models 表回填到 ctx）> 常量回退——不凭空注入小值截断输出。
         let max_tokens = req
             .max_tokens
             .or(ctx.upstream_max_output_tokens)
@@ -567,7 +567,7 @@ impl ProviderAdapter for AnthropicAdapter {
         //   * "adaptive"（默认）：thinking:{type:"adaptive"} + output_config.effort
         //     ——Claude 4.7+/Opus 5/Sonnet 5/Fable 5 的唯一合法形态；
         //   * "enabled"（旧模型）：thinking:{type:"enabled", budget_tokens}，
-        //     预算按 effort 档位换算并夹到 < max_tokens。
+        //     预算按 effort 档位换算并限制在 max_tokens 以内。
         // 端点 extra.thinking_mode = "enabled" 可强制旧形态。
         let thinking_mode = endpoint
             .extra
@@ -622,7 +622,6 @@ impl ProviderAdapter for AnthropicAdapter {
             obj.insert("stop_sequences".to_string(), json!(req.stop));
         }
 
-        // headers
         let version = endpoint
             .version
             .clone()
@@ -834,7 +833,7 @@ mod tests {
             .any(|(k, v)| k == "anthropic-version" && v == dto::DEFAULT_VERSION));
     }
 
-    /// 回归：客户端未设上限时 max_tokens 按「模型元数据（ctx 回填）→ 常量兜底」
+    /// 回归：客户端未设上限时 max_tokens 按「模型元数据（ctx 回填）→ 常量回退」
     /// 取值——不得凭空注入小值截断输出（线上曾因此静默截在 4096）。
     #[tokio::test]
     async fn max_tokens_prefers_model_output_limit_then_default() {
@@ -859,7 +858,7 @@ mod tests {
             .unwrap();
         assert_eq!(up.body["max_tokens"], 2048);
 
-        // 两者皆无 → 常量兜底（必填字段仍须发送）
+        // 两者皆无 → 常量回退（必填字段仍须发送）
         ctx.upstream_max_output_tokens = None;
         let up = adapter
             .from_core_request(&ctx, &req, &endpoint())
@@ -945,7 +944,7 @@ mod tests {
         assert_eq!(up.body["thinking"]["type"], "adaptive");
         assert_eq!(up.body["output_config"]["effort"], "high");
 
-        // 旧模型端点：enabled + budget_tokens（按档位换算并夹紧）
+        // 旧模型端点：enabled + budget_tokens（按档位换算并收紧）
         let mut ep = endpoint();
         ep.extra.insert("thinking_mode".into(), json!("enabled"));
         let up = adapter.from_core_request(&ctx, &req, &ep).await.unwrap();
@@ -953,7 +952,7 @@ mod tests {
         assert_eq!(up.body["thinking"]["budget_tokens"], 16384);
         assert!(up.body.get("output_config").is_none());
 
-        // 预算必须严格小于 max_tokens：小 max_tokens 时被夹紧
+        // 预算必须严格小于 max_tokens：小 max_tokens 时被收紧
         let mut tight = req.clone();
         tight.max_tokens = Some(3000);
         let up2 = adapter.from_core_request(&ctx, &tight, &ep).await.unwrap();

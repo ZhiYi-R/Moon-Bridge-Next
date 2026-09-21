@@ -21,7 +21,6 @@ pub struct AppInfo {
     pub trace_dir: String,
 }
 
-/// 获取应用运行信息。
 #[tauri::command]
 pub fn app_info(state: State<'_, Arc<ManagedState>>) -> CmdResult<AppInfo> {
     let p = &state.paths;
@@ -41,7 +40,7 @@ pub fn config_get(state: State<'_, Arc<ManagedState>>) -> CmdResult<AppConfig> {
     Ok(state.config())
 }
 
-/// 保存引导配置（落盘 config.toml）。网关参数变更需 `gateway_restart` 生效。
+/// 保存引导配置（写入磁盘 config.toml）。网关参数变更需 `gateway_restart` 生效。
 #[tauri::command]
 pub fn config_set(state: State<'_, Arc<ManagedState>>, config: AppConfig) -> CmdResult<()> {
     state.update_config(|c| *c = config)?;

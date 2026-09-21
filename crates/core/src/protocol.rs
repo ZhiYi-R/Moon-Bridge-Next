@@ -5,7 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 支持的协议种类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Protocol {
     /// OpenAI Responses API（`/v1/responses`）。
@@ -48,7 +47,6 @@ impl Protocol {
         }
     }
 
-    /// 全部协议（用于枚举/注册表初始化）。
     pub fn all() -> [Protocol; 4] {
         [
             Protocol::OpenAiResponse,

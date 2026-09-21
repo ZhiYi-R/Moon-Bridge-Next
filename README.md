@@ -27,12 +27,12 @@ Moon Bridge Next 是一个本地 LLM 网关，把客户端和上游模型服务�
 
 - **多端点 Provider**：同一 Provider 可配置多个端点，各有独立的协议、base URL 与 API Key，请求按端点顺序自动故障转移。
 - **模型目录**：可从 models.dev 检索并批量导入模型，上下文窗口、最大输出 token、模态、推理档位与定价一并带入；也支持完全手工维护。
-- **Offer 与定价**：模型经由 Offer 挂到 Provider 上。Offer 携带价目（USD/1M tokens，区分输入、输出、缓存读、缓存写、推理五类单价，支持长上下文分档计价），并可绑定特定端点协议，控制同一模型在多协议 Provider 上的路由。
+- **Offer 与定价**：模型经由 Offer 挂载到 Provider 上。Offer 携带价目（USD/1M tokens，区分输入、输出、缓存读、缓存写、推理五类单价，支持长上下文分档计价），并可绑定特定端点协议，控制同一模型在多协议 Provider 上的路由。
 - **路由别名**：客户端以别名请求模型，别名解析为「Provider + 上游模型」，更换上游或调整故障转移策略对客户端透明。
 
 ### 用量计量
 
-每次请求记录一条用量：会话、客户端模型、上游模型、Provider、五类 token 计数（输入 / 输出 / 缓存读 / 缓存写 / 推理）、首 token 延迟（TTFT）、总延迟、状态（成功 / 错误 / 中断）与费用。费用按记录时命中的价目现算，价目变动不回改历史记录。用量页提供汇总卡片、token 时序堆叠图、模型分布与逐条明细。
+每次请求记录一条用量：会话、客户端模型、上游模型、Provider、五类 token 计数（输入 / 输出 / 缓存读 / 缓存写 / 推理）、首 token 延迟（TTFT）、总延迟、状态（成功 / 错误 / 中断）与费用。费用按记录时命中的价目实时计算，价目变动不回改历史记录。用量页提供汇总卡片、token 时序堆叠图、模型分布与逐条明细。
 
 ### 请求留痕（Traces）
 
@@ -40,11 +40,11 @@ Moon Bridge Next 是一个本地 LLM 网关，把客户端和上游模型服务�
 
 ### 额度看板
 
-「额度」页按 Provider 分组、以表格展示各上游端点 key 的配额与健康状态：Provider 绑定一个 **`quota` 类配额插件**（插件系统的一类，不进请求链路）后，引擎对**每个端点 key 各执行一次 `MB.query`** 并逐 key 拆行展示（掩码 key 标签、独立状态与配额、可整 Provider 刷新）。内置配额插件开箱可绑（new-api 系中转站、DeepSeek、Moonshot/Kimi 开放平台、SiliconFlow、OpenRouter、智谱 GLM Coding Plan、Kimi Coding Plan、CommandCode、Claude Code 订阅等），也可在插件页自建 quota 插件（沙箱内执行，可用 `mb.http.request` 访问上游配额接口，返回带 `type` 判别的配额契约——百分比 / 金额额度 / 计数器，可附窗口时长与重置时间）。Provider 编辑页可设置查询间隔（可禁用定时）、实例配置（加密落库）与**测试查询**预览——保存前即可试跑验证；某个 key 查询失败时对应行标记异常并保留该 key 最近一次成功结果。配额条数量与名称完全由脚本决定。
+「额度」页按 Provider 分组、以表格展示各上游端点 key 的配额与健康状态：Provider 绑定一个 **`quota` 类配额插件**（插件系统的一类，不进请求链路）后，引擎对**每个端点 key 各执行一次 `MB.query`** 并逐 key 拆行展示（掩码 key 标签、独立状态与配额、可整 Provider 刷新）。内置配额插件开箱可绑（new-api 系中转站、DeepSeek、Moonshot/Kimi 开放平台、SiliconFlow、OpenRouter、智谱 GLM Coding Plan、Kimi Coding Plan、CommandCode、Claude Code 订阅等），也可在插件页自建 quota 插件（沙箱内执行，可用 `mb.http.request` 访问上游配额接口，返回带 `type` 判别的配额契约——百分比 / 金额额度 / 计数器，可附窗口时长与重置时间）。Provider 编辑页可设置查询间隔（可禁用定时）、实例配置（加密写入数据库）与**测试查询**预览——保存前即可试跑验证；某个 key 查询失败时对应行标记异常并保留该 key 最近一次成功结果。配额条数量与名称完全由脚本决定。
 
 ### 会话识别
 
-会话身份按以下优先级解析：请求显式携带的标识（body 中的 `session_id`、`previous_response_id`，或 `X-Codex-Window-Id` 请求头）优先。对完全不带会话标识的客户端（如 Qwen Code），网关会把 `[mb:<载荷>]` 标记嵌进助手**推理（CoT）块明文的首部**，客户端下一轮带回完整对话历史时即可认回同一会话；网关自分配会话的载荷就是会话 uuid，因此身份不随活跃会话表淘汰或网关重启而漂移（无推理块的轮次不打标）。标记在转发上游前被完整剥除，不进入模型上下文，也不存在被模型模仿的风险；该功能可在设置中关闭，关闭后入站方向的存量标记仍会被剥除。会话识别决定了插件 `mb.session` 的状态隔离粒度与 trace 的会话目录归类。
+会话身份按以下优先级解析：请求显式携带的标识（body 中的 `session_id`、`previous_response_id`，或 `X-Codex-Window-Id` 请求头）优先。对完全不带会话标识的客户端（如 Qwen Code），网关会把 `[mb:<载荷>]` 标记嵌进助手**推理（CoT）块明文的首部**，客户端下一轮带回完整对话历史时即可认回同一会话；网关自分配会话的载荷就是会话 uuid，因此身份不随活跃会话表淘汰或网关重启而漂移（无推理块的轮次不打标记）。标记在转发上游前被完整剥除，不进入模型上下文，也不存在被模型模仿的风险；该功能可在设置中关闭，关闭后入站方向的存量标记仍会被剥除。会话识别决定了插件 `mb.session` 的状态隔离粒度与 trace 的会话目录归类。
 
 ### 访问控制
 
@@ -61,7 +61,7 @@ Moon Bridge Next 是一个本地 LLM 网关，把客户端和上游模型服务�
 - 管理令牌由 `--admin-token` / `MOONBRIDGE_ADMIN_TOKEN` 提供，仅用于管理 API，不保存、不回显。网关令牌由 `--gateway-token` / `MOONBRIDGE_GATEWAY_TOKEN` 或既有配置提供，不能为空，也不能与管理令牌相同。
 - 从旧版共享令牌升级时，将旧值放入 `MOONBRIDGE_GATEWAY_TOKEN`，另生成不同的管理令牌；模型客户端无需改 key，浏览器改用新管理令牌登录。Web 登录令牌仅保存在页面内存，刷新需重新登录；页面提供 CSP 防护。
 - 管理 API 读取配置时 `authToken` 为 `null`；保存配置传 `null` 或空值保留既有网关令牌，只有显式更新才持久化新网关令牌。无关配置保存不会将环境变量覆盖值写入配置。
-- 提供多阶段 `Dockerfile`（构建前端 + 编译服务端 + slim 运行时，uid 10001），`deploy/soul/` 有 docker compose 部署样例。「重启网关」在进程内优雅排空请求、执行生命周期钩子后重新监听，不依赖 supervisor；状态显示实际绑定地址。每代网关只有一个配额调度器，重启取消旧任务。
+- 提供多阶段 `Dockerfile`（构建前端 + 编译服务端 + slim 运行时，uid 10001），`deploy/soul/` 有 docker compose 部署样例。「重启网关」在进程内排空请求、执行生命周期钩子后重新监听，不依赖 supervisor；状态显示实际绑定地址。每代网关只有一个配额调度器，重启取消旧任务。
 - 公网暴露时建议前置反向代理（TLS 终止），并分别保管两种令牌。
 
 ### 凭据存储与升级备份
@@ -72,7 +72,7 @@ Moon Bridge Next 是一个本地 LLM 网关，把客户端和上游模型服务�
 
 ### 配额查询安全边界
 
-配额脚本的 HTTP 请求仅可访问同源或明确授权的 origin，默认拒绝私网与云元数据地址。确需访问私网时，在启动环境设置 `MOONBRIDGE_QUOTA_PRIVATE_ORIGINS` 为精确 origin 的 JSON 数组（例如 `["https://quota.internal.example:8443"]`），不能通过配额配置自行放行；元数据地址始终禁止。请求不使用系统代理、不跟随重定向，并钉住已校验的 DNS 地址；响应解压后最多 1 MiB，单次 HTTP 最长 30 秒、单个 Provider 最长 45 秒。
+配额脚本的 HTTP 请求仅可访问同源或明确授权的 origin，默认拒绝私网与云元数据地址。确需访问私网时，在启动环境设置 `MOONBRIDGE_QUOTA_PRIVATE_ORIGINS` 为精确 origin 的 JSON 数组（例如 `["https://quota.internal.example:8443"]`），不能通过配额配置自行放行；元数据地址始终禁止。请求不使用系统代理、不跟随重定向，并固定已校验的 DNS 地址；响应解压后最多 1 MiB，单次 HTTP 最长 30 秒、单个 Provider 最长 45 秒。
 
 显式配置 `egressProxy` 时，配额 HTTP 会明确报不支持代理，不会静默直连；网关推理请求仍支持代理。脚本返回 `nil` 或非法 `status` 均视为错误。new-api 插件按当前 `data.quota / quota_per_unit`（默认 500000）计算余额，不使用 `used_quota` 代替余额；Kimi 插件允许仅一个配额窗口可用。
 
@@ -90,7 +90,7 @@ Moon Bridge Next 是一个本地 LLM 网关，把客户端和上游模型服务�
 
 ## 插件系统
 
-插件是一个 Lua 5.4 脚本，挂在请求链路上介入流量处理。网关提供两层钩子：
+插件是一个 Lua 5.4 脚本，挂载在请求链路上介入流量处理。网关提供两层钩子：
 
 - **语义层（`core`）**：触发时协议转换已完成，操作对象是统一的 Core IR——写一次，对全部四种协议生效；
 - **报文层（`raw_request` / `raw_response` / `raw_stream`）**：直接读写真实 HTTP 报文——headers、body、乃至流式传输的每一个 SSE chunk，位于协议转换最外层。
@@ -127,7 +127,7 @@ Moon Bridge Next 是一个本地 LLM 网关，把客户端和上游模型服务�
 | `requires` | 启用前提（可选），如 `{ sessionMarker = true }`；前提不满足时网关拒绝启用 |
 | `init` / `shutdown` | 生命周期函数（可选），分别在网关启动完成前、退出后按加载顺序/逆序调用 |
 
-宿主提供的 API 挂在全局 `mb`（小写）下。
+宿主提供的 API 挂载在全局 `mb`（小写）下。
 
 ### 语义层钩子
 
@@ -170,7 +170,7 @@ Moon Bridge Next 是一个本地 LLM 网关，把客户端和上游模型服务�
 | `mb.log.debug / info / warn / error(msg)` | 结构化日志，带插件名 |
 | `mb.config` | 本插件的配置，配合 `config_schema` 使用 |
 | `mb.session.get(k)` / `mb.session.set(k, v)` | 会话级状态，按「插件名 + 会话」隔离；会话被淘汰时自动清理 |
-| `mb.http.request({ method, url, headers, body, timeout_ms })` | HTTP 子请求，返回 `{ status, headers, body }`；受宿主 egress 代理与超时管控，未指定超时时兜底 30 秒 |
+| `mb.http.request({ method, url, headers, body, timeout_ms })` | HTTP 子请求，返回 `{ status, headers, body }`；受宿主 egress 代理与超时管控，未指定超时时回退 30 秒 |
 | `mb.provider.invoke(provider, model, req)` | 以 Core IR 直接调用另一个 Provider，返回 CoreResponse；跨模型编排的入口 |
 | `mb.headers.get / set / remove(headers, name)` | 报文头操作，大小写不敏感、保序 |
 | `mb.crypto.sha256 / hmac_sha256 / base64_encode / base64_decode` | 摘要与编码，用于上游签名等场景 |
@@ -217,7 +217,7 @@ end
 
 - 在 Plugins 页新建插件：直接粘贴内联脚本，或指向插件目录下的 `.lua` 文件（路径不允许穿越出插件目录）；
 - 支持在线编辑脚本、启停与删除；保存改动后重启网关生效；
-- 通过绑定（binding）把插件挂到声明过的 scope 上：全局、某个 Provider、某个模型或某条路由，同一插件在不同绑定下可使用不同配置；
+- 通过绑定（binding）把插件挂载到声明过的 scope 上：全局、某个 Provider、某个模型或某条路由，同一插件在不同绑定下可使用不同配置；
 - 单个插件的钩子抛错只记录警告并跳过该插件，不影响请求链路与其它插件。
 
 ### 沙箱与配额
@@ -226,7 +226,7 @@ end
 
 - `os`、`io`、`loadfile`、`dofile`、`require`、`package` 六个危险全局整体不可用；
 - 指令数配额（默认 2 亿条）经调试钩子强制执行，覆盖插件自建的协程，死循环会被中止；
-- 内存上限（默认 1024 MB）与 wall-clock 执行超时兜底缓慢型失控；
+- 内存上限（默认 1024 MB）与 wall-clock 执行超时拦截缓慢型失控；
 - 超大报体（默认阈值 100 MB）不展开为 Lua table，标记 `body_truncated` 后照常转发原始报文。
 
 ### 编写插件的参考材料

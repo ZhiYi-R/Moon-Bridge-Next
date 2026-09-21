@@ -1,7 +1,7 @@
 //! Tauri 托管的应用状态：数据库、引导配置、网关生命周期句柄。
 //!
 //! commands 与 tray 通过 `State<Arc<ManagedState>>` 访问；网关以 tokio task +
-//! oneshot 优雅关闭信号驱动，实现「启动 / 停止 / 查询状态」。
+//! oneshot 平滑关闭信号驱动，实现「启动 / 停止 / 查询状态」。
 
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -13,34 +13,27 @@ use tokio::task::JoinHandle;
 
 use crate::config::{AppConfig, AppPaths};
 
-/// 运行中的网关句柄：优雅关闭信号发送端 + 服务 task + 监听地址。
+/// 运行中的网关句柄：平滑关闭信号发送端 + 服务 task + 监听地址。
 struct GatewayHandle {
     shutdown: oneshot::Sender<()>,
     task: JoinHandle<()>,
     addr: String,
 }
 
-/// 网关运行状态（回传前端）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayStatus {
     pub running: bool,
     pub addr: String,
-    /// 最近一次启动失败的错误信息（若有）。
     pub error: Option<String>,
 }
 
-/// 应用共享状态。
 pub struct ManagedState {
-    /// SQLite 存储句柄。
     pub db: Arc<Database>,
-    /// 关键路径集合。
     pub paths: AppPaths,
-    /// 引导配置。
     config: RwLock<AppConfig>,
     /// 运行中的网关（`None` 表示未启动）。
     gateway: Mutex<Option<GatewayHandle>>,
-    /// 最近一次网关错误。
     last_error: Mutex<Option<String>>,
     /// 启停串行化：`has_live_gateway` 检查与句柄存储之间有 await，两次并发
     /// start 会都走到 spawn —— 败者 task 绑定失败时把 `gateway` 置 None，
@@ -50,7 +43,6 @@ pub struct ManagedState {
 }
 
 impl ManagedState {
-    /// 构造状态：打开数据库、加载引导配置。
     pub fn new(paths: AppPaths) -> Result<Arc<Self>> {
         paths.ensure_dirs().context("初始化应用目录失败")?;
         let db = Database::open(&paths.db_path)
@@ -80,12 +72,11 @@ impl ManagedState {
         }))
     }
 
-    /// 当前引导配置的快照。
     pub fn config(&self) -> AppConfig {
         self.config.read().unwrap().clone()
     }
 
-    /// 更新引导配置并落盘。
+    /// 更新引导配置并写入磁盘。
     pub fn update_config(&self, f: impl FnOnce(&mut AppConfig)) -> Result<()> {
         let mut guard = self.config.write().unwrap();
         f(&mut guard);
@@ -118,7 +109,7 @@ impl ManagedState {
     ///
     /// 单独成函数是为了让 `MutexGuard` 在**返回时**必然释放。历史缺陷：
     /// `if let Some(h) = self.gateway.lock().unwrap().as_ref() { return self.status(); }`
-    /// 在 edition 2021 下 `if let`  scrutinee 的临时量活到块结束，守卫仍被持有，
+    /// 在 edition 2021 下 `if let`  scrutinee 的临时量活到块结束，`MutexGuard` 仍被持有，
     /// 而 `status()` 再次获取同一把**非重入** `std::sync::Mutex` ⇒ 永久死锁，
     /// 连带 `gateway_status` / `gateway_stop` / 托盘切换全部卡死。
     /// 实测 edition 2021 与 2024 都会死锁，升级 edition 不是解法。
@@ -134,7 +125,7 @@ impl ManagedState {
     /// 者刚存的句柄，网关在跑却失去句柄）。
     pub async fn start_gateway(&self) -> Result<GatewayStatus> {
         let _lifecycle = self.lifecycle.lock().await;
-        // 已在运行则幂等返回（守卫已在 `has_live_gateway` 返回时释放）
+        // 已在运行则幂等返回（`MutexGuard` 已在 `has_live_gateway` 返回时释放）
         if self.has_live_gateway() {
             return Ok(self.status());
         }
@@ -181,7 +172,7 @@ impl ManagedState {
         Ok(self.status())
     }
 
-    /// 停止网关（优雅关闭并等待 task 退出）。
+    /// 停止网关（平滑关闭并等待 task 退出）。
     pub async fn stop_gateway(&self) -> Result<GatewayStatus> {
         let _lifecycle = self.lifecycle.lock().await;
         let handle = self.gateway.lock().unwrap().take();
@@ -208,7 +199,7 @@ mod tests {
 
     /// 回归：网关已在运行时再次 `start_gateway` 必须幂等返回，不得死锁。
     ///
-    /// 历史缺陷：`if let Some(h) = self.gateway.lock()...` 仍持守卫时调用 `status()`，
+    /// 历史缺陷：`if let Some(h) = self.gateway.lock()...` 仍持有 `MutexGuard` 时调用 `status()`，
     /// 再取同一把非重入 `std::sync::Mutex` ⇒ 永久阻塞。
     ///
     /// 为什么把被测调用放进独立 OS 线程 + 自有 runtime：死锁发生在同步 `lock()` 里，
@@ -265,7 +256,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 未启动时 running=false 且 addr 回落到配置值。
+    /// 未启动时 running=false 且 addr 回退到配置值。
     #[test]
     fn status_falls_back_to_config_addr_when_stopped() {
         let (paths, dir) = temp_paths("fallback");

@@ -1,7 +1,7 @@
 //! Trace（请求报文快照）浏览 handlers。
 //!
 //! trace 由网关在 `GatewayConfig.trace_dir`（= `data_dir/traces`）下按
-//! `<session>/<model>/<created_at>-<id>.json` 落盘。此处提供只读浏览：列举、读取
+//! `<session>/<model>/<created_at>-<id>.json` 写入磁盘。此处提供只读浏览：列举、读取
 //! 单条、删除单条。所有路径均在 `trace_dir` 内做规范化校验，防止路径穿越。
 
 use std::path::{Path, PathBuf};
@@ -161,7 +161,6 @@ pub async fn trace_read(
     Ok(Json(value))
 }
 
-/// 删除单条 trace 文件。
 pub async fn trace_delete(
     State(state): State<AdminState>,
     Query(params): Query<TracePathParams>,

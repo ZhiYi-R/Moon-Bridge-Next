@@ -30,14 +30,12 @@ import { formatCtx } from "@/lib/utils";
 const error = ref<string | null>(null);
 const { confirm } = useConfirm();
 const toast = useToast();
-/** 分页切片：按页号取子集，并保证页号不越界。 */
 function paginate<T>(list: T[], page: Ref<number>, pageSize: number): T[] {
   return list.slice((page.value - 1) * pageSize, page.value * pageSize);
 }
 
 const textareaClass =
   "flex w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
-/** 节头内嵌小号下拉。 */
 const providerOptions = computed(() => providers.value.map((p) => ({ value: p.key, label: p.key })));
 const modelOptions = computed(() => models.value.map((m) => ({ value: m.slug, label: m.slug })));
 
@@ -83,7 +81,7 @@ const form = reactive<ModelForm>({
   extraText: "{}",
 });
 
-// ── 未保存关闭守卫：打开弹窗时拍快照，关闭时比对 ──
+// ── 未保存关闭确认：打开弹窗时拍快照，关闭时比对 ──
 const formSnapshot = ref("");
 const formDirty = computed(() => JSON.stringify(form) !== formSnapshot.value);
 
@@ -225,7 +223,6 @@ const catalogKey = (m: CatalogModel) => `${m.providerKey}::${m.id}`;
 /** 已存在于本地的 slug 集合，用于在列表里标注「已导入」。 */
 const existingSlugs = computed(() => new Set(models.value.map((m) => m.slug)));
 
-/** 搜索过滤：匹配模型 id、显示名、provider 名（大小写不敏感）。 */
 const filteredCatalog = computed(() => {
   const q = importQuery.value.trim().toLowerCase();
   if (!q) return catalog.value;
@@ -286,7 +283,6 @@ function toggleSelect(m: CatalogModel) {
   importSelected.value = next;
 }
 
-/** 全选/清空当前过滤结果。 */
 function toggleSelectAllFiltered() {
   const keys = filteredCatalog.value.map(catalogKey);
   const allSelected = keys.length > 0 && keys.every((k) => importSelected.value.has(k));
@@ -301,7 +297,6 @@ const allFilteredSelected = computed(() => {
   return keys.length > 0 && keys.every((k) => importSelected.value.has(k));
 });
 
-/** 部分选中（全选框的半选态）：过滤结果中有勾选但非全选。 */
 const someFilteredSelected = computed(
   () =>
     !allFilteredSelected.value &&
@@ -592,7 +587,6 @@ const rows = computed<ModelRow[]>(() => {
       .filter((r) => r.offer !== null),
   ];
 });
-/** 各供应商的报价数，作 tab 角标。 */
 const offerCountByProvider = computed(() => {
   const m = new Map<string, number>();
   for (const o of offers.value) m.set(o.providerKey, (m.get(o.providerKey) ?? 0) + 1);
@@ -609,12 +603,11 @@ watch(pageCount, (c) => {
   if (page.value > c) page.value = c;
 });
 
-/** 当前弹窗编辑的 (provider, slug) 是否已有报价（决定 footer 是否出现「删除报价」）。 */
 const offerExists = computed(() =>
   offers.value.some((o) => o.providerKey === offerForm.providerKey && o.modelSlug === offerForm.modelSlug),
 );
 
-/** 弹窗标题：显示名优先（slug 兜底，孤儿报价无定义），@ 上游点明归属；新建未选模型时只给动作名。 */
+/** 弹窗标题：显示名优先（slug 回退，孤儿报价无定义），@ 上游点明归属；新建未选模型时只给动作名。 */
 const offerTitle = computed(() => {
   if (!offerForm.modelSlug) return "添加报价";
   const name = models.value.find((m) => m.slug === offerForm.modelSlug)?.displayName ?? offerForm.modelSlug;
@@ -759,7 +752,6 @@ async function loadProviders() {
   }
 }
 
-/** 报价按 provider 维度拉取：并行取全量后在本地按 (provider, slug) 聚合。 */
 async function loadOffers() {
   if (providers.value.length === 0) {
     offers.value = [];
@@ -791,12 +783,10 @@ async function removeOffer(providerKey: string, modelSlug: string): Promise<bool
   }
 }
 
-/** 报价弹窗内的删除：删完顺手关弹窗。 */
 async function removeOfferFromModal() {
   if (await removeOffer(offerForm.providerKey, offerForm.modelSlug)) offerModal.value = false;
 }
 
-/** 读取 offer 定价中的单项（无该定价显示 —）。 */
 function price(p: unknown, key: string): string {
   const v = (p as Record<string, unknown> | null)?.[key];
   return typeof v === "number" ? String(v) : "—";
@@ -834,7 +824,6 @@ onActivated(() => {
   <div class="flex h-full min-h-0 flex-col">
     <Alert v-if="error" class="shrink-0">{{ error }}</Alert>
 
-    <!-- 编辑弹窗 -->
     <Modal
       :open="editing"
       :title="isNew ? '新建模型' : '编辑模型'"
@@ -889,7 +878,6 @@ onActivated(() => {
       </template>
     </Modal>
 
-    <!-- 从 models.dev 导入弹窗 -->
     <Modal
       :open="importModal"
       title="从 models.dev 导入模型"
@@ -898,7 +886,6 @@ onActivated(() => {
     >
       <Alert v-if="importError" class="mb-3 px-3">{{ importError }}</Alert>
 
-      <!-- 搜索 + 操作条 -->
       <div class="mb-3 flex items-center gap-2">
         <div class="relative flex-1">
           <Search class="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -1169,7 +1156,6 @@ onActivated(() => {
                 该供应商暂无报价
               </td>
             </tr>
-            <!-- 尾行：供应商 tab 有「添加报价」，两侧都有导入与新建模型 -->
             <tr class="last:border-0">
               <td :colspan="activeProvider === '' ? 5 : 9" class="py-1">
                 <div class="flex items-center justify-end gap-4">
@@ -1350,7 +1336,6 @@ onActivated(() => {
               </td>
             </template>
           </tr>
-          <!-- 新增虚拟行：tierEditIndex === offerTiers.length -->
           <tr
             v-if="tierEditIndex === offerTiers.length"
             class="border-b last:border-0"

@@ -23,7 +23,6 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// 解析 Responses content 项为 Core 内容块。
 pub(super) fn parse_content_item(item: &Value) -> Option<ContentBlock> {
     match item.get("type")?.as_str()? {
         "input_text" | "output_text" | "text" => {
@@ -79,7 +78,7 @@ fn parse_file(item: &Value) -> Option<ContentBlock> {
 
 /// 解析图像项，支持 `data:` URL、远程 URL 与内联的 Anthropic 形态 `source`。
 fn parse_image(item: &Value) -> Option<ContentBlock> {
-    // Anthropic 形态 source 内联（部分网关把 anthropic 块直接塞进 responses 输入）：
+    // Anthropic 形态 source 内联（部分网关把 anthropic 块直接写进 responses 输入）：
     // 只取 source.data 且记为 "url" 会把 base64 串当 URL 发出——按 source.type 分派；
     // source 解析不出值时回退到 image_url 字段。
     if let Some(src) = item.get("source") {
@@ -219,7 +218,6 @@ fn call_output_to_message(item: &Value) -> Message {
     }
 }
 
-/// 解析 Responses tool 定义为 CoreTool。
 fn parse_tool(item: &Value) -> Option<Tool> {
     // 仅处理 function 类型；Responses 采用扁平结构 {type,name,description,parameters}
     let name = item.get("name").and_then(|v| v.as_str())?;
@@ -239,7 +237,6 @@ fn parse_tool(item: &Value) -> Option<Tool> {
     })
 }
 
-/// 解析 tool_choice。
 fn parse_tool_choice(v: &Value) -> Option<ToolChoice> {
     if let Some(s) = v.as_str() {
         return match s {
@@ -378,7 +375,6 @@ impl ClientAdapter for OpenAiResponsesAdapter {
             _ => {}
         }
 
-        // tools
         if let Some(tools) = raw.get("tools").and_then(|t| t.as_array()) {
             for t in tools {
                 if let Some(tool) = parse_tool(t) {
@@ -403,7 +399,6 @@ impl ClientAdapter for OpenAiResponsesAdapter {
         req.top_p = raw.get("top_p").and_then(|v| v.as_f64()).map(|v| v as f32);
         req.stream = raw.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
-        // reasoning
         if let Some(r) = raw.get("reasoning") {
             req.reasoning = Some(Reasoning {
                 effort: r
@@ -665,7 +660,7 @@ mod tests {
         assert!(
             matches!(&fallback, ContentBlock::Image { data, media_type }
                 if data == "https://example.com/f.png" && media_type == "url"),
-            "空 source 不应吞掉 image_url: {fallback:?}"
+            "空 source 不应丢掉 image_url: {fallback:?}"
         );
     }
 

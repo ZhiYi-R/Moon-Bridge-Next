@@ -2,14 +2,14 @@
 //!
 //! 每个绑定配额查询的 Provider 指定一个 `category = "quota"` 的插件：宿主加载插件脚本
 //! （复用 [`moonbridge_plugin::LuaRuntime`] 的沙箱与 `mb.*` 宿主 API），再调用
-//! `MB.query(ctx)`，把返回值经 serde 转为 JSON 落库。配额插件不进网关的
+//! `MB.query(ctx)`，把返回值经 serde 转为 JSON 写入数据库。配额插件不进网关的
 //! [`moonbridge_protocol::PluginHooks`] 注册表，宿主桥也只实现 `mb.http.request`——
 //! 配额查询是旁路能力，不该与网关生命周期互相牵制。
 //!
 //! key 来源唯一：Provider 端点按序展开（`api_key` 为空的端点沿用上一个非空 key，与
 //! 网关转发语义一致），引擎对每个端点各跑一次脚本（ctx 携带该端点的 `base_url` 与
-//! 生效 key），结果按 `(provider_key, key_index)` 拆行落库，`key_index` 即端点下标。
-//! 无端点的 Provider 退化为单次 `key = ""` 查询（账号级接口）。落库的 `key_label`
+//! 生效 key），结果按 `(provider_key, key_index)` 拆行写入数据库，`key_index` 即端点下标。
+//! 无端点的 Provider 退化为单次 `key = ""` 查询（账号级接口）。写入数据库的 `key_label`
 //! 是掩码后的展示标签，key 原文不进结果表。
 //!
 //! 失败分层（按端点独立）：
@@ -80,13 +80,11 @@ impl HostBridge for QuotaBridge {
     }
 }
 
-/// 端点展开后的单 key 查询目标。
 struct KeyTarget {
     key: String,
     base_url: String,
 }
 
-/// 配额查询引擎：持库句柄、脚本根目录与出站网络策略。
 #[derive(Clone)]
 pub struct QuotaEngine {
     db: Arc<Database>,
@@ -110,7 +108,7 @@ impl QuotaEngine {
         self
     }
 
-    /// 覆写脚本根目录（宿主在启动时钉住与插件同一套 `plugins_dir`；测试也可用）。
+    /// 覆写脚本根目录（宿主在启动时固定为与插件同一套 `plugins_dir`；测试也可用）。
     pub fn with_plugins_dir(mut self, plugins_dir: Option<PathBuf>) -> Self {
         self.plugins_dir = plugins_dir;
         self
@@ -156,9 +154,9 @@ impl QuotaEngine {
         targets
     }
 
-    /// 执行一个 Provider 的配额查询：逐端点各跑一次脚本、各自落库，返回本次全部结果。
+    /// 执行一个 Provider 的配额查询：逐端点各跑一次脚本、各自写入数据库，返回本次全部结果。
     ///
-    /// 插件解析失败时落一行 `key_index = 0` 的错误结果并剪掉其余残留行——
+    /// 插件解析失败时落一行 `key_index = 0` 的错误结果并删除其余残留行——
     /// 前端呈现为单条错误行。
     pub async fn run_provider(
         &self,
@@ -209,7 +207,7 @@ impl QuotaEngine {
         }))
     }
 
-    /// 试运行一个 Provider 的配额查询：不写库、不读历史结果，所有失败仅返回预览。
+    /// 试运行一个 Provider 的配额查询：不写入数据库、不读历史结果，所有失败仅返回预览。
     pub async fn test_provider(&self, provider: &Provider) -> Vec<QuotaKeyResult> {
         let now = now_unix();
         let plugin = match self.resolve_plugin(provider) {
@@ -284,7 +282,7 @@ impl QuotaEngine {
         Ok(kr)
     }
 
-    /// 引擎级失败的结果：`payload` 保留该行上一次落库的值。
+    /// 引擎级失败的结果：`payload` 保留该行上一次写入数据库的值。
     fn engine_error_result(
         &self,
         provider_key: &str,
@@ -586,10 +584,10 @@ pub fn view_of(
 /// 启动配额定时调度（常驻任务：应用存活期间一直跑，不提供停止句柄）。
 ///
 /// 每 [`SCHEDULE_TICK`] 扫一次到期 Provider（绑定插件 && 启用 && interval > 0 &&
-/// 距上次查询已达间隔），串行执行并落库。单个 Provider 失败乃至 panic 都不影响
+/// 距上次查询已达间隔），串行执行并写入数据库。单个 Provider 失败乃至 panic 都不影响
 /// 循环——配额脚本是用户可编辑的，任何一个坏脚本都不该让整个看板停摆。
 ///
-/// `engine` 由调用方提供（与手动刷新共用一个），`plugins_dir` 在此钉到它上面，
+/// `engine` 由调用方提供（与手动刷新共用一个），`plugins_dir` 在此固定到它上面，
 /// 避免两个宿主各自维护一份脚本目录来源。
 pub fn spawn_quota_scheduler(
     db: Arc<Database>,
@@ -827,7 +825,7 @@ mod db_failure_tests {
             assert!(p.enabled);
             assert!(p.script_ref.contains("MB.query"), "{} 应内联脚本", p.name);
         }
-        // 声明了 config_schema 的种子应落库（驱动 Provider 配额配置表单）
+        // 声明了 config_schema 的种子应写入数据库（驱动 Provider 配额配置表单）
         let new_api = db.get_plugin("new-api").unwrap().unwrap();
         assert!(
             new_api.config_schema.get("quota_per_unit").is_some(),

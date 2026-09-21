@@ -73,13 +73,13 @@ docker run -d -p 38440:38440 \
   -v "$PWD/data:/data" --restart unless-stopped moonbridge-next:local
 ```
 
-- `./data` 挂进容器前必须 `chown -R 10001:10001`（容器以 uid 10001 运行，否则无法写库与密钥）。
+- `./data` 挂载进容器前必须 `chown -R 10001:10001`（容器以 uid 10001 运行，否则无法写入数据库与密钥文件）。
 - 管理 token 由 `MOONBRIDGE_ADMIN_TOKEN` / `--admin-token` 注入，仅用于 `/api/*`，不保存、不回显。网关 token 由 `MOONBRIDGE_GATEWAY_TOKEN` / `--gateway-token` 或既有配置提供，空值或与管理 token 相同均拒绝启动。
-- 从共享 token 版本迁移：原值放入 `MOONBRIDGE_GATEWAY_TOKEN`，另生成不同的管理 token，模型客户端无需改 key。读取配置返回 `authToken: null`；保存 `null` / 空值保留既有网关 token，显式更新可落盘；保存无关配置不会持久化环境覆盖值。
-- 「重启网关」在进程内优雅排空、执行生命周期钩子后重新监听，不依赖外部 supervisor；状态报告实际绑定地址。每代仅一个配额调度器，重启取消旧任务。容器 restart 策略仍可用于异常退出恢复。
+- 从共享 token 版本迁移：原值放入 `MOONBRIDGE_GATEWAY_TOKEN`，另生成不同的管理 token，模型客户端无需改 key。读取配置返回 `authToken: null`；保存 `null` / 空值保留既有网关 token，显式更新可写入磁盘；保存无关配置不会持久化环境覆盖值。
+- 「重启网关」在进程内排空、执行生命周期钩子后重新监听，不依赖外部 supervisor；状态报告实际绑定地址。每代仅一个配额调度器，重启取消旧任务。容器 restart 策略仍可用于异常退出恢复。
 - 默认文件数据库以 AES-GCM 统一加密 Provider 凭据与配额查询配置，V13 事务迁移数据和加密元数据；密钥默认 `<db>.key`，可由 `--key-file` / `MOONBRIDGE_KEY_FILE` 指定。Unix `0600`，Windows 当前用户 DPAPI 包装，恢复受账户绑定限制。已有加密库缺失/错误密钥时拒绝打开。
 - 备份数据库必须同时备份密钥。升级前另留数据库备份；旧镜像不能直接回滚新加密库，须恢复升级前数据库及匹配凭据材料。密钥不应提交版本库；字段加密不等于整库、配置或 trace 加密。
-- 配额查询 HTTP 仅允许同源/授权 origin，默认拒绝私网/元数据地址。私网例外在启动时通过 `MOONBRIDGE_QUOTA_PRIVATE_ORIGINS` 精确 origin JSON 数组设置，不由配额配置授权，元数据永禁。不使用系统代理或重定向，DNS 校验后钉住地址；解压后响应上限 1 MiB，HTTP 30 秒、单 Provider 45 秒。显式 `egressProxy` 使配额 HTTP 明确报不支持代理，不会静默绕过；推理代理仍支持。
+- 配额查询 HTTP 仅允许同源/授权 origin，默认拒绝私网/元数据地址。私网例外在启动时通过 `MOONBRIDGE_QUOTA_PRIVATE_ORIGINS` 精确 origin JSON 数组设置，不由配额配置授权，元数据永禁。不使用系统代理或重定向，DNS 校验后固定地址；解压后响应上限 1 MiB，HTTP 30 秒、单 Provider 45 秒。显式 `egressProxy` 使配额 HTTP 明确报不支持代理，不会静默绕过；推理代理仍支持。
 - soul 部署样例（compose + .env.example + 1panel-network）见 `deploy/soul/`。
 
 ## 验证命令与范围
@@ -103,4 +103,4 @@ pnpm --dir ui build
 ## 插件调试
 
 - 插件日志走 tracing（target=`plugin`），带插件名，调日志级别用 `RUST_LOG` 即可。
-- 开 trace（`GatewayConfig.trace_dir`）后，每次请求各阶段的原始报文都会落盘到 `<trace_dir>/<session>/<model>/`，是排查插件改写是否符合预期的最快手段。
+- 开 trace（`GatewayConfig.trace_dir`）后，每次请求各阶段的原始报文都会写入磁盘到 `<trace_dir>/<session>/<model>/`，是排查插件改写是否符合预期的最快手段。

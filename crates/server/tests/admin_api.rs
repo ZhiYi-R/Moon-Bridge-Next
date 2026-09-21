@@ -359,7 +359,7 @@ async fn merged_router_keeps_models_public_and_credentials_separate() {
 async fn auth_guards_unknown_api_paths_before_not_found() {
     let h = Harness::new("auth-unknown");
 
-    // route_layer 覆盖 `/api/*rest` 兜底路由：未认证的未知路径先 401，而不是 404/静态回落
+    // route_layer 覆盖 `/api/*rest` 回退路由：未认证的未知路径先 401，而不是 404/静态回落
     let (status, raw) = h
         .raw(
             Method::GET,
@@ -423,7 +423,7 @@ async fn provider_crud_round_trip() {
     assert_eq!(got.endpoints[0].api_key, "sk-acme");
     assert_eq!(got.user_agent.as_deref(), Some("moonbridge-test"));
     assert!(got.enabled);
-    assert!(got.created_at > 0, "落库应补 created_at");
+    assert!(got.created_at > 0, "写入数据库应补 created_at");
     assert_eq!(got.extra, json!({ "note": "x" }));
 
     let (status, body) = h.get("/api/providers").await;
@@ -764,13 +764,13 @@ async fn plugin_enable_is_gated_by_requires() {
         "消息须以 REQUIREMENTS 开头（前端据此弹提示框）: {message}"
     );
     assert!(message.contains("会话水印"), "{message}");
-    // 门控拒绝时不应落库
+    // 启用条件不满足时不应写入数据库
     assert!(
         h.db.get_plugin("gate").unwrap().is_none(),
-        "未满足门控的插件不得落库"
+        "不满足启用条件的插件不得写入数据库"
     );
 
-    // 停用状态保存则不做门控
+    // 停用状态保存则不做过滤
     let (status, _) = h
         .json(
             Method::PUT,
@@ -781,7 +781,7 @@ async fn plugin_enable_is_gated_by_requires() {
     assert_eq!(status, StatusCode::OK);
     assert!(!h.db.get_plugin("gate").unwrap().unwrap().enabled);
 
-    // 满足门控后可以启用
+    // 满足过滤后可以启用
     let h2 = Harness::with_config("plugin-gate-ok", AppConfig::default());
     let (status, body) = h2
         .json(
@@ -839,7 +839,7 @@ async fn plugin_script_read_write_inline_and_file() {
     assert_eq!(status, StatusCode::OK);
     let (status, body) = h.get_text("/api/plugins/filer/script").await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body, "", "文件尚未落盘时返回空串");
+    assert_eq!(body, "", "文件尚未写入磁盘时返回空串");
 
     let (status, body) = h
         .raw(
@@ -876,7 +876,7 @@ async fn plugin_script_read_write_inline_and_file() {
 async fn plugin_script_ref_outside_plugins_dir_is_rejected() {
     let h = Harness::new("plugin-escape");
 
-    // 直接落库一个越界的 script_ref（绕过保存路径的门控），读取/写入都必须拒绝
+    // 直接写入数据库一个越界的 script_ref（绕过保存路径的过滤），读取/写入都必须拒绝
     h.db.upsert_plugin(&PluginRecord {
         name: "escape".to_string(),
         source: "lua".to_string(),
@@ -953,8 +953,8 @@ async fn plugin_import_writes_file_and_reports_per_file_status() {
     assert!(outcomes[1]["message"].as_str().unwrap().contains("插件名"));
     assert_eq!(outcomes[2]["status"], json!("skipped"), "同名不覆盖");
 
-    // 落库 + 落盘
-    let rec = h.db.get_plugin("imported").unwrap().expect("应已落库");
+    // 写入数据库 + 写入磁盘
+    let rec = h.db.get_plugin("imported").unwrap().expect("应已写入数据库");
     assert!(rec.enabled, "无 requires 时导入即启用");
     assert_eq!(rec.scopes, vec!["global", "provider"]);
     assert_eq!(rec.capabilities, vec!["core"]);
@@ -997,7 +997,7 @@ async fn plugin_import_with_unmet_requires_stays_disabled() {
     assert!(!h.db.get_plugin("gated").unwrap().unwrap().enabled);
     assert!(
         h.paths.plugins_dir.join("gated.lua").is_file(),
-        "脚本仍应落盘"
+        "脚本仍应写入磁盘"
     );
 }
 
@@ -1481,7 +1481,7 @@ async fn quota_views_and_refresh_roundtrip() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!([]), "初始为空数组: {body}");
 
-    // 保存 Provider（quotaIntervalSecs=5 应被夹到 60）
+    // quotaIntervalSecs 下限 60 秒：传 5 应被限制为 60
     let (status, body) = h
         .json(
             Method::PUT,
@@ -1497,14 +1497,14 @@ async fn quota_views_and_refresh_roundtrip() {
     assert_eq!(views.len(), 1, "{body}");
     assert_eq!(views[0]["providerKey"], json!("main"));
     assert_eq!(views[0]["quotaPluginRef"], json!("quota-demo"));
-    assert_eq!(views[0]["quotaIntervalSecs"], json!(60), "保存时 1..=59 夹到 60");
+    assert_eq!(views[0]["quotaIntervalSecs"], json!(60), "保存时 1..=59 限制为 60");
     assert_eq!(
         views[0]["results"],
         json!([]),
         "从未查询时 results 为空数组"
     );
 
-    // 手动刷新：执行脚本并落库
+    // 手动刷新：执行脚本并写入数据库
     let (status, body) = h
         .json(Method::POST, "/api/quota/main/refresh", Value::Null)
         .await;
@@ -1534,7 +1534,7 @@ async fn quota_views_and_refresh_roundtrip() {
     assert_eq!(
         body[0]["results"][0]["payload"]["summary"],
         json!("余额正常"),
-        "刷新结果应落库"
+        "刷新结果应写入数据库"
     );
 
     // 删除 Provider 后视图消失（结果行级联删除）
@@ -1586,7 +1586,7 @@ async fn quota_test_dry_run_does_not_persist() {
     assert_eq!(results[0]["payload"]["summary"], json!("余额正常"));
     assert_eq!(results[1]["payload"]["summary"], json!("余额正常"));
 
-    // dry-run 不写库：Provider 未保存，视图列表仍为空
+    // dry-run 不写入数据库：Provider 未保存，视图列表仍为空
     let (_, views) = h.get("/api/quota").await;
     assert_eq!(views, json!([]));
 }

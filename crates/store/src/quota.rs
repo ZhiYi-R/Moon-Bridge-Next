@@ -2,7 +2,7 @@
 //!
 //! 配额查询绑定直接长在 Provider 上（`quota_plugin_ref`/`quota_interval_secs`/
 //! `quota_enabled`/`quota_config_enc`），key 的唯一来源是 provider 端点。
-//! [`QuotaKeyResult`] 是引擎落库的**最近一次**结果，按 `(provider_key, key_index)`
+//! [`QuotaKeyResult`] 是引擎写入数据库的**最近一次**结果，按 `(provider_key, key_index)`
 //! 拆行（key_index 即 `provider_endpoints.idx`）。删除 Provider 时结果行级联删除
 //! （见 `dao/provider.rs` 的 `delete_provider`）。
 
@@ -15,7 +15,7 @@ use crate::Database;
 /// 配额定时查询间隔的下限（秒）：`1..=59` 一律抬到 60，避免脚本被高频轮询。
 pub const MIN_INTERVAL_SECS: i64 = 60;
 
-/// 归一化定时间隔：负数按 0（禁用）处理，`1..=59` 夹到 [`MIN_INTERVAL_SECS`]。
+/// 归一化定时间隔：负数按 0（禁用）处理，`1..=59` 限制为 [`MIN_INTERVAL_SECS`]。
 pub fn clamp_interval_secs(interval_secs: i64) -> i64 {
     match interval_secs {
         v if v <= 0 => 0,
@@ -159,7 +159,7 @@ impl Database {
         Ok(())
     }
 
-    /// 剪掉某 Provider key_index >= `keep` 的结果行：端点变少后，旧 key 的
+    /// 删除某 Provider key_index >= `keep` 的结果行：端点变少后，旧 key 的
     /// 残留行不应再出现在看板上。
     pub fn prune_quota_results(&self, provider_key: &str, keep: i64) -> Result<()> {
         let conn = self.conn.lock();
@@ -183,7 +183,6 @@ mod tests {
 
     use crate::models::{Endpoint, Provider};
 
-    /// 构造一个带配额绑定的 Provider。
     fn provider(key: &str, interval: i64, enabled: bool) -> Provider {
         Provider {
             key: key.to_string(),
@@ -243,7 +242,7 @@ mod tests {
         p.quota_config = json!({"management_token": "secret-tok", "unit": "$"});
         db.upsert_provider(&p).unwrap();
 
-        // 加密落库的覆盖在 tests/encryption.rs（AES）；内存库走 PlaintextKey，
+        // 加密写入数据库的覆盖在 tests/encryption.rs（AES）；内存库走 PlaintextKey，
         // 这里只验证经 enc 往返的语义：quota_config_enc 非空且读回解密正确。
         {
             let conn = db.conn.lock();
@@ -263,7 +262,7 @@ mod tests {
         assert_eq!(got.quota_interval_secs, 60);
         assert!(got.quota_enabled);
 
-        // 清空配置 → 空串落库、读回 Null
+        // 清空配置 → 空串写入数据库、读回 Null
         let mut p2 = provider("p", 0, false);
         p2.quota_config = Value::Null;
         db.upsert_provider(&p2).unwrap();

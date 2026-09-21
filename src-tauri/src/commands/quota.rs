@@ -52,7 +52,7 @@ pub async fn quota_refresh_all(
     Ok(engine(&state).refresh_all().await?)
 }
 
-/// 以表单里的 Provider 配置 dry-run 一次配额脚本（**不写库、不要求已保存**），
+/// 以表单里的 Provider 配置 dry-run 一次配额脚本（**不写入数据库、不要求已保存**），
 /// 逐端点返回本次结果供编辑表单预览。
 #[tauri::command]
 pub async fn quota_test(

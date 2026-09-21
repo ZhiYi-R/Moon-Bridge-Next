@@ -12,11 +12,9 @@ use serde_json::Value;
 
 use crate::error::{GatewayError, Result};
 
-/// 路由解析结果。
 #[derive(Debug)]
 pub struct ResolvedRoute {
     pub provider_key: String,
-    /// 上游实际模型名。
     pub upstream_model: String,
     pub protocol: Protocol,
     /// 端点列表（按序故障转移）。
@@ -73,7 +71,7 @@ pub fn endpoints_from_provider(p: &Provider) -> Result<Vec<ProviderEndpoint>> {
 /// 查 models 表取模型输出 token 上限（u32 口径；无记录/非正数/溢出均为 None，
 /// 读取失败仅告警——元数据缺失不应阻断主请求）。
 ///
-/// 供「max_tokens 必填」的上游协议（Anthropic）在客户端未设上限时兜底取值，
+/// 供「max_tokens 必填」的上游协议（Anthropic）在客户端未设上限时回退取值，
 /// 不凭空注入小值截断输出；其余协议客户端没给就不发送该字段。
 pub fn model_output_limit(db: &Database, model: &str) -> Option<u32> {
     match db.get_model(model) {
@@ -92,7 +90,6 @@ pub fn model_output_limit(db: &Database, model: &str) -> Option<u32> {
 pub struct Router;
 
 impl Router {
-    /// 解析模型别名。
     pub fn resolve(db: &Database, model_alias: &str) -> Result<ResolvedRoute> {
         let mref = ModelRef::parse(model_alias);
 

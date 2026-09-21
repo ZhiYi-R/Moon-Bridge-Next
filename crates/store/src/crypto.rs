@@ -1,4 +1,4 @@
-//! API Key 落库加密与主密钥文件。
+//! API Key 写入数据库加密与主密钥文件。
 
 #[cfg(not(windows))]
 use std::path::Path;

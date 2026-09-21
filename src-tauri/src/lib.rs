@@ -16,7 +16,6 @@ use state::ManagedState;
 use tauri::Manager;
 use tracing_subscriber::EnvFilter;
 
-/// 应用入口。
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Rust 侧结构化日志用 tracing；`log` crate 的全局 logger 让给 tauri-plugin-log
@@ -116,17 +115,14 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            // 网关生命周期
             commands::gateway::gateway_start,
             commands::gateway::gateway_stop,
             commands::gateway::gateway_restart,
             commands::gateway::gateway_status,
-            // Provider
             commands::provider::provider_list,
             commands::provider::provider_get,
             commands::provider::provider_save,
             commands::provider::provider_delete,
-            // Model & Offer
             commands::model::model_list,
             commands::model::model_get,
             commands::model::model_save,
@@ -134,15 +130,12 @@ pub fn run() {
             commands::model::offer_list,
             commands::model::offer_save,
             commands::model::offer_delete,
-            // 模型目录（models.dev 拉取 + 导入）
             commands::catalog::catalog_fetch,
             commands::catalog::catalog_import,
-            // Route
             commands::route::route_list,
             commands::route::route_get,
             commands::route::route_save,
             commands::route::route_delete,
-            // Plugin & Binding
             commands::plugin::plugin_list,
             commands::plugin::plugin_get,
             commands::plugin::plugin_save,
@@ -154,25 +147,20 @@ pub fn run() {
             commands::plugin::binding_save,
             commands::plugin::binding_list_by_scope,
             commands::plugin::binding_delete,
-            // Usage
             commands::usage::usage_query,
             commands::usage::usage_summary,
             commands::usage::usage_cost_by_provider,
-            // Quota（配额查询）
             commands::quota::quota_list,
             commands::quota::quota_refresh,
             commands::quota::quota_refresh_all,
             commands::quota::quota_test,
-            // Trace
             commands::trace::trace_list,
             commands::trace::trace_read,
             commands::trace::trace_delete,
-            // Settings
             commands::settings::settings_get,
             commands::settings::settings_set,
             commands::settings::settings_list,
             commands::settings::settings_delete,
-            // App
             commands::app::app_info,
             commands::app::config_get,
             commands::app::config_set,

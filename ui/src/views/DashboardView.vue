@@ -198,7 +198,6 @@ onActivated(() => {
       </Card>
     </div>
 
-    <!-- 性能时序：平均 TTFT / 平均 TPS（流式请求，逐小时） -->
     <div class="grid gap-4 grid-cols-[repeat(auto-fit,minmax(20rem,1fr))]">
       <Card>
         <div class="card-header flex-row items-center justify-between space-y-0">
@@ -271,7 +270,6 @@ onActivated(() => {
       </Card>
     </div>
 
-    <!-- Providers 概览 -->
     <Card>
       <div class="card-header flex-row items-center justify-between space-y-0">
         <div>

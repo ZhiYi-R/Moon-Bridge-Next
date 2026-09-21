@@ -31,7 +31,6 @@ pub use hooks::{NoopHooks, PluginHooks};
 pub use raw::{ChunkStage, ChunkVerdict, RawBody, RawChunk, RawMessage, RawStage, RawVerdict};
 pub use registry::{builtin_registry, Registry};
 
-// 便于下游直接引用内置 Adapter 类型
 pub use adapters::anthropic::AnthropicAdapter;
 pub use adapters::google_genai::GoogleGenAiAdapter;
 pub use adapters::openai_chat::OpenAiChatAdapter;

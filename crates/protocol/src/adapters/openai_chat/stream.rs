@@ -196,11 +196,11 @@ fn close_open_blocks(st: &mut StreamDecodeState) -> Vec<CoreStreamEvent> {
                 *input = serde_json::from_str(&args).unwrap_or_else(|_| json!({"_raw": args}));
             }
         }
-        // Chat 上游无独立凭据字段：推理明文本体即回传凭据（thinking 模式
+        // Chat 上游无独立凭据字段：推理明文本身即回传凭据（thinking 模式
         // 上游要求 reasoning_content 随历史带回，缺失 400）。收尾时给
         // 无凭据推理打 chat: 自凭据标记——客户端方向据此下发可回传凭据，
         // 异源上游按外源凭据降级。流式增量不含 <mb-cot> 解析（delta 已
-        // 下发不可回改），故整条 reasoning_content 打标而非拆凭据。
+        // 下发不可回改），故整条 reasoning_content 打标记而非拆凭据。
         if let Some(ContentBlock::Reasoning {
             text, signature, ..
         }) = st.blocks.get_mut(&index)
@@ -325,7 +325,7 @@ impl ProviderStreamAdapter for OpenAiChatAdapter {
         if let Some(tcs) = delta.get("tool_calls").and_then(|v| v.as_array()) {
             for tc in tcs {
                 // 上游 index 是工具调用序数，与正文槽位无关——映射到独立
-                // 块索引，避免与 text/reasoning 撞车。
+                // 块索引，避免与 text/reasoning 冲突。
                 let tc_index = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
                 let (index, is_new) = st.slot(&format!("tc:{tc_index}"));
                 let fn_obj = tc.get("function").cloned().unwrap_or(Value::Null);
@@ -707,7 +707,7 @@ mod tests {
     }
 
     /// 回归：tool_calls 的上游 index 是工具序数而非内容块序数——不得与
-    /// 正文 index 0 撞车；且块要开也要收（finish 时统一收尾）。
+    /// 正文 index 0 冲突；且块要开也要收（finish 时统一收尾）。
     #[test]
     fn tool_calls_get_own_indexes_and_close_at_finish() {
         let adapter = OpenAiChatAdapter;

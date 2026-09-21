@@ -24,7 +24,6 @@ pub type Map = JsonMap<String, Value>;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    /// 纯文本。
     Text { text: String },
     /// 图像（base64 数据 + MIME 类型；`media_type` 为 "url"/"file" 时 data
     /// 分别承载远程 URL / 平台 file_id）。
@@ -39,10 +38,9 @@ pub enum ContentBlock {
     /// - OpenAI Chat：`file` content part
     /// - Gemini：`fileData`（Uri 引用）/`inlineData`（base64）
     ///
-    /// 与 `Image` 不同，来源形态用显式 `source` 字段而非 media_type 哨兵——
+    /// 与 `Image` 不同，来源形态用显式 `source` 字段而非 media_type 特殊值判别——
     /// `media_type` 始终承载真实 MIME 类型（如 application/pdf）。
     Document {
-        /// 内容承载形态。
         #[serde(default)]
         source: DocSource,
         /// 真实 MIME 类型；`source == text` 时为 text/*。
@@ -54,7 +52,6 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
-    /// 模型发起的工具调用。
     ToolUse {
         id: String,
         /// item 级标识：Responses `function_call` item 的 `id`（`fc_...`），
@@ -74,7 +71,6 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
     },
-    /// 工具调用结果。
     ToolResult {
         tool_use_id: String,
         content: Vec<ContentBlock>,
@@ -111,7 +107,6 @@ pub enum DocSource {
 }
 
 impl ContentBlock {
-    /// 便捷构造文本块。
     pub fn text(text: impl Into<String>) -> Self {
         ContentBlock::Text { text: text.into() }
     }
@@ -133,7 +128,6 @@ impl ContentBlock {
 // Message / Role
 // ============================================================================
 
-/// 会话角色。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -143,7 +137,6 @@ pub enum Role {
     Tool,
 }
 
-/// 单条消息。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
@@ -155,7 +148,6 @@ pub struct Message {
 }
 
 impl Message {
-    /// 便捷构造一条纯文本消息。
     pub fn text(role: Role, text: impl Into<String>) -> Self {
         Message {
             role,
@@ -169,7 +161,6 @@ impl Message {
 // Tool
 // ============================================================================
 
-/// 模型可调用的工具定义。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tool {
     pub name: String,
@@ -182,14 +173,12 @@ pub struct Tool {
     pub ext: Map,
 }
 
-/// 工具选择策略。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolChoice {
     Auto,
     None,
     Required,
-    /// 强制调用指定工具。
     Tool {
         name: String,
     },
@@ -210,7 +199,6 @@ pub struct Reasoning {
     pub summary: Option<Value>,
 }
 
-/// 停止原因（协议中立）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
@@ -225,8 +213,6 @@ pub enum StopReason {
     PauseTurn,
 }
 
-/// token 用量统计。
-///
 /// 口径不变量（计价与跨协议转换都依赖它，各 Adapter 入站归一化时须满足）：
 /// - `input_tokens` = prompt **总量**，含 `cache_read_tokens` + `cache_write_tokens`
 ///   （OpenAI `prompt_tokens` 口径；Anthropic 原生 input 不含缓存，入站时已并入）；
@@ -254,7 +240,6 @@ pub struct Usage {
 // CoreRequest / CoreResponse
 // ============================================================================
 
-/// 协议中立的请求中间表示。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CoreRequest {
     /// 上游模型名（路由解析后的实际模型）。
@@ -289,7 +274,6 @@ pub struct CoreRequest {
 }
 
 impl CoreRequest {
-    /// 构造一个最小请求。
     pub fn new(model: impl Into<String>) -> Self {
         CoreRequest {
             model: model.into(),
@@ -308,13 +292,11 @@ impl CoreRequest {
         }
     }
 
-    /// 从 `meta` 读取 session_id。
     pub fn session_id(&self) -> Option<&str> {
         self.meta.get("session_id").and_then(|v| v.as_str())
     }
 }
 
-/// 协议中立的响应中间表示（非流式）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CoreResponse {
     pub id: String,
@@ -333,13 +315,10 @@ pub struct CoreResponse {
 // Core stream events
 // ============================================================================
 
-/// 流式增量片段。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamDelta {
-    /// 文本增量。
     Text { text: String },
-    /// 推理文本增量。
     Reasoning { text: String },
     /// 推理凭据增量：加密 CoT 的回传凭据（如 anthropic `signature_delta`、
     /// responses reasoning item 的 `encrypted_content`）。不透明文本，

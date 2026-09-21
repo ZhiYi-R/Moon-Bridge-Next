@@ -10,7 +10,7 @@ onlyBuiltDependencies:
 
 # 本机 pnpm 的供应链策略会忽略上述构建脚本并将其判为错误（ERR_PNPM_IGNORED_BUILDS），
 # 导致 install 退出码非 0、进而 verify-deps-before-run 阻塞 pnpm run/exec。
-# esbuild 的平台二进制已通过 optional 依赖 @esbuild/linux-x64 就位，vue-demi 默认指向 Vue3，
+# esbuild 的平台二进制已由 optional 依赖 @esbuild/linux-x64 提供，vue-demi 默认指向 Vue3，
 # 故忽略这些构建脚本无实际影响。关闭严格判定与运行前校验，保证 Tauri 的 before 命令可用。
 strictDepBuilds: false
 verifyDepsBeforeRun: false

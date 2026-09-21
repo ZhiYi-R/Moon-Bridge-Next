@@ -24,8 +24,8 @@ use crate::context::ReqCtx;
 
 /// `msg.ext`/`req.meta` 中记录块级 `cache_control` 位置的键：
 /// `{"<content 内块序号>": <cache_control 原始对象>}`。
-/// Anthropic 的 prompt caching 断点挂在块上，Core 块没有字段位，
-/// 以 ext 旁挂位置表保真回传。
+/// Anthropic 的 prompt caching 断点挂载在块上，Core 块没有字段位，
+/// 以 ext 旁路挂载位置表保真回传。
 pub(crate) const CACHE_EXT_KEY: &str = "anthropic.cache_control";
 /// `req.meta` 中 system 块 cache_control 位置表的键。
 pub(crate) const SYSTEM_CACHE_META_KEY: &str = "anthropic.system_cache_control";
@@ -64,7 +64,6 @@ fn parse_content(v: Option<&Value>) -> (Vec<ContentBlock>, Value) {
     }
 }
 
-/// 解析 Anthropic tool_choice。
 fn parse_tool_choice(v: &Value) -> Option<ToolChoice> {
     match v.get("type").and_then(|t| t.as_str()) {
         Some("auto") => Some(ToolChoice::Auto),
@@ -120,7 +119,6 @@ impl ClientAdapter for AnthropicAdapter {
             _ => {}
         }
 
-        // messages
         if let Some(Value::Array(msgs)) = raw.get("messages") {
             for m in msgs {
                 let role = match m.get("role").and_then(|r| r.as_str()) {
@@ -247,7 +245,7 @@ impl ClientAdapter for AnthropicAdapter {
 
     async fn from_core_response(&self, _ctx: &ReqCtx, resp: CoreResponse) -> Result<Value> {
         // 客户端回程：本家签名还原原文、异源凭据带标记透传（回传后由
-        // 归属协议上游解标）——不走 block_to_anthropic 的上游降级语义。
+        // 归属协议上游解除标记）——不走 block_to_anthropic 的上游降级语义。
         let content: Vec<Value> = resp
             .content
             .iter()

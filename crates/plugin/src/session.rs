@@ -18,12 +18,10 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
-    /// 新建空存储。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 读取某插件在某会话下的键值。
     pub fn get(&self, plugin: &str, session: Option<&str>, key: &str) -> Option<Value> {
         let guard = self.inner.lock().ok()?;
         guard
@@ -35,7 +33,6 @@ impl SessionStore {
             .cloned()
     }
 
-    /// 写入某插件在某会话下的键值。
     pub fn set(&self, plugin: &str, session: Option<&str>, key: &str, value: Value) {
         if let Ok(mut guard) = self.inner.lock() {
             guard.insert(

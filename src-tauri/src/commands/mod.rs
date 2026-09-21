@@ -51,5 +51,4 @@ impl From<String> for CommandError {
     }
 }
 
-/// command 统一返回类型。
 pub type CmdResult<T> = Result<T, CommandError>;

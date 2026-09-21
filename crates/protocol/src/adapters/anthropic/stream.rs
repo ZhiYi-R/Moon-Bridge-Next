@@ -259,7 +259,6 @@ impl ProviderStreamAdapter for AnthropicAdapter {
     }
 }
 
-/// 构造一个客户端方向的 Anthropic SSE chunk。
 fn client_sse(event: &str, data: Value) -> RawChunk {
     RawChunk::json(
         ChunkStage::ClientChunk,
@@ -378,8 +377,8 @@ impl ClientStreamAdapter for AnthropicAdapter {
                     // 加密 CoT 回传凭据：客户端在 content_block_stop 前累积进
                     // thinking 块的 signature，下一轮原样回传。若凭据先于任何
                     // 明文到达，该块按 redacted_thinking 完整块形态开启。
-                    // 出站解标：本家凭据还原原文；异源凭据（gem:/oai:）带标记
-                    // 原样透传——回传入站时幂等打标、回到归属协议上游才解标。
+                    // 出站解除标记：本家凭据还原原文；异源凭据（gem:/oai:）带标记
+                    // 原样透传——回传入站时幂等打标记、回到归属协议上游才解除标记。
                     StreamDelta::ReasoningSignature { signature } => {
                         let sig = crate::adapters::emit_signature(
                             crate::adapters::SIG_ANTHROPIC,

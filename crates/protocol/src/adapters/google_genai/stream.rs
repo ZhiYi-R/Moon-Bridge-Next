@@ -132,7 +132,7 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
                     .unwrap_or_else(|| format!("{name}-call-{}", st.next_block_index));
                 let args = fc.get("args").cloned().unwrap_or_else(|| json!({}));
                 // 加密 CoT 凭据：与 function call 强绑定的 thoughtSignature
-                // （part 级字段）。打上 gem: 来源标记，出站解标时异源凭据不互填。
+                // （part 级字段）。打上 gem: 来源标记，出站解除标记时异源凭据不互填。
                 let signature = crate::adapters::tag_signature(
                     crate::adapters::SIG_GEMINI,
                     p.get("thoughtSignature")
@@ -144,7 +144,7 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
                 // 到达（args 不跨 chunk 切分），索引经 st.next_block_index 跨
                 // chunk 单调分配，不与 text/reasoning 槽位或其他调用碰撞。
                 // 非 Gemini 入口（Anthropic/Chat）没有 ToolUse 凭据位，
-                // 故在调用前先发一个「仅凭据」载波推理块（即刻收尾）——
+                // 故在调用前先发一个「仅凭据」载体推理块（即刻收尾）——
                 // 客户端把它当推理凭据记入历史，回传时经 Core 还原到本 part。
                 if let Some(sig) = &signature {
                     let c_idx = st.next_block_index;
@@ -217,7 +217,7 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
             }
             // thought part → reasoning 槽位，普通 part → text 槽位，各自独占
             // 一个块索引（混入同一索引会让入口把思考明文写进 text 块）。
-            // 空文本的仅凭据 part 不开任何槽位块——签名走载波。
+            // 空文本的仅凭据 part 不开任何槽位块——签名走载体。
             if !text.is_empty() {
                 let (idx, newly) = st.slot(if thought { "reasoning" } else { "text" });
                 if newly {
@@ -251,7 +251,7 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
             }
             if let Some(sig) = sig {
                 if thought {
-                    // thought part 的签名是思考块自身属性：挂 reasoning 槽位
+                    // thought part 的签名是思考块自身属性：挂载到 reasoning 槽位
                     let (r_idx, r_new) = st.slot("reasoning");
                     if r_new {
                         st.open_block(r_idx);
@@ -271,7 +271,7 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
                     });
                 } else {
                     // 普通 part 的签名（末块空 part 或文本 part 尾部）：
-                    // 发「仅凭据」载波推理块（即刻收尾）。Core→Gemini 时按
+                    // 发「仅凭据」载体推理块（即刻收尾）。Core→Gemini 时按
                     // 「紧邻后继 ToolUse 优先、否则并入前一 part」规则还原。
                     let c_idx = st.next_block_index;
                     st.next_block_index += 1;
@@ -325,7 +325,6 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
     }
 }
 
-/// 构造一个客户端方向的 Gemini SSE chunk。
 fn gemini_chunk(parts: Value, finish: Option<&str>, usage: Option<Value>) -> RawChunk {
     let mut cand = json!({ "content": { "role": "model", "parts": parts }, "index": 0 });
     if let Some(fr) = finish {
@@ -435,7 +434,7 @@ mod tests {
     }
 
     /// 官方流式形态：签名可能在末块以空 text part 返回，需转为凭据增量，
-    /// 挂在 reasoning 槽位（未开启时先合成 BlockStart）。
+    /// 挂载在 reasoning 槽位（未开启时先合成 BlockStart）。
     #[test]
     fn decodes_signature_only_trailing_part() {
         let adapter = GoogleGenAiAdapter;

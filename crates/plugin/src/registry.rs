@@ -1,6 +1,6 @@
 //! Lua 插件注册表：串联多个已启用插件，实现 [`PluginHooks`]。
 //!
-//! 门控策略：按插件 manifest 声明的 capability 决定是否触发某类钩子——
+//! 过滤策略：按插件 manifest 声明的 capability 决定是否触发某类钩子——
 //! 未声明 `raw_stream` 的插件在流式每-chunk 完全不产生 Lua 调用（零开销）。
 //! 容错策略：单个插件钩子出错只记 warn 并跳过，不拖垮整条请求链路。
 
@@ -34,7 +34,6 @@ pub struct ScopeOverrides {
 }
 
 impl ScopeOverrides {
-    /// 记录一条 binding。
     pub fn insert(&mut self, scope: &str, scope_key: String, enabled: bool) {
         match scope {
             "route" => {
@@ -60,10 +59,9 @@ impl ScopeOverrides {
     }
 }
 
-/// 已加载 Lua 插件的注册表。
 pub struct LuaPluginRegistry {
     plugins: Vec<Arc<LuaRuntime>>,
-    /// 作用域三态门控表：plugin_name → 各维度绑定。存在表项则以「就近作用域
+    /// 作用域三态绑定表：plugin_name → 各维度绑定。存在表项则以「就近作用域
     /// （route > model > provider > global）」的表项为准，否则回落插件全局
     /// `enabled`（即「跟随全局」）。由 store 的 `plugin_bindings` 装配。
     overrides: HashMap<String, ScopeOverrides>,
@@ -84,7 +82,6 @@ impl LuaPluginRegistry {
             sessions,
         }
     }
-    /// 空注册表。
     pub fn empty() -> Self {
         Self {
             plugins: Vec::new(),
@@ -92,26 +89,20 @@ impl LuaPluginRegistry {
             sessions: SessionStore::new(),
         }
     }
-    /// 是否为空。
     pub fn is_empty(&self) -> bool {
         self.plugins.is_empty()
     }
-    /// 插件数量。
     pub fn len(&self) -> usize {
         self.plugins.len()
     }
-    /// 访问插件列表。
     pub fn plugins(&self) -> &[Arc<LuaRuntime>] {
         &self.plugins
     }
 
-    /// 按 capability 过滤插件。
     fn by_cap(&self, cap: &'static str) -> impl Iterator<Item = &Arc<LuaRuntime>> + '_ {
         self.plugins.iter().filter(move |p| p.manifest.has(cap))
     }
 
-    /// 判定插件在当前请求上是否生效。
-    ///
     /// 就近作用域覆盖：route（routes 别名）> model（上游模型名）> provider >
     /// global > 插件全局 `enabled`。注意：客户端阶段 RAW 钩子在路由解析前
     /// 触发，此时 route/model/provider 均为 None，只能命中 global 或全局开关。
@@ -137,7 +128,7 @@ impl LuaPluginRegistry {
         }
         t.global.unwrap_or(p.enabled)
     }
-    /// 按 capability + provider 三态门控过滤插件。
+    /// 按 capability + provider 三态过滤插件。
     fn eligible<'a>(
         &'a self,
         cap: &'static str,

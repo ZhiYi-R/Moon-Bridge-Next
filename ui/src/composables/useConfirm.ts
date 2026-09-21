@@ -30,7 +30,7 @@ const state = reactive<ConfirmState>({
 export function useConfirm() {
   /** 弹出确认框，resolve 用户选择（true=确认 / false=取消）。 */
   function confirm(opts: ConfirmOptions): Promise<boolean> {
-    // 已有未决确认时先以 false 结算：重复触发（如表单守卫连点）会覆盖 state.resolve，
+    // 已有未决确认时先以 false 结算：重复触发（如表单确认框连点）会覆盖 state.resolve，
     // 不结算的话前一个 await 永远悬挂
     state.resolve?.(false);
     state.title = opts.title ?? "确认操作";

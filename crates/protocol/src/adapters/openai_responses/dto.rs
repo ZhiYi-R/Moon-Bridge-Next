@@ -2,10 +2,8 @@
 
 use serde_json::{json, Value};
 
-/// Responses 对象的 `object` 字段值。
 pub const OBJECT_RESPONSE: &str = "response";
 
-/// Responses API 路径（作为上游时拼接到 base_url 之后）。
 pub const RESPONSES_PATH: &str = "/v1/responses";
 
 /// Responses 流式 SSE 事件名（本实现覆盖的最小子集）。
@@ -40,7 +38,6 @@ pub fn response_skeleton(id: &str, model: &str, status: &str) -> Value {
     })
 }
 
-/// 构造一个 assistant message output item。
 pub fn message_item(id: &str, text: &str, status: &str) -> Value {
     json!({
         "type": "message",
@@ -74,8 +71,7 @@ pub fn function_call_item(
     })
 }
 
-/// 构造 usage 对象（Responses 使用 input_tokens/output_tokens/total_tokens，
-/// 缓存命中与推理 token 放在 *_tokens_details 子对象）。
+/// Responses 的 usage 命名；缓存命中与推理 token 放在 *_tokens_details 子对象。
 pub fn usage_object(u: &moonbridge_core::Usage) -> Value {
     json!({
         "input_tokens": u.input_tokens,

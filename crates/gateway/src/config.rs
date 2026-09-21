@@ -5,7 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 网关运行配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayConfig {
@@ -36,18 +35,18 @@ pub struct GatewayConfig {
     /// 上游 HTTP 客户端本身只设连接超时，见 `upstream.rs::build_client`。
     #[serde(default = "default_timeout")]
     pub request_timeout_secs: u64,
-    /// trace 落盘目录；`None` 表示不落盘。
+    /// trace 文件目录；`None` 表示不写入磁盘。
     #[serde(default)]
     pub trace_dir: Option<String>,
     /// trace 是否记录请求/响应**体**；关闭时只留元数据（方法/URL/头/用量）。
     /// 体可能含用户对话内容与敏感业务数据，按需开关。
     #[serde(default = "default_trace_record_bodies")]
     pub trace_record_bodies: bool,
-    /// trace 保留条数：落盘后按 mtime 只保留最近 N 条，`0` 表示不清理。
+    /// trace 保留条数：写入磁盘后按 mtime 只保留最近 N 条，`0` 表示不清理。
     #[serde(default = "default_trace_retention")]
     pub trace_retention: usize,
-    /// 会话水印开关：把 `[mb:xxxxxx]` 附在助手**纯文本**输出末尾，靠客户端下一轮带回
-    /// 来识别会话。入站会先剥净再转发上游，上游模型永远看不到它。
+    /// 会话水印开关：把 `[mb:xxxxxx]` 嵌进助手**推理块**明文首部，靠客户端下一轮带回
+    /// 来识别会话。入站会先剥除干净再转发上游，上游模型永远看不到它。
     ///
     /// 面向的是**不携带任何会话标识**的客户端（如 Qwen Code：其 `prompt_cache_key`
     /// 注入以直连 `api.openai.com` 为前提）。若你的客户端已通过 `session_id` 字段、
@@ -57,7 +56,7 @@ pub struct GatewayConfig {
     /// 可能带着开启期间留下的历史），只是不再嵌入。
     #[serde(default = "default_session_marker")]
     pub session_marker: bool,
-    /// 活跃会话表的深度上限（LRU，超深挤出最久未命中者并连带清理其插件态）。
+    /// 活跃会话表的深度上限（LRU，超深淘汰最久未命中者并连带清理其插件态）。
     /// 注意：uuid 载荷自带身份，淘汰不会改变 marker 会话的 session id——表只
     /// 承担外部身份 tag 映射与插件态回收。
     #[serde(default = "default_session_depth")]

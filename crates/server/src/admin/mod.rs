@@ -32,7 +32,6 @@ use crate::config::{AppConfig, AppPaths};
 /// admin 请求体上限（10MB）：够传插件脚本与大段 JSON 配置，又不至于被超大 body 拖垮。
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 
-/// 管理 API 共享状态。
 #[derive(Clone)]
 pub struct AdminState {
     /// SQLite 存储句柄（与网关共用同一连接）。
@@ -95,7 +94,7 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    /// 400：请求方错误（参数非法、路径越界、门控未满足等）。
+    /// 400：请求方错误（参数非法、路径越界、启用条件未满足等）。
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
@@ -161,13 +160,11 @@ async fn api_not_found() -> ApiError {
     ApiError::not_found("未找到该管理 API 端点")
 }
 
-/// 错误响应体。
 #[derive(Debug, Serialize)]
 struct ErrorMessage {
     message: String,
 }
 
-/// handlers 统一返回类型。
 type ApiResult<T> = std::result::Result<T, ApiError>;
 
 /// 把 `Option` 变成「存在则返回，否则 404」。
@@ -250,7 +247,7 @@ pub fn router(state: AdminState) -> Router {
             "/api/settings/:key",
             get(settings_get).put(settings_set).delete(settings_delete),
         )
-        // 兜底：`/api/*` 下未定义的路径一律 JSON 404，避免落到 SPA fallback 返回 index.html。
+        // 回退：`/api/*` 下未定义的路径一律 JSON 404，避免落到 SPA fallback 返回 index.html。
         .route(
             "/api/*rest",
             get(api_not_found)

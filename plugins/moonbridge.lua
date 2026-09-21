@@ -9,7 +9,7 @@
 -- 字段说明与 crates/plugin/src/{host,runtime,convert,bridge}.rs 保持同步。
 --
 -- 约定：插件脚本在全局暴露 `MB` table——既承载清单（name/version/scopes/capabilities），
--- 也承载钩子函数；宿主 API 挂在全局 `mb`（小写）。沙箱中 `os/io/loadfile/dofile` 不可用。
+-- 也承载钩子函数；宿主 API 挂载在全局 `mb`（小写）。沙箱中 `os/io/loadfile/dofile` 不可用。
 
 --------------------------------------------------------------------------------
 -- 清单与钩子（全局 MB 表）
@@ -34,8 +34,8 @@
 ---@field category string|nil 类别："core"（缺省，请求链路插件）|"quota"（配额查询插件：由配额引擎驱动，不进钩子注册表）
 ---@field scopes string[]|nil 作用域："global"|"provider"|"model"|"route"（仅 core 类生效）
 ---@field capabilities string[] 能力："core"|"raw_request"|"raw_response"|"raw_stream"（仅 core 类生效）
----@field requires table|nil 启用门控：`{ <网关配置键> = <期望值>, ... }`（bool/int/float/字符串）。
----仅 app 层校验——启用动作（新建即启用 / 停用→启用）时不满足则拒绝并弹提示；网关侧不感知。
+---@field requires table|nil 启用条件：`{ <网关配置键> = <期望值>, ... }`（bool/int/float/字符串）。
+---仅 app 层校验——启用动作（新建即启用 / 停用→启用）时不满足则拒绝并弹提示；网关侧不处理。
 ---@field config_schema table|nil 配置 JSON Schema（供 UI 渲染表单）
 ---@field entry string|nil 入口提示
 ---@field init fun()|nil 加载后调用一次
@@ -56,7 +56,7 @@
 ---@field on_upstream_chunk_raw (fun(ctx: MbCtx, chunk: MbRawChunk): MbChunkVerdict|nil)|nil
 ---@field on_client_chunk_raw (fun(ctx: MbCtx, chunk: MbRawChunk): MbChunkVerdict|nil)|nil
 ---配额查询（category = "quota" 插件）：由 Provider 绑定并调用 `MB.query`，
----不进钩子注册表、不参与上面的能力门控与钩子链路（见 crates/gateway/src/quota.rs）。
+---不进钩子注册表、不参与上面的能力过滤与钩子链路（见 crates/gateway/src/quota.rs）。
 ---@field query (fun(ctx: MbQuotaQueryCtx): MbQuotaReturn)|nil 查询一次配额（仅 quota 类插件）
 
 --------------------------------------------------------------------------------
@@ -75,7 +75,7 @@
 ---@field reset_at string|integer|nil 重置时间：字符串原样展示；或给 unix 秒数字（引擎归一为字符串，前端按本地时间格式化——沙箱无 os 库，毫秒时间戳请除 1000 取整后给出）
 
 ---@class MbQuotaReturn
----返回 table，经宿主序列化为 JSON 落库。
+---返回 table，经宿主序列化为 JSON 写入数据库。
 ---@field status string|nil "ok"|"error"（缺省 = ok）
 ---@field message string|nil 失败原因（status = "error" 时展示给用户）
 ---@field quotas MbQuotaEntry[]|nil 配额列表（缺 type 或缺该类型必填字段的项被剔除并记入 warnings）
@@ -86,7 +86,7 @@
 ---@field provider string Provider key（绑定该插件的上游服务）
 ---@field name string Provider key（同 provider，兼容别名）
 ---@field key string 本次查询的 API Key（与 keys[1] 相同）
----@field keys string[] 当前 key 的单元素数组——引擎对 Provider 的每个端点 key 各调用一次 MB.query 并拆行落库，脚本只需按单 key 编写
+---@field keys string[] 当前 key 的单元素数组——引擎对 Provider 的每个端点 key 各调用一次 MB.query 并拆行写入数据库，脚本只需按单 key 编写
 ---@field base_url string 该 key 所属端点的 base_url（配额接口基准地址；无端点 Provider 为空字符串）
 ---@field extra table Provider 配额配置（编辑表单「配额配置 JSON」的解码值）
 
@@ -176,7 +176,7 @@ MB = {}
 
 ---@class MbHttpRequest
 ---@field method string|nil 默认 "GET"
----@field url string 完整 URL（经宿主 egress proxy 与兜底超时；**无目标白名单/过滤**——收口≠授权）
+---@field url string 完整 URL（经宿主 egress proxy 与默认超时；**无目标白名单/过滤**——集中≠授权）
 ---@field headers MbHeaderList|nil
 ---@field body table|nil JSON 请求体
 ---@field timeout_ms number|nil

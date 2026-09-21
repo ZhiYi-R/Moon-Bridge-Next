@@ -12,9 +12,7 @@ use crate::session::SessionTable;
 pub struct AppState {
     /// 引导配置（监听地址、认证、egress 代理、配额）。
     pub config: GatewayConfig,
-    /// 配置/用量存储。
     pub db: Arc<Database>,
-    /// 协议 Adapter 注册表。
     pub registry: Arc<Registry>,
     /// 插件钩子（Lua 注册表或 Noop）。
     pub hooks: Arc<dyn PluginHooks>,

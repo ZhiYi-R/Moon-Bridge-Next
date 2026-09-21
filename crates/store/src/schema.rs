@@ -145,7 +145,7 @@ const V7: &str = "ALTER TABLE models DROP COLUMN pricing_json;";
 
 /// V8：models 增加 `max_output_tokens`（模型输出 token 上限，来自 models.dev
 /// `limit.output`）。供 Anthropic 等要求 `max_tokens` 必填的上游协议在客户端未设
-/// 上限时按模型真实上限兜底——避免凭空注入 4096 之类的小值把输出截断。
+/// 上限时按模型真实上限回退——避免凭空注入 4096 之类的小值把输出截断。
 const V8: &str = "ALTER TABLE models ADD COLUMN max_output_tokens INTEGER;";
 
 /// V9：usage_records 增加 `provider_key`（可空）。定价口径是 (provider, model)，
@@ -278,7 +278,7 @@ const MIGRATIONS: &[Migration] = &[
     // 插件——只有 core 进入请求钩子注册表）；配额绑定收敛到 Provider 自身字段
     // （plugin_ref/interval/enabled/config——key 的唯一来源是 provider 端点，卡片层
     // 整体废弃）。`quota_config_enc` 为 AES 加密列（同 api_key_enc），承载插件
-    // config_schema 声明的实例配置（含密钥类字段），明文不落库。
+    // config_schema 声明的实例配置（含密钥类字段），明文不写入数据库。
     //
     // `quota_results` 按 `(provider_key, key_index)` 存最近一次结果（key_index 即
     // provider_endpoints.idx）。旧 `balance_cards`/`balance_results` 数据废弃。
@@ -338,7 +338,6 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// 当前 schema 版本。
 pub fn current_version(conn: &Connection) -> Result<i32> {
     Ok(conn.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM schema_version",

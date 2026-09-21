@@ -37,7 +37,7 @@ const tpsText = computed(() => {
 const HIGHLIGHT_LIMIT = 256 * 1024;
 const encoder = new TextEncoder();
 
-/** 报文区数据：旧 trace 无响应快照且 error 存有响应体时，兜底展示到「上游响应」。
+/** 报文区数据：旧 trace 无响应快照且 error 存有响应体时，回退展示到「上游响应」。
  *  pretty 结果与行数在此一次性算好，避免模板里对 MB 级报文重复 stringify/split。 */
 const sections = computed(() => {
   const d = detail.value;
@@ -139,7 +139,7 @@ function pretty(v: unknown): string {
   }
 }
 
-/** 报文编辑器高度：按行数自适应，夹取 [6rem, 18rem]，小 body 不留大片空白。 */
+/** 报文编辑器高度：按行数自适应，限制在 [6rem, 18rem]，小 body 不留大片空白。 */
 function editorHeight(lines: number): string {
   const px = Math.min(288, Math.max(96, lines * 17 + 24));
   return `${px}px`;
@@ -192,7 +192,7 @@ onActivated(() => {
   activated = true;
 });
 
-// 视图被缓存后不再卸载：键盘导航监听改在停用时摘除，避免离开本页仍劫持上下键
+// 视图被缓存后不再卸载：键盘导航监听改在停用时移除，避免离开本页仍劫持上下键
 onDeactivated(() => document.removeEventListener("keydown", onKey));
 
 onUnmounted(() => document.removeEventListener("keydown", onKey));
@@ -204,7 +204,6 @@ onUnmounted(() => document.removeEventListener("keydown", onKey));
 
     <!-- 主从面板：左列表（可拖宽） / 右详情，高度填满视口 -->
     <div class="flex min-h-0 flex-1 overflow-hidden">
-      <!-- 列表 -->
       <section ref="listEl" class="flex min-h-0 shrink-0 flex-col" :style="{ width: listWidth + 'px' }">
         <div class="flex shrink-0 items-center gap-2 border-b p-3">
           <Input v-model="filter" placeholder="按会话 / 模型 / 文件名过滤…(↑↓ 切换)" class="flex-1" />
@@ -266,14 +265,12 @@ onUnmounted(() => document.removeEventListener("keydown", onKey));
         </div>
       </section>
 
-      <!-- 拖拽分栏把手 -->
       <div
         class="w-1 shrink-0 cursor-col-resize border-l transition-colors hover:bg-primary/40 active:bg-primary/60"
         title="拖拽调整列表宽度"
         @pointerdown="startResize"
       />
 
-      <!-- 详情 -->
       <section class="flex min-h-0 min-w-0 flex-1 flex-col">
         <div v-if="!selected" class="flex h-full items-center justify-center">
           <p class="text-sm text-muted-foreground">从左侧选择一条 trace 查看详情。</p>
@@ -291,7 +288,6 @@ onUnmounted(() => document.removeEventListener("keydown", onKey));
               加载中…
             </div>
             <div v-else-if="detail" class="space-y-4">
-              <!-- 元信息：对齐的定义列表 -->
               <dl class="grid grid-cols-[80px_1fr] items-baseline gap-x-3 gap-y-1.5 text-xs">
                 <dt class="text-muted-foreground">请求 ID</dt>
                 <dd class="break-all font-mono">{{ detail.requestId }}</dd>

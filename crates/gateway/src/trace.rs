@@ -1,4 +1,4 @@
-//! 请求 trace 落盘：把一次请求各阶段的报文快照写入文件系统（不入库）。
+//! 请求 trace 文件：把一次请求各阶段的报文快照写入文件系统（不写入数据库）。
 //!
 //! 目录结构：`<trace_dir>/<session>/<model>/<created_at>-<short_id>.json`，与架构
 //! 文档约定一致。仅当 [`crate::config::GatewayConfig::trace_dir`] 有值时写入；
@@ -15,10 +15,10 @@ use serde_json::Value;
 ///
 /// `moonbridge_core::Usage` **有意**保持 snake_case——Lua 插件经 mlua serde 直接读写它
 /// （见 `docs/architecture.md` §3 命名约定）。而 serde 的 `rename_all` **不作用于嵌套
-/// 类型**，所以把 `Usage` 原样塞进 camelCase 的 `TraceRecord`，落盘就成了
+/// 类型**，所以把 `Usage` 原样写进 camelCase 的 `TraceRecord`，写入磁盘就成了
 /// `"usage": {"input_tokens": …}`；前端按 `usage.inputTokens` 读取拿到 `undefined`，
 /// 再被 `formatTokens` 的 `n ?? 0` 兜成「0」——真实 trace 的 token 全显示为 0 且无报错
-/// （已实证）。这里做一次显式映射，使落盘 JSON 符合「面向前端的 DTO 统一 camelCase」。
+/// （已实证）。这里做一次显式映射，使写入磁盘 JSON 符合「面向前端的 DTO 统一 camelCase」。
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TraceUsage {
@@ -74,7 +74,7 @@ pub struct TraceRecord {
     pub error: Option<String>,
 }
 
-/// `trace_record_bodies=false` 时落盘前抹除全部报文体。
+/// `trace_record_bodies=false` 时写入磁盘前抹除全部报文体。
 ///
 /// `upstream_request` 是 `{ method, url, headers, body }` 快照——URL/headers 已脱敏
 /// 但 body 含完整上游请求报文（全部 prompt/消息），属于敏感数据，必须一并抹除；
@@ -88,7 +88,6 @@ pub fn strip_bodies(t: &mut TraceRecord) {
     }
 }
 
-/// 当前 epoch 毫秒。
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use super::{AdminState, ApiError, ApiResult};
 
-/// 启用门控错误前缀：前端据此弹出「设置不满足」提示框而非普通错误横幅。
+/// 启用条件错误前缀：前端据此弹出「设置不满足」提示框而非普通错误横幅。
 pub const REQUIREMENTS_ERROR_PREFIX: &str = "REQUIREMENTS";
 
 /// 解析脚本引用为**受约束**的文件路径；`Ok(None)` 表示内联脚本。
@@ -36,7 +36,6 @@ fn script_file(state: &AdminState, script_ref: &str) -> ApiResult<Option<PathBuf
     }
 }
 
-/// 列出全部插件。
 pub async fn plugin_list(State(state): State<AdminState>) -> ApiResult<Json<Vec<PluginRecord>>> {
     Ok(Json(state.db.list_plugins()?))
 }
@@ -53,8 +52,6 @@ pub async fn plugin_get(
     Ok(Json(p))
 }
 
-/// 新增或更新插件记录。
-///
 /// 启用动作（新建即启用 / 停用 → 启用）会校验插件 `MB.requires` 声明的网关设置，
 /// 不满足时以 400 + [`REQUIREMENTS_ERROR_PREFIX`] 开头的消息拒绝——前端弹提示框，
 /// 不自动修改设置。
@@ -63,12 +60,12 @@ pub async fn plugin_save(
     Json(plugin): Json<PluginRecord>,
 ) -> ApiResult<Json<Value>> {
     // 脚本可读取时，以脚本 `MB` 清单为准提取 category/config_schema（清单是权威
-    // 元数据，表单值只是兜底）；沙箱求值失败（如脚本语法错误）则保留表单值。
+    // 元数据，表单值只是回退）；沙箱求值失败（如脚本语法错误）则保留表单值。
     let script = match script_file(&state, &plugin.script_ref)? {
         Some(f) if f.is_file() => {
             std::fs::read_to_string(&f).map_err(|e| ApiError::internal(e.to_string()))?
         }
-        Some(_) => String::new(),          // 文件脚本尚未落盘
+        Some(_) => String::new(),          // 文件脚本尚未写入磁盘
         None => plugin.script_ref.clone(), // 内联脚本即内容
     };
     let mut plugin = plugin;
@@ -98,7 +95,6 @@ pub async fn plugin_save(
     Ok(Json(Value::Null))
 }
 
-/// 删除插件。
 pub async fn plugin_delete(
     State(state): State<AdminState>,
     AxumPath(name): AxumPath<String>,
@@ -122,7 +118,7 @@ pub async fn plugin_read_script(
             if file.is_file() {
                 std::fs::read_to_string(&file).map_err(|e| ApiError::internal(e.to_string()))?
             } else {
-                String::new() // 文件脚本但尚未落盘
+                String::new() // 文件脚本但尚未写入磁盘
             }
         }
         None => rec.script_ref, // 内联脚本
@@ -202,7 +198,6 @@ fn extract_lua_string(script: &str, key: &str) -> Option<String> {
     Some(rest[eq + open + 1..eq + open + 1 + close].to_string())
 }
 
-/// 单个文件的导入结果。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginImportOutcome {
@@ -213,7 +208,7 @@ pub struct PluginImportOutcome {
     pub message: Option<String>,
 }
 
-/// 启用门控：从 Lua 脚本尽力提取 `MB.requires = { key = value, ... }` 声明。
+/// 启用条件：从 Lua 脚本尽力提取 `MB.requires = { key = value, ... }` 声明。
 ///
 /// 键为网关配置（GatewayConfig）的 camelCase 字段名，值支持 true/false/整数/浮点数/
 /// 带引号字符串。行级剥离 `--` 注释后匹配，与 [`extract_lua_string_list`] 同一取舍。
@@ -311,18 +306,16 @@ pub struct PluginImportRequest {
     pub files: Vec<PluginImportFile>,
 }
 
-/// 待导入的单个插件文件。
 #[derive(Debug, Deserialize)]
 pub struct PluginImportFile {
     /// 文件名（须以 `.lua` 结尾，插件名取出去扩展名的部分）。
     pub name: String,
-    /// 脚本内容。
     #[serde(default)]
     pub content: String,
 }
 
 /// 从请求体内容导入 `.lua` 插件：以文件名（去扩展名）为插件名，脚本写入
-/// `plugins_dir/{name}.lua` 并落库；同名插件已存在时跳过（不覆盖）。scopes/capabilities
+/// `plugins_dir/{name}.lua` 并写入数据库；同名插件已存在时跳过（不覆盖）。scopes/capabilities
 /// 尽力从脚本 `MB = { scopes = {...}, capabilities = {...} }` 声明提取，缺省
 /// global/core。逐文件返回结果，单个失败不影响其余。
 pub async fn plugin_import(
@@ -409,7 +402,7 @@ fn import_one(state: &AdminState, file: &PluginImportFile) -> PluginImportOutcom
         config_schema,
     };
     if let Err(e) = state.db.upsert_plugin(&rec) {
-        return import_fail(&path_string, &name, "error", format!("落库失败: {e}"));
+        return import_fail(&path_string, &name, "error", format!("写入数据库失败: {e}"));
     }
     if let Err(e) = write_script_inner(state, &name, &content) {
         // 脚本写入失败时回滚记录，避免留下空脚本插件
@@ -431,7 +424,6 @@ fn import_one(state: &AdminState, file: &PluginImportFile) -> PluginImportOutcom
     }
 }
 
-/// 列出某插件的全部作用域绑定。
 pub async fn binding_list(
     State(state): State<AdminState>,
     AxumPath(name): AxumPath<String>,
@@ -453,7 +445,6 @@ pub struct ScopeParams {
     pub scope: String,
 }
 
-/// 列出某一作用域类型的全部绑定。
 pub async fn binding_list_by_scope(
     State(state): State<AdminState>,
     Query(params): Query<ScopeParams>,

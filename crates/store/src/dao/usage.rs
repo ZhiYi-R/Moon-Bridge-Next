@@ -8,7 +8,6 @@ use crate::error::Result;
 use crate::models::{UsageQuery, UsageRecord};
 use crate::Database;
 
-/// 用量汇总。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageSummary {
@@ -106,7 +105,7 @@ impl Database {
             sql.push_str(" AND created_at <= ?");
             binds.push(Box::new(until));
         }
-        // limit 钳制：非正数回退默认 100，无上限的 limit 会把整表读进内存；
+        // limit 校验：非正数回退默认 100，无上限的 limit 会把整表读进内存；
         // 负 offset 在 SQLite 里静默当作 0，显式归一避免口径分歧。
         let limit = if q.limit > 0 { q.limit.min(500) } else { 100 };
         sql.push_str(" ORDER BY created_at DESC LIMIT ? OFFSET ?");
@@ -123,7 +122,6 @@ impl Database {
         Ok(out)
     }
 
-    /// 全量用量汇总。
     pub fn usage_summary(&self) -> Result<UsageSummary> {
         self.usage_summary_range(None, None)
     }

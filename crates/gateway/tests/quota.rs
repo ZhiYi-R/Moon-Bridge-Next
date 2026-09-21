@@ -110,7 +110,7 @@ fn only(results: &[QuotaKeyResult]) -> &QuotaKeyResult {
 fn stored(db: &Database, key: &str, idx: i64) -> QuotaKeyResult {
     db.get_quota_key_result(key, idx)
         .unwrap()
-        .expect("结果应已落库")
+        .expect("结果应已写入数据库")
 }
 
 fn assert_close(actual: Option<f64>, expected: f64) {
@@ -149,7 +149,7 @@ async fn run_provider_success_normalizes_quotas() {
         "quotas 不应被改写形状: {payload}"
     );
 
-    // 落库结果与返回值一致（JSON 往返不做数值重排，仅尾数 0 可能消失）
+    // 写入数据库结果与返回值一致（JSON 往返不做数值重排，仅尾数 0 可能消失）
     let roundtrip: Value = serde_json::from_str(&payload.to_string()).unwrap();
     assert_eq!(stored(&db, "ok", 0).result.payload, Some(roundtrip));
 }
@@ -265,7 +265,7 @@ async fn unbound_and_wrong_category_plugins_are_engine_errors() {
         Some("插件 core-plugin 不是配额查询类插件")
     );
 
-    // 解析失败路径同样落单行并剪掉残留
+    // 解析失败路径同样写单行结果并移除残留
     db.upsert_quota_key_result(
         "unbound",
         &QuotaKeyResult {
@@ -386,7 +386,7 @@ async fn scheduler_picks_up_never_queried_provider() {
     }
     task.abort();
 
-    let r = landed.expect("从未查询的启用 Provider 应在超时前被调度并落库");
+    let r = landed.expect("从未查询的启用 Provider 应在超时前被调度并写入数据库");
     assert_eq!(
         r.result.payload.expect("应有 payload")["summary"],
         json!("s")
@@ -541,7 +541,7 @@ async fn provider_endpoints_split_into_per_key_results() {
         json!("sk-alpha-0001|sk-alpha-0001|https://c|1|kimi|true")
     );
 
-    // 落库行与返回值一致；结果表里没有 key 原文
+    // 写入数据库行与返回值一致；结果表里没有 key 原文
     let rows = db.list_quota_results("kimi").unwrap();
     assert_eq!(rows.len(), 4);
     assert_eq!(rows[0].key_label, "sk-alp…0001");
@@ -644,7 +644,7 @@ async fn shrinking_endpoints_prunes_stale_rows() {
     let eng = engine(&db, None);
     assert_eq!(eng.run_provider(&p).await.unwrap().len(), 2);
 
-    // Provider 删到只剩一个端点：重跑后 idx1 残留行被剪掉
+    // Provider 删到只剩一个端点：重跑后 idx1 残留行被删除
     p.endpoints.truncate(1);
     db.upsert_provider(&p).unwrap();
     let results = eng.run_provider(&p).await.unwrap();
@@ -792,7 +792,7 @@ async fn test_provider_runs_without_persisting() {
     let db = Arc::new(Database::open_in_memory().unwrap());
     let eng = engine(&db, None);
 
-    // 成功 dry-run：返回本次结果但不写库
+    // 成功 dry-run：返回本次结果但不写入数据库
     let p = ok_provider(&db, "dry");
     let results = eng.test_provider(&p).await;
     let res = &only(&results).result;
@@ -801,7 +801,7 @@ async fn test_provider_runs_without_persisting() {
     assert!(res.queried_at > 0);
     assert!(
         db.list_quota_results("dry").unwrap().is_empty(),
-        "dry-run 不得把结果写库"
+        "dry-run 不得把结果写数据库"
     );
 
     // 引擎级失败的 dry-run：payload 为 None（不读历史、不保留旧值）
@@ -813,7 +813,7 @@ async fn test_provider_runs_without_persisting() {
     assert_eq!(res.payload, None, "dry-run 引擎级失败 payload 必须为 None");
     assert!(db.list_quota_results("dry").unwrap().is_empty());
 
-    // 多端点 Provider 的 dry-run：逐端点返回，同样不落库
+    // 多端点 Provider 的 dry-run：逐端点返回，同样不写入数据库
     plugin(&db, "quota-ok", SCRIPT_OK);
     let p = bound_provider(
         "drymulti",

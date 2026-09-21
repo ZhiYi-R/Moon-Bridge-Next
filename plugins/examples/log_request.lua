@@ -6,7 +6,7 @@
 --   * transform_error —— 给错误消息加前缀
 --
 -- 注册约定：脚本执行后暴露全局 `MB` 表，既承载清单（version/scopes/capabilities/
--- config_schema），也承载钩子函数。宿主 API 挂在全局 `mb`（小写）下。
+-- config_schema），也承载钩子函数。宿主 API 挂载在全局 `mb`（小写）下。
 
 MB = {
   version = "0.1.0",

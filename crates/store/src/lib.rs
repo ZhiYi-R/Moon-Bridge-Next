@@ -248,7 +248,6 @@ impl Database {
         Ok(())
     }
 
-    /// 当前 schema 版本。
     pub fn version(&self) -> Result<i32> {
         let conn = self.conn.lock();
         schema::current_version(&conn)
@@ -287,7 +286,7 @@ mod tests {
     }
 
     /// 回归：V8 新增 max_output_tokens 列须随模型定义往返（供上游必填
-    /// max_tokens 的协议按模型真实输出上限兜底）。
+    /// max_tokens 的协议按模型真实输出上限回退）。
     #[test]
     fn model_max_output_tokens_roundtrip() {
         let db = Database::open_in_memory().unwrap();

@@ -13,7 +13,7 @@ pub async fn gateway_start(state: State<'_, Arc<ManagedState>>) -> CmdResult<Gat
     state.start_gateway().await.map_err(CommandError::from)
 }
 
-/// 停止内嵌网关（优雅关闭）。
+/// 停止内嵌网关（平滑关闭）。
 #[tauri::command]
 pub async fn gateway_stop(state: State<'_, Arc<ManagedState>>) -> CmdResult<GatewayStatus> {
     state.stop_gateway().await.map_err(CommandError::from)
@@ -26,7 +26,6 @@ pub async fn gateway_restart(state: State<'_, Arc<ManagedState>>) -> CmdResult<G
     state.start_gateway().await.map_err(CommandError::from)
 }
 
-/// 查询网关运行状态。
 #[tauri::command]
 pub fn gateway_status(state: State<'_, Arc<ManagedState>>) -> CmdResult<GatewayStatus> {
     Ok(state.status())

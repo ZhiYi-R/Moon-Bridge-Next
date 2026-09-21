@@ -23,11 +23,11 @@ pub const DEFAULT_VERSION: &str = "v1beta";
 
 /// Gemini 服务端代码执行（`executableCode`/`codeExecutionResult` part）在
 /// Core 侧的工具名承载：以 ToolUse/ToolResult 表达调用与结果，本常量作
-/// 名字哨兵，回传 Gemini 时还原为原生 part 形态。真实工具若恰好同名会
+/// 占位名，回传 Gemini 时还原为原生 part 形态。真实工具若恰好同名会
 /// 误判，属可接受的边角冲突。
 pub(crate) const EXEC_CODE: &str = "executable_code";
 
-/// `functionCall` 无 `id` 字段时 ToolUse.id 的占位哨兵；`functionResponse`
+/// `functionCall` 无 `id` 字段时 ToolUse.id 的占位值；`functionResponse`
 /// 无 `id` 时 ToolResult.tool_use_id 用 `{FR_NAME_PREFIX}{name}` 占位——
 /// contents_to_core 收齐全部消息后按「调用按名入队、结果按名出队」配对
 /// 并分配唯一 id。此前结果直接以函数名作 tool_use_id，与调用侧合成的
@@ -91,8 +91,8 @@ pub fn text_of(blocks: &[ContentBlock]) -> String {
 // Core → Gemini
 // ============================================================================
 
-/// 载波凭据落位：并入前一 part（无签名时补写 thoughtSignature）；
-/// 无可并入 part 时落成独立 `{"thought":true,"thoughtSignature":sig}`。
+/// 暂存签名并入前一 part（无签名时补写 thoughtSignature）；
+/// 无可并入 part 时生成独立 `{"thought":true,"thoughtSignature":sig}`。
 fn flush_pending_sig(parts: &mut Vec<Value>, pending: &mut Option<String>) {
     let Some(sig) = pending.take() else {
         return;
@@ -131,10 +131,10 @@ pub fn core_to_contents(messages: &[Message]) -> Vec<Value> {
             _ => "user",
         };
         let mut parts: Vec<Value> = Vec::new();
-        // 「仅凭据」载波（空文本 Reasoning{sig}）是 FC/text 签名跨协议的
-        // 传输形态：紧邻 ToolUse 之前时迁移到 functionCall part（绑定目标），
+        // 「仅凭据」块（空文本 Reasoning{sig}）是 FC/text 签名跨协议的
+        // 传输载体：紧邻 ToolUse 之前时迁移到 functionCall part（绑定目标），
         // 其余情况并入前一 part（末块/文本 part 签名原位），无位置可并时
-        // 落成独立 thought part。
+        // 生成独立 thought part。
         let mut pending_sig: Option<String> = None;
         for b in &m.content {
             match b {
@@ -183,7 +183,7 @@ pub fn core_to_contents(messages: &[Message]) -> Vec<Value> {
                     signature,
                     ..
                 } => {
-                    // 自带签名优先，否则消费紧邻的前置载波凭据
+                    // 自带签名优先，否则消费紧邻的前置载体凭据
                     let sig = crate::adapters::untag_signature(
                         crate::adapters::SIG_GEMINI,
                         signature.as_deref(),
@@ -301,7 +301,7 @@ pub fn core_to_contents(messages: &[Message]) -> Vec<Value> {
                         signature.as_deref(),
                     );
                     if text.is_empty() {
-                        // 仅凭据载波：不独立成 part，留给后继 ToolUse 或前一 part
+                        // 仅凭据载体：不独立成 part，留给后继 ToolUse 或前一 part
                         if let Some(s) = sig {
                             if !s.is_empty() {
                                 pending_sig = Some(s.to_string());
@@ -437,7 +437,7 @@ pub fn core_to_generation_config(req: &CoreRequest) -> Option<Value> {
 
 /// Core 内容块 → Gemini 响应 candidate 的 parts（入口 from_core_response 用）。
 ///
-/// 与 `core_to_contents` 同一套载波规则：仅凭据 Reasoning 前绑后继
+/// 与 `core_to_contents` 同一套载体规则：仅凭据 Reasoning 前绑后继
 /// ToolUse，其余并入前一 part。
 pub fn core_to_parts(content: &[ContentBlock]) -> Vec<Value> {
     let mut parts: Vec<Value> = Vec::new();
@@ -571,7 +571,7 @@ fn resp_to_text(v: &Value) -> String {
 ///
 /// 凭据传输约定：part 级 `thoughtSignature` 打上 `gem:` 来源标记；签名绑定
 /// 目标是「紧邻的后继 ToolUse / 前一 part」，而非任意 reasoning 块——
-/// 故带签名的普通 text part 产出 `Text + 仅凭据载波 Reasoning`（后者由
+/// 故带签名的普通 text part 产出 `Text + 仅凭据载体 Reasoning`（后者由
 /// `core_to_contents` 的 flush 规则还原回原位）。
 pub fn part_to_blocks(p: &Value) -> Vec<ContentBlock> {
     let mut out = Vec::new();
@@ -593,7 +593,7 @@ pub fn part_to_blocks(p: &Value) -> Vec<ContentBlock> {
                 });
             } else {
                 // 普通文本 part 带签名（官方：无 FC 时签名在最后一个 part）：
-                // 文本归文本，凭据作载波紧随——回传时并入前一 part 还原
+                // 文本归文本，凭据作载体紧随——回传时并入前一 part 还原
                 out.push(ContentBlock::text(t));
                 if signature.is_some() {
                     out.push(ContentBlock::Reasoning {
@@ -628,7 +628,7 @@ pub fn part_to_blocks(p: &Value) -> Vec<ContentBlock> {
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-        // Gemini 的 functionCall 不一定带 id；缺失时用占位哨兵，由
+        // Gemini 的 functionCall 不一定带 id；缺失时用占位值，由
         // contents_to_core 统一分配唯一 id 并与 functionResponse 按名配对。
         let id = fc
             .get("id")
@@ -639,7 +639,7 @@ pub fn part_to_blocks(p: &Value) -> Vec<ContentBlock> {
         let args = fc.get("args").cloned().unwrap_or_else(|| json!({}));
         // 加密 CoT 凭据：与 function call 强绑定的 thoughtSignature（part 级字段，
         // 官方形态在 part 上；部分实现放在 functionCall 内，均兼容）。
-        // ToolUse.signature 直接携带 + 前置载波块兜底（无凭据位的协议靠载波还原）。
+        // ToolUse.signature 直接携带 + 前置载体块回退（无凭据位的协议靠载体还原）。
         let signature = crate::adapters::tag_signature(
             crate::adapters::SIG_GEMINI,
             p.get("thoughtSignature")
@@ -730,7 +730,7 @@ pub fn part_to_blocks(p: &Value) -> Vec<ContentBlock> {
         }
     }
     // 服务端代码执行对：executableCode（待执行代码）→ ToolUse、
-    // codeExecutionResult（执行输出）→ ToolResult，均以 EXEC_CODE 哨兵名
+    // codeExecutionResult（执行输出）→ ToolResult，均以 EXEC_CODE 占位名
     // 承载；tool_use_id 用占位值，由 contents_to_core 统一配对编号。
     if let Some(ec) = p.get("executableCode") {
         let signature = crate::adapters::tag_signature(
@@ -821,7 +821,7 @@ pub fn contents_to_core(contents: &[Value]) -> Vec<Message> {
         })
         .collect();
 
-    // functionCall/functionResponse 配对：调用无 id 时用占位哨兵，此处分配
+    // functionCall/functionResponse 配对：调用无 id 时用占位值，此处分配
     // 唯一 id 并按函数名入队；结果无 id 时（`{FR_NAME_PREFIX}{name}`）按名
     // 出队回指对应调用——Gemini 语义即 user 回合的 functionResponse 按序
     // 对应前序 model 回合的同名 functionCall。带真实 id 的调用同样入队，
@@ -983,7 +983,6 @@ pub fn usage_from_gemini(v: &Value) -> Usage {
     }
 }
 
-/// 构造 Gemini `usageMetadata` 对象。
 pub fn usage_object(u: &Usage) -> Value {
     json!({
         "promptTokenCount": u.input_tokens,
@@ -1117,7 +1116,7 @@ mod tests {
             "finishReason": "STOP"
         });
         let (content, _) = candidate_to_core(&cand);
-        // 载波在前（供无 ToolUse 凭据位的协议还原），ToolUse 自带签名
+        // 载体在前（供无 ToolUse 凭据位的协议还原），ToolUse 自带签名
         match &content[0] {
             ContentBlock::Reasoning {
                 text,
@@ -1165,8 +1164,8 @@ mod tests {
     }
 
     /// 普通文本 part 携带 thoughtSignature（官方：无 FC 时签名在最后一个
-    /// part）：text 归 Text 块、凭据拆出为紧邻的仅凭据载波 Reasoning——
-    /// 不再误挂 reasoning 槽位，回传时载波并入前一 part 还原。
+    /// part）：text 归 Text 块、凭据拆出为紧邻的仅凭据载体 Reasoning——
+    /// 不再误挂载到 reasoning 槽位，回传时载体并入前一 part 还原。
     #[test]
     fn text_part_signature_detaches_to_carrier() {
         let blocks = part_to_blocks(&json!({"text": "Hi", "thoughtSignature": "S"}));
@@ -1182,17 +1181,17 @@ mod tests {
                 assert!(text.is_empty());
                 assert_eq!(signature.as_deref(), Some("gem:S"));
             }
-            other => panic!("签名应拆出为载波块, got {other:?}"),
+            other => panic!("签名应拆出为载体块, got {other:?}"),
         }
 
-        // 回传还原：载波并入前一 part
+        // 回传还原：载体并入前一 part
         let contents = core_to_contents(&[Message {
             role: Role::Assistant,
             content: blocks,
             ext: Default::default(),
         }]);
         let parts = contents[0]["parts"].as_array().unwrap();
-        assert_eq!(parts.len(), 1, "载波不额外占 part");
+        assert_eq!(parts.len(), 1, "载体不额外占 part");
         assert_eq!(parts[0]["text"], "Hi");
         assert_eq!(parts[0]["thoughtSignature"], "S");
     }
@@ -1250,7 +1249,7 @@ mod tests {
         assert_eq!(contents[2]["parts"].as_array().unwrap().len(), 2);
     }
 
-    /// 载波凭据迁移：空文本 Reasoning{sig} 紧邻 ToolUse 之前 → 签名落到
+    /// 载体凭据迁移：空文本 Reasoning{sig} 紧邻 ToolUse 之前 → 签名落到
     /// functionCall part（非 Gemini 入口回传的标准形态）；异源凭据不迁移。
     #[test]
     fn signature_carrier_attaches_to_next_tool_use() {
@@ -1278,7 +1277,7 @@ mod tests {
         ];
         let contents = core_to_contents(&msgs);
         let parts = contents[1]["parts"].as_array().unwrap();
-        assert_eq!(parts.len(), 1, "载波不独立成 part");
+        assert_eq!(parts.len(), 1, "载体不独立成 part");
         assert_eq!(parts[0]["functionCall"]["thoughtSignature"], "SIG");
 
         // 异源凭据（Anthropic 签名）不得迁移——透传只会让上游 400
@@ -1396,7 +1395,7 @@ mod tests {
     }
 
     /// 回归：executableCode/codeExecutionResult 入站不再丢弃——映射为
-    /// ToolUse/ToolResult（EXEC_CODE 哨兵名，按序配对唯一 id）；回传 Gemini
+    /// ToolUse/ToolResult（EXEC_CODE 占位名，按序配对唯一 id）；回传 Gemini
     /// 还原为原生 part 形态。
     #[test]
     fn code_execution_parts_roundtrip() {

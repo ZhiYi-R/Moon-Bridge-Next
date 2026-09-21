@@ -42,7 +42,6 @@ impl<'a> From<&'a ReqCtx> for LuaCtx<'a> {
     }
 }
 
-/// 构造 ctx table。
 pub fn ctx_to_lua(lua: &Lua, ctx: &ReqCtx) -> Result<LuaValue> {
     Ok(lua.to_value(&LuaCtx::from(ctx))?)
 }
@@ -120,8 +119,6 @@ fn body_exceeds(body: &RawBody, limit: usize) -> bool {
     }
 }
 
-/// RawMessage → Lua table。
-///
 /// `max_body_bytes`：body 降级阈值。超过时不展开为 Lua table（置 `body=nil` 并标记
 /// `body_truncated=true`），避免超大报文撑爆沙箱；回写时据此保留原始报文。
 pub fn raw_message_to_lua(lua: &Lua, m: &RawMessage, max_body_bytes: usize) -> Result<Table> {
@@ -255,7 +252,6 @@ pub fn parse_chunk_action(ret: LuaValue) -> ChunkVerdict {
     ChunkVerdict::Forward
 }
 
-/// 便于 gateway 复用的协议字符串。
 pub fn protocol_str(p: Protocol) -> &'static str {
     p.as_str()
 }

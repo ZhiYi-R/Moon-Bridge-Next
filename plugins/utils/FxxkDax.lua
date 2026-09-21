@@ -8,7 +8,7 @@ MB = {
   version = "0.1.0",
   scopes = { "global" },
   capabilities = { "raw_request" },
-  -- 启用门控：依赖会话水印识别会话；水印关闭时 ctx.session_id 恒为空，
+  -- 启用条件：依赖会话水印识别会话；水印关闭时 ctx.session_id 恒为空，
   -- 该头退化为占位值。未满足时网关拒绝启用。
   requires = { sessionMarker = true },
 }

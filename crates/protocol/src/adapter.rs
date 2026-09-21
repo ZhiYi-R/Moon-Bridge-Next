@@ -15,9 +15,7 @@ use crate::raw::RawChunk;
 /// 上游 provider 端点信息，由 gateway 从 store 配置构造后传给 ProviderAdapter。
 #[derive(Debug, Clone)]
 pub struct ProviderEndpoint {
-    /// provider 唯一 key。
     pub key: String,
-    /// 上游协议。
     pub protocol: Protocol,
     /// 基础 URL（如 `https://api.anthropic.com`）。
     pub base_url: String,
@@ -25,14 +23,11 @@ pub struct ProviderEndpoint {
     pub api_key: String,
     /// 协议版本头（如 Anthropic 的 `2023-06-01`）。
     pub version: Option<String>,
-    /// 自定义 User-Agent。
     pub user_agent: Option<String>,
-    /// 协议特定额外字段。
     pub extra: Map,
 }
 
 impl ProviderEndpoint {
-    /// 构造一个最小端点。
     pub fn new(
         key: impl Into<String>,
         protocol: Protocol,
@@ -57,7 +52,6 @@ pub struct UpstreamRequest {
     pub method: Method,
     pub url: String,
     pub headers: Vec<(String, String)>,
-    /// JSON 请求体（绝大多数 LLM API 为 JSON）。
     pub body: Value,
     pub stream: bool,
 }
@@ -65,11 +59,8 @@ pub struct UpstreamRequest {
 /// 入口协议 ↔ Core（非流式）。例：OpenAI Responses 请求 → CoreRequest。
 #[async_trait]
 pub trait ClientAdapter: Send + Sync {
-    /// 该 Adapter 处理的入口协议。
     fn protocol(&self) -> Protocol;
-    /// 客户端原始请求 JSON → CoreRequest。
     async fn to_core_request(&self, ctx: &ReqCtx, raw: Value) -> Result<CoreRequest>;
-    /// CoreResponse → 客户端协议响应 JSON。
     //
     // `from_core_*` / `to_core_*` 表达的是 **Core ↔ 协议的转换方向**、与配对方法对称，
     // 不是构造函数；且 Adapter 经 `Arc<dyn …>` 动态派发，`&self` 无法去除。
@@ -94,7 +85,7 @@ pub trait ClientStreamAdapter: Send + Sync {
     ) -> Result<Vec<RawChunk>>;
 }
 
-/// encode 的每流状态。adapter 本体为并发共享单例，可变状态由 gateway
+/// encode 的每流状态。adapter 本身为并发共享单例，可变状态由 gateway
 /// 按请求持有，encode 保持可重入。
 #[derive(Default)]
 pub struct StreamEncodeState {
@@ -116,7 +107,6 @@ pub struct StreamEncodeState {
     /// `tool_calls[].index` 只在工具调用内计数（0,1,2…），直接用 Core
     /// 块索引会因前置文本块产生稀疏序号，严格客户端累积出带空洞数组。
     pub tool_ordinals: std::collections::HashMap<usize, usize>,
-    /// 下一个待分配的 tool_calls 序数。
     pub next_tool_ordinal: usize,
 }
 
@@ -132,12 +122,10 @@ impl StreamEncodeState {
         self.usage_acc.reasoning_tokens = self.usage_acc.reasoning_tokens.max(u.reasoning_tokens);
     }
 
-    /// 记录 BlockStart 的起始块。
     pub fn note_start(&mut self, index: usize, block: &moonbridge_core::ContentBlock) {
         self.blocks.insert(index, block.clone());
     }
 
-    /// 追加块的增量载荷（文本/JSON 参数）。
     pub fn push_delta(&mut self, index: usize, text: &str) {
         self.delta_acc.entry(index).or_default().push_str(text);
     }
@@ -154,12 +142,12 @@ impl StreamEncodeState {
     }
 }
 
-/// decode 的每流状态。adapter 本体为并发共享单例，可变状态由 gateway
+/// decode 的每流状态。adapter 本身为并发共享单例，可变状态由 gateway
 /// 按请求持有，decode 保持可重入。
 ///
 /// 无显式块边界事件的协议（Gemini：每个 chunk 只有一串 parts）需要跨 chunk
 /// 维持稳定的块索引分配与块内容累积——函数调用计数、text/reasoning 各自的
-/// 索引槽位都挂在这里；带显式 `index`/`output_index` 的协议（Anthropic/
+/// 索引槽位都挂载在这里；带显式 `index`/`output_index` 的协议（Anthropic/
 /// OpenAI）完全不用它。
 #[derive(Default)]
 pub struct StreamDecodeState {
@@ -259,7 +247,6 @@ pub trait ProviderAdapter: Send + Sync {
         req: &CoreRequest,
         endpoint: &ProviderEndpoint,
     ) -> Result<UpstreamRequest>;
-    /// 上游响应 JSON → CoreResponse。
     async fn to_core_response(&self, ctx: &ReqCtx, raw: Value) -> Result<CoreResponse>;
 }
 

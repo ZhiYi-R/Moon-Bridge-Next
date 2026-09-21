@@ -12,14 +12,12 @@ use crate::error::{GatewayError, Result};
 use crate::handlers;
 use crate::state::AppState;
 
-/// 构建 axum 路由。
-///
 /// 入口端点覆盖三种协议（多协议入口）：
 /// - `/v1/responses`（+ `/responses`）—— OpenAI Responses
 /// - `/v1/messages` —— Anthropic Messages
 /// - `/v1/chat/completions` —— OpenAI Chat
 ///
-/// 另有 `/health`、`/v1/models`。Gemini 作入口时未挂路由（主要作上游）。
+/// 另有 `/health`、`/v1/models`。Gemini 作入口时未挂载路由（主要作上游）。
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(handlers::health))
@@ -41,7 +39,7 @@ pub async fn serve(state: Arc<AppState>) -> Result<()> {
     serve_with_shutdown(state, std::future::pending::<()>()).await
 }
 
-/// 绑定并启动 HTTP 服务器，`shutdown` future 完成时优雅关闭。
+/// 绑定并启动 HTTP 服务器，`shutdown` future 完成时平滑关闭。
 ///
 /// app 层（src-tauri）用 oneshot channel 驱动 `shutdown`，实现网关的启停控制。
 pub async fn serve_with_shutdown<F>(state: Arc<AppState>, shutdown: F) -> Result<()>

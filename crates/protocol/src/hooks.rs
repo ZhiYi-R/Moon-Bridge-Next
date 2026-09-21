@@ -106,7 +106,7 @@ pub trait PluginHooks: Send + Sync {
 
     /// 网关开始服务前通知所有插件执行各自的 `MB.init`。默认 no-op。
     ///
-    /// 不经 capability、不经 provider 三态门控：初始化是插件自身的事，与该插件
+    /// 不经 capability、不经 provider 三态过滤：初始化是插件自身的事，与该插件
     /// 对哪些请求生效无关（被 provider 强制启用的插件同样需要 init）。
     async fn init_all(&self) {}
 

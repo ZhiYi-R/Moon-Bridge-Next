@@ -2,8 +2,8 @@
 //!
 //! 只向插件暴露白名单能力：日志、config、会话状态、受控 HTTP（经 [`HostBridge`]）、
 //! 跨 provider 调用、headers 辅助、crypto。危险的 `os/io/loadfile/dofile/require/package`
-//! 等在 [`sandbox`] 中移除。所有网络能力经 `HostBridge` 收口，由 gateway 施加 egress
-//! 代理与兜底超时（注意：目前**没有**域名白名单实现，出站目标不受限）。
+//! 等在 [`sandbox`] 中移除。所有网络能力经 `HostBridge` 集中，由 gateway 施加 egress
+//! 代理与默认超时（注意：目前**没有**域名白名单实现，出站目标不受限）。
 
 use std::sync::Arc;
 
@@ -81,12 +81,12 @@ const DANGEROUS_GLOBALS: [&str; 9] = [
 /// 协程钩子补丁：把宿主装的指令计数/超时钩子传导到插件新建的线程。
 ///
 /// Lua 的 debug hook 按 `lua_State`（线程）生效且**不被新建协程继承**，所以宿主在
-/// `create_thread` 上挂的那颗钩子只覆盖它自己那一层；插件内
+/// `create_thread` 上挂载的那颗钩子只覆盖它自己那一层；插件内
 /// `coroutine.wrap(function() while true do end end)()` 会在一个全新、无钩子的线程里
-/// 死循环，绕过 `max_instructions` 与 `call_timeout`，并因 `Lua` 互斥守卫跨 await
+/// 死循环，绕过 `max_instructions` 与 `call_timeout`，并因 `Mutex<Lua>` 的 `MutexGuard` 跨 await
 /// 持有而永久卡死该插件的请求链路。
 ///
-/// 做法：包一层 `coroutine.create`/`wrap`，线程创建后立即经宿主回调补挂钩子。
+/// 做法：包一层 `coroutine.create`/`wrap`，线程创建后立即经宿主回调补挂载钩子。
 /// 两者都必须经**同一个 upvalue 构造函数**拿线程，不能让 `wrap` 去查全局
 /// `coroutine.create`——否则插件覆写 `coroutine.create` 就能让 `wrap` 造出无钩线程。
 /// `bind` 同样必须是 upvalue 而非全局，否则插件 `__mb_bind_thread = nil` 即可绕过。
@@ -119,7 +119,7 @@ end
 /// - `set_memory_limit`：单状态内存硬上限，越界分配触发 `MemoryError`；
 /// - `set_hook(every_nth_instruction)`：每 N 条指令检查一次执行预算
 ///   （[`ExecutionBudget`]），指令数或 wall-clock 超时越界即返回错误中止 Lua，
-///   从而掐断死循环与超长计算。预算由宿主在每次钩子调用前重置。
+///   从而中止死循环与超长计算。预算由宿主在每次钩子调用前重置。
 pub fn sandbox(lua: &Lua, limits: &SandboxLimits, budget: &Arc<ExecutionBudget>) -> Result<()> {
     let g = lua.globals();
     for name in DANGEROUS_GLOBALS {
@@ -142,7 +142,7 @@ pub fn sandbox(lua: &Lua, limits: &SandboxLimits, budget: &Arc<ExecutionBudget>)
         },
     );
 
-    // 同一份预算补挂到插件新建的每个协程线程
+    // 同一份预算补挂载到插件新建的每个协程线程
     let binder = {
         let b = budget.clone();
         lua.create_function(move |_lua, thread: Thread| {
@@ -161,7 +161,7 @@ pub fn sandbox(lua: &Lua, limits: &SandboxLimits, budget: &Arc<ExecutionBudget>)
     lua.load(COROUTINE_PATCH)
         .set_name("mb_sandbox_coroutine")
         .exec()?;
-    // 补丁内已把 bind 收为 upvalue 并清除全局名；此处再兜底一次
+    // 补丁内已把 bind 收为 upvalue 并清除全局名；此处再补做一次
     g.set("__mb_bind_thread", LuaValue::Nil)?;
 
     Ok(())
@@ -298,7 +298,7 @@ pub fn register(
 
     lua.globals().set("mb", mb)?;
 
-    // ---- mb.headers（纯 Lua 辅助，需在 mb 就位后加载）----
+    // ---- mb.headers（纯 Lua 辅助，需在 mb 初始化后加载）----
     lua.load(HEADERS_LUA).set_name("mb_headers").exec()?;
 
     Ok(())

@@ -2,7 +2,7 @@
 //!
 //! 覆盖 M6 全矩阵链路：起本地 mock 上游（Anthropic / OpenAI Chat / Gemini），经真实
 //! `dispatch::handle_request` 走完整生命周期（路由解析 → Core IR 转换 → 上游调用
-//! → 回程转换 → usage 落库），断言客户端最终收到的报文。入口协议覆盖
+//! → 回程转换 → usage 写入数据库），断言客户端最终收到的报文。入口协议覆盖
 //! Responses / Anthropic / Chat，上游覆盖 Anthropic / Chat / Gemini。
 
 use std::sync::Arc;
@@ -19,7 +19,6 @@ use moonbridge_store::{
 use serde_json::{json, Value};
 
 /// 起一个 mock Anthropic 上游（`POST /v1/messages`），按请求 `stream` 返回 JSON 或 SSE。
-/// 返回其 base_url。
 async fn spawn_mock_anthropic() -> String {
     async fn messages(Json(body): Json<Value>) -> Response {
         if body
@@ -101,7 +100,7 @@ async fn setup_state() -> (Arc<AppState>, Arc<Database>) {
         extra: Value::Null,
     })
     .unwrap();
-    // 计价数据流：offer 定价存在时 usage 记录的 cost 应按价目现算。
+    // 计价数据流：offer 定价存在时 usage 记录的 cost 应按价目实时计算。
     db.upsert_offer(&Offer {
         provider_key: "mock".into(),
         model_slug: "claude-x".into(),
@@ -144,13 +143,13 @@ async fn e2e_non_stream_responses_to_anthropic() {
     );
     assert_eq!(out["usage"]["input_tokens"], 10);
 
-    // usage 已落库
+    // usage 已写入数据库
     let sum = db.usage_summary().unwrap();
     assert_eq!(sum.requests, 1);
     assert_eq!(sum.input_tokens, 10);
     assert_eq!(sum.output_tokens, 5);
 
-    // 成本按命中 offer 的价目现算：(10 in × $3 + 5 out × $15) / 1M
+    // 成本按命中 offer 的价目实时计算：(10 in × $3 + 5 out × $15) / 1M
     let rows = db
         .query_usage(&UsageQuery {
             limit: 1,
@@ -190,7 +189,7 @@ async fn e2e_stream_responses_to_anthropic() {
     assert!(text.contains("Hello"), "SSE 应含首段增量: {text}");
     assert!(text.contains("world"), "SSE 应含次段增量: {text}");
 
-    // 流式请求同样落库一条 usage
+    // 流式请求同样写入数据库一条 usage
     let sum = db.usage_summary().unwrap();
     assert_eq!(sum.requests, 1);
 
@@ -835,7 +834,7 @@ async fn spawn_mock_anthropic_capture() -> (String, Arc<std::sync::Mutex<Vec<Val
 }
 
 /// 回归：客户端未设输出上限时，Anthropic 上游的必填 `max_tokens` 按模型元数据
-/// （`models.max_output_tokens`）兜底——不得凭空注入小值截断输出
+/// （`models.max_output_tokens`）回退——不得凭空注入小值截断输出
 /// （线上实证 OpenCode Zen 端被静默注入 4096、输出恰好截在 4096）。
 #[tokio::test]
 async fn e2e_anthropic_max_tokens_uses_model_output_limit() {
@@ -866,12 +865,12 @@ async fn e2e_anthropic_max_tokens_uses_model_output_limit() {
         assert_eq!(reqs.len(), 1);
         assert_eq!(
             reqs[0]["max_tokens"], 131_072,
-            "客户端未设上限时应按模型输出上限兜底: {}",
+            "客户端未设上限时应按模型输出上限回退: {}",
             reqs[0]
         );
     }
 
-    // 无模型元数据时退回常量兜底（必填字段仍须发送）
+    // 无模型元数据时回退到常量（必填字段仍须发送）
     db.delete_model("claude-x").unwrap();
     let body = json!({
         "model": "test-model",
@@ -885,7 +884,7 @@ async fn e2e_anthropic_max_tokens_uses_model_output_limit() {
     assert_eq!(reqs.len(), 2);
     assert_eq!(
         reqs[1]["max_tokens"], 4096,
-        "无元数据时落常量兜底: {}",
+        "无元数据时回退到常量: {}",
         reqs[1]
     );
 }
@@ -993,7 +992,7 @@ async fn setup_state_lua_sse(
     seed_lua_state(tag, plugin_script, capabilities, base_url).await
 }
 
-/// 递归收集目录下的 `*.json`（trace 落盘位置为 `<dir>/<session>/<model>/<ts>-<id>.json`）。
+/// 递归收集目录下的 `*.json`（trace 文件路径为 `<dir>/<session>/<model>/<ts>-<id>.json`）。
 fn trace_json_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -1080,9 +1079,9 @@ async fn e2e_filter_content_drops_blocks() {
     let _ = std::fs::remove_dir_all(&trace_dir);
 }
 
-/// 对照组（给上一条测试「牙」）：同样的上游报文，插件声明 `core` 但不实现
+/// 对照组（为上一条测试提供有效性校验）：同样的上游报文，插件声明 `core` 但不实现
 /// `filter_content` ⇒ `tool_use` 块必须照常出现。若这条也丢了块，说明丢块与钩子
-/// 无关、`e2e_filter_content_drops_blocks` 就是假绿。
+/// 无关、`e2e_filter_content_drops_blocks` 就形同虚设。
 #[tokio::test]
 async fn e2e_blocks_survive_without_filter_content() {
     let (state, _db, trace_dir) = setup_state_lua(
@@ -1274,7 +1273,7 @@ async fn e2e_serve_pairs_plugin_init_and_shutdown() {
         reqwest::Client::new(),
     );
 
-    // 200ms 后给出优雅关闭信号
+    // 200ms 后给出平滑关闭信号
     server::serve_with_shutdown(state, async {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     })
@@ -1369,7 +1368,7 @@ async fn e2e_health_and_models_are_public_with_auth_configured() {
     assert_ne!(r.status(), 401, "正确 token 应通过鉴权");
 }
 
-/// 回归：插件短路直答不得绕过审计——usage 落库 + trace 落盘都要有。
+/// 回归：插件短路直答不得绕过审计——usage 写入数据库 + trace 写入磁盘都要有。
 /// 历史缺陷是这些路径直接 return，插件代答的请求在用量与 Traces 页完全不可见。
 #[tokio::test]
 async fn e2e_short_circuit_still_records_usage_and_trace() {
@@ -1486,11 +1485,11 @@ async fn e2e_abort_still_records_usage_and_trace() {
 
 // ── 会话水印（session marker）──────────────────────────────────────────
 
-/// 水印测试装配：固定 JSON mock 上游 + trace 落盘 + 可翻 `session_marker`/表深。
+/// 水印测试装配：固定 JSON mock 上游 + trace 写入磁盘 + 可切换 `session_marker`/表深。
 ///
 /// 不复用 `setup_with`：它固定 `GatewayConfig::default()`。这里需要 trace——它是唯一
 /// 能同时看到「客户端送来的报文」(`clientRequest`) 与「转发上游的报文」
-/// (`upstreamRequest.body`) 的观察点，而「剥净后才转发」正是本特性的核心不变量。
+/// (`upstreamRequest.body`) 的观察点，而「剥除干净后才转发」正是本特性的核心不变量。
 async fn setup_state_marker(
     tag: &str,
     session_marker: bool,
@@ -1538,7 +1537,7 @@ async fn setup_state_marker(
     (state, db, trace_dir)
 }
 
-/// 带 thinking 块的 Anthropic 非流式响应——CoT 水印的载体（无推理块则不打标）。
+/// 带 thinking 块的 Anthropic 非流式响应——CoT 水印的载体（无推理块则不打标记）。
 fn thinking_mock_body() -> Value {
     json!({
         "id": "msg_1", "model": "claude-x", "role": "assistant",
@@ -1728,7 +1727,7 @@ async fn e2e_session_marker_round_trips_and_never_reaches_upstream() {
 
     let tr = traces(&trace_dir);
     assert_eq!(tr.len(), 3, "三问各留一份 trace");
-    // 按各自的水印定位 trace，不依赖落盘顺序
+    // 按各自的水印定位 trace，不依赖写入顺序
     let sid_of = |pat: &str| {
         tr.iter()
             .find(|t| t["clientRequest"].to_string().contains(pat))
@@ -1766,7 +1765,7 @@ async fn e2e_session_marker_round_trips_and_never_reaches_upstream() {
         "第 2、3 问的入站报文应照实含 marker（trace 记的是客户端原样）"
     );
 
-    // 逐问确认「推理原文还原、水印剥净」
+    // 逐问确认「推理原文还原、水印剥除干净」
     let t2 = tr
         .iter()
         .find(|t| {
@@ -1798,7 +1797,7 @@ async fn e2e_session_marker_round_trips_and_never_reaches_upstream() {
 
 /// 插件会话覆写：`on_client_request_raw` 写 `msg.session_id` 是最高优先级
 /// 身份源——客户端自带会话头（`x-opencode-session`）经插件转为 session，
-/// 水印 marker 降级为不带头时的兜底（生产问题：剥离 thinking 的客户端
+/// 水印 marker 降级为不带头时的回退方案（生产问题：剥离 thinking 的客户端
 /// 让 marker 断链、亲和头逐请求漂移）。
 #[tokio::test]
 async fn e2e_plugin_session_id_overrides_watermark() {
@@ -1810,7 +1809,7 @@ async fn e2e_plugin_session_id_overrides_watermark() {
     )
     .await;
 
-    // 带头请求：客户端身份胜出——不带 marker 也落成它的会话
+    // 带头请求：客户端身份胜出——不带 marker 也归入它的会话
     let body = json!({
         "model": "test-model", "max_tokens": 64,
         "messages": [{ "role": "user", "content": "Hi" }], "stream": false
@@ -1856,14 +1855,14 @@ async fn e2e_session_marker_identity_survives_table_eviction() {
             "messages": [{ "role": "user", "content": who }], "stream": false
         })
     };
-    // 第 1 轮：新会话 u1；第 2 轮：另一新会话 u2 —— 表深 1 把 u1 挤出
+    // 第 1 轮：新会话 u1；第 2 轮：另一新会话 u2 —— 表深 1 把 u1 淘汰
     let out1 = post_anthropic(state.clone(), mk("a"), None).await;
-    let u1 = tag_of(out1["content"][0]["thinking"].as_str().unwrap()).expect("首轮应打标");
+    let u1 = tag_of(out1["content"][0]["thinking"].as_str().unwrap()).expect("首轮应打标记");
     let out2 = post_anthropic(state.clone(), mk("b"), None).await;
-    let u2 = tag_of(out2["content"][0]["thinking"].as_str().unwrap()).expect("第二轮应打标");
+    let u2 = tag_of(out2["content"][0]["thinking"].as_str().unwrap()).expect("第二轮应打标记");
     assert_ne!(u1, u2, "两次新分配应是不同会话");
 
-    // 第 3 轮：带回 u1 的 marker（u1 已被挤出表）⇒ 仍落 u1，而非另派新会话
+    // 第 3 轮：带回 u1 的 marker（u1 已被淘汰出表）⇒ 仍落 u1，而非另派新会话
     let third = json!({
         "model": "test-model", "max_tokens": 64,
         "messages": [
@@ -1897,7 +1896,7 @@ async fn e2e_session_marker_identity_survives_table_eviction() {
     let _ = std::fs::remove_dir_all(&trace_dir);
 }
 
-/// 新方案核心：tool_use 轮也能打标——marker 嵌推理块首部，与工具调用共存。
+/// 新方案核心：tool_use 轮也能打标记——marker 嵌推理块首部，与工具调用共存。
 #[tokio::test]
 async fn e2e_session_marker_tags_tool_call_round_via_reasoning() {
     let (state, _db, trace_dir) = setup_state_marker(
@@ -1923,7 +1922,7 @@ async fn e2e_session_marker_tags_tool_call_round_via_reasoning() {
     });
     let out = post_anthropic(state, body, None).await;
     let tag = tag_of(out["content"][0]["thinking"].as_str().unwrap())
-        .expect("tool_use 轮的 thinking 也应打标");
+        .expect("tool_use 轮的 thinking 也应打标记");
     assert_eq!(tag.len(), 36);
     assert_eq!(out["content"][1]["text"], "sure", "正文块完好");
     assert_eq!(out["content"][2]["type"], "tool_use", "工具块完好");
@@ -1942,7 +1941,7 @@ async fn e2e_session_marker_tags_tool_call_round_via_reasoning() {
     let _ = std::fs::remove_dir_all(&trace_dir);
 }
 
-/// 纯 CoT 方案对照：无推理块的轮次不打标——不向正文注水、不凭空造块；
+/// 纯 CoT 方案对照：无推理块的轮次不打标记——不向正文插入无关文本、不凭空造块；
 /// 但会话照常解析（session id 仍在），身份顺延到下一个含推理块的响应。
 #[tokio::test]
 async fn e2e_session_marker_absent_without_reasoning() {
@@ -1968,7 +1967,7 @@ async fn e2e_session_marker_absent_without_reasoning() {
     });
     let out = post_anthropic(state, body, None).await;
     let raw = out.to_string();
-    assert!(!raw.contains("mb:"), "无推理块的响应不得打标: {raw}");
+    assert!(!raw.contains("mb:"), "无推理块的响应不得打标记: {raw}");
     assert_eq!(out["content"][0]["text"], "sure", "正文块应完好");
     assert_eq!(out["content"][1]["type"], "tool_use", "工具块应完好");
     let tr = traces(&trace_dir);
@@ -2020,7 +2019,7 @@ async fn e2e_session_marker_off_still_strips_inbound() {
     let up = tr[0]["upstreamRequest"]["body"].to_string();
     assert!(
         !up.contains("mb:"),
-        "即使关闭水印，入站 marker 仍须剥净: {up}"
+        "即使关闭水印，入站 marker 仍须剥除干净: {up}"
     );
     assert!(up.contains("Hello from mock"), "剥水印不得剥掉历史正文");
     assert!(up.contains("old think"), "剥水印不得剥掉推理原文");
@@ -2130,7 +2129,7 @@ async fn e2e_session_marker_stream_embeds_in_thinking_head() {
 
 /// 流式跨协议回归：Chat 上游（reasoning_content 裸增量，无独立 BlockStart
 /// 源自上游协议）× Anthropic 入口——且本轮含 tool_calls。marker 仍落在
-/// thinking 首部：CoT 载体下工具轮照常打标。
+/// thinking 首部：CoT 载体下工具轮照常打标记。
 #[tokio::test]
 async fn e2e_session_marker_stream_chat_upstream_reasoning_head() {
     let (base_url, _captured) = spawn_mock_chat_thinking_capture().await;
@@ -2220,7 +2219,7 @@ async fn e2e_session_marker_stream_responses_client() {
     );
 }
 
-/// 流式对照组：整流无推理块（正文 + tool_use）⇒ 不打标，正文与工具块照常。
+/// 流式对照组：整流无推理块（正文 + tool_use）⇒ 不打标记，正文与工具块照常。
 #[tokio::test]
 async fn e2e_session_marker_absent_in_stream_without_reasoning() {
     let base_url = spawn_mock_sse(sse_text_then_tool_use()).await;
@@ -2237,12 +2236,12 @@ async fn e2e_session_marker_absent_in_stream_without_reasoning() {
         .await
         .unwrap();
     let sse = String::from_utf8_lossy(&bytes).to_string();
-    assert!(!sse.contains("mb:"), "无推理块的流不得打标: {sse}");
+    assert!(!sse.contains("mb:"), "无推理块的流不得打标记: {sse}");
     assert!(sse.contains("Visible"), "正文仍要送达");
     assert!(sse.contains("dropme"), "工具块仍要完整转发");
 }
 
-/// 流式对照组（anthropic 上游）：thinking + tool_use 轮照样打标。
+/// 流式对照组（anthropic 上游）：thinking + tool_use 轮照样打标记。
 #[tokio::test]
 async fn e2e_session_marker_present_in_stream_tool_use_round() {
     let base_url = spawn_mock_sse(sse_thinking_then_tool_use()).await;

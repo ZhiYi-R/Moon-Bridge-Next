@@ -60,7 +60,7 @@ fn thinking_budget(effort: &str) -> u32 {
         .unwrap_or(8192)
 }
 
-/// 换算并夹紧到严格小于 `max_tokens` 的思考预算；夹不到合法值时返回 `None`
+/// 换算并收紧到严格小于 `max_tokens` 的思考预算；收不出合法值时返回 `None`
 /// （宁可不发，也不构造出必被上游拒绝的请求）。
 pub(crate) fn clamped_thinking_budget(effort: &str, max_tokens: u32) -> Option<u32> {
     let budget = thinking_budget(effort).min(max_tokens.saturating_sub(1));
@@ -79,21 +79,20 @@ pub(crate) fn clamped_thinking_budget(effort: &str, max_tokens: u32) -> Option<u
 //
 // 无前缀的凭据（插件注入、旧会话遗留）视为未知来源，保持透传——历史行为。
 
-/// 凭据来源前缀（入站 adapter 打标）。
 pub(crate) const SIG_ANTHROPIC: &str = "ant:";
 pub(crate) const SIG_OPENAI: &str = "oai:";
 pub(crate) const SIG_GEMINI: &str = "gem:";
 /// Chat 协议（OpenAI Chat Completions）上游没有独立推理凭据字段——
 /// thinking 模式上游（DeepSeek/Kimi 系）要求把 `reasoning_content` 原文
-/// 随历史回传，**推理明文本体即凭据**。decode 侧给无凭据推理打上此前缀
+/// 随历史回传，**推理明文本身即凭据**。decode 侧给无凭据推理打上此前缀
 /// （payload 为推理原文），使 Responses 等客户端方向有可回传的不透明
 /// 凭据（`encrypted_content`）；同时前缀机制让该自凭据在 OpenAI/Anthropic/
 /// Gemini 上游方向按异源凭据降级，不会以假凭据污染真上游。
 pub(crate) const SIG_CHAT: &str = "chat:";
 
 /// 入站：给凭据打上来源标记（空凭据原样返回 `None`）。已带已知前缀的
-/// 凭据视为先前打标的回传，原样保留（幂等）——凭据经客户端转一圈后
-/// 还会回到本 adapter，二次打标会让 `untag_signature` 错位。
+/// 凭据视为先前打标记的回传，原样保留（幂等）——凭据经客户端转一圈后
+/// 还会回到本 adapter，二次打标记会让 `untag_signature` 错位。
 pub(crate) fn tag_signature(prefix: &str, sig: Option<String>) -> Option<String> {
     sig.filter(|s| !s.is_empty()).map(|s| {
         if [SIG_ANTHROPIC, SIG_OPENAI, SIG_GEMINI, SIG_CHAT]
@@ -123,8 +122,8 @@ pub(crate) fn untag_signature<'a>(prefix: &str, sig: Option<&'a str>) -> Option<
 }
 
 /// 客户端方向凭据透传：本家凭据（`prefix`）还原原文；异源凭据**带标记**
-/// 原样下发——客户端把它当不透明串存入历史，回传入站时幂等打标，
-/// 最终回到归属协议上游才由 `untag_signature` 解标。丢弃异源凭据会让
+/// 原样下发——客户端把它当不透明串存入历史，回传入站时幂等打标记，
+/// 最终回到归属协议上游才由 `untag_signature` 解除标记。丢弃异源凭据会让
 /// 「Gemini 上游 → 非 Gemini 客户端 → 历史回传 → Gemini 上游」断链。
 pub(crate) fn emit_signature<'a>(prefix: &str, sig: &'a str) -> &'a str {
     untag_signature(prefix, Some(sig)).unwrap_or(sig)
@@ -159,9 +158,9 @@ mod tests {
         assert_eq!(thinking_budget("bogus"), 8192, "未知档回落 medium");
         // 正常：预算小于 max_tokens
         assert_eq!(clamped_thinking_budget("low", 4096), Some(2048));
-        // 夹紧到 max_tokens - 1
+        // 收紧到 max_tokens - 1
         assert_eq!(clamped_thinking_budget("max", 4000), Some(3999));
-        // 夹不到合法值则不发思考配置
+        // 收不出合法值则不发思考配置
         assert_eq!(clamped_thinking_budget("high", 1024), None);
         assert_eq!(clamped_thinking_budget("high", 0), None);
     }

@@ -47,7 +47,6 @@ impl ClientAdapter for GoogleGenAiAdapter {
             req.messages = dto::contents_to_core(contents);
         }
 
-        // tools
         if let Some(tools) = raw.get("tools").and_then(|v| v.as_array()) {
             req.tools = dto::tools_to_core(tools);
         }
@@ -55,7 +54,6 @@ impl ClientAdapter for GoogleGenAiAdapter {
         req.tool_choice =
             dto::tool_config_to_core(raw.get("toolConfig").or_else(|| raw.get("tool_config")));
 
-        // generationConfig
         if let Some(gc) = raw
             .get("generationConfig")
             .or_else(|| raw.get("generation_config"))

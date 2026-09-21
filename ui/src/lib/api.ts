@@ -49,7 +49,7 @@ export interface Provider {
   quotaIntervalSecs: number;
   /** 配额查询开关（独立于 quotaPluginRef，便于临时停用）。 */
   quotaEnabled: boolean;
-  /** 配额插件实例配置（按插件 configSchema 的字段值；密钥类字段也在其中，整体加密落库）。 */
+  /** 配额插件实例配置（按插件 configSchema 的字段值；密钥类字段也在其中，整体加密写入数据库）。 */
   quotaConfig: Json;
   createdAt: number;
   updatedAt: number;
@@ -60,7 +60,7 @@ export interface ModelDef {
   slug: string;
   displayName?: string | null;
   contextWindow?: number | null;
-  /** 输出 token 上限（models.dev limit.output）；Anthropic 类上游在客户端未设上限时以此兜底。 */
+  /** 输出 token 上限（models.dev limit.output）；Anthropic 类上游在客户端未设上限时以此回退。 */
   maxOutputTokens?: number | null;
   modalities?: Json;
   reasoningLevels?: Json;
@@ -418,7 +418,7 @@ export const quotaApi = {
   refresh: (providerKey: string) =>
     call<ProviderQuotaView>("quota_refresh", { providerKey }),
   refreshAll: () => call<ProviderQuotaView[]>("quota_refresh_all"),
-  /** dry-run：用表单里的 Provider 配置试跑一次配额脚本（逐端点返回），不写库。 */
+  /** dry-run：用表单里的 Provider 配置试跑一次配额脚本（逐端点返回），不写入数据库。 */
   test: (provider: Provider) => call<QuotaKeyResult[]>("quota_test", { provider }),
 };
 

@@ -40,7 +40,6 @@ fn row_to_model(r: &rusqlite::Row) -> rusqlite::Result<ModelDef> {
 }
 
 impl Database {
-    /// 列出全部模型定义。
     pub fn list_models(&self) -> Result<Vec<ModelDef>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
@@ -54,7 +53,6 @@ impl Database {
         Ok(out)
     }
 
-    /// 按 slug 获取模型。
     pub fn get_model(&self, slug: &str) -> Result<Option<ModelDef>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
@@ -68,7 +66,6 @@ impl Database {
         }
     }
 
-    /// 插入或更新模型定义。
     pub fn upsert_model(&self, m: &ModelDef) -> Result<()> {
         let conn = self.conn.lock();
         let j = |v: &Option<Value>| v.as_ref().map(|x| x.to_string());
@@ -127,7 +124,6 @@ impl Database {
         .map_err(Into::into)
     }
 
-    /// 列出某 provider 的模型报价。
     pub fn list_offers(&self, provider_key: &str) -> Result<Vec<Offer>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
@@ -148,8 +144,6 @@ impl Database {
         Ok(out)
     }
 
-    /// 插入或更新报价。
-    ///
     /// 新建行未带定价时，继承同 slug 任一既有报价的定价——典型场景：目录导入
     /// （定价落在 models.dev 的 provider key 下）先于 Provider 页绑定，绑定建的
     /// `pricing: null` 新行不继承就永久没定价（backfill 只在导入时跑）。仅在
@@ -207,7 +201,6 @@ params![o.provider_key, o.model_slug, o.pricing.as_ref().map(|v| v.to_string()),
         Ok(n)
     }
 
-    /// 删除报价。
     pub fn delete_offer(&self, provider_key: &str, model_slug: &str) -> Result<()> {
         let conn = self.conn.lock();
         conn.execute(

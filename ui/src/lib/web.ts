@@ -56,7 +56,7 @@ async function readMessage(res: Response): Promise<string> {
       return raw;
     }
   } catch {
-    // 非 JSON 错误体：回落状态码文本
+    // 非 JSON 错误体：回退为状态码文本
   }
   return `HTTP ${res.status} ${res.statusText}`;
 }

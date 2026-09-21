@@ -24,7 +24,7 @@ pub async fn responses(
     handle(state, Protocol::OpenAiResponse, headers, body).await
 }
 
-/// POST /v1/messages —— Anthropic Messages 入口（M6 完整支持，此处先接入）。
+/// POST /v1/messages —— Anthropic Messages 入口。
 pub async fn messages(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -33,7 +33,7 @@ pub async fn messages(
     handle(state, Protocol::Anthropic, headers, body).await
 }
 
-/// POST /v1/chat/completions —— OpenAI Chat 入口（M6 完整支持）。
+/// POST /v1/chat/completions —— OpenAI Chat 入口。
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -49,7 +49,7 @@ pub async fn health() -> &'static str {
 
 /// GET /v1/models —— 列出可用模型（**公开接口**，配置 auth_token 也不要求 Bearer）。
 ///
-/// 允许裸奔是既定取舍：模型目录不视为敏感信息（与多数 OpenAI 兼容服务一致），
+/// 允许不鉴权是既定取舍：模型目录不视为敏感信息（与多数 OpenAI 兼容服务一致），
 /// 监控/探活类调用方可以无凭据拉取；真正消耗上游额度的 POST 入口仍由 `check_auth`
 /// 把守。`/health` 同为公开。
 ///
@@ -96,7 +96,6 @@ fn models_payload(db: &Database) -> Result<Value> {
     Ok(json!({ "object": "list", "data": data }))
 }
 
-/// 入口公共处理：认证 → 提取头/会话 → dispatch。
 async fn handle(
     state: Arc<AppState>,
     protocol: Protocol,

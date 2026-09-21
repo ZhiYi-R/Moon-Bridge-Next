@@ -21,7 +21,7 @@ use crate::state::ManagedState;
 /// 相对路径归一到 `plugins_dir`、绝对路径必须落在 `plugins_dir` 之内。
 ///
 /// 历史缺陷：旧实现把绝对 `script_ref` 原样放行，`plugin_read_script` 还有一条
-/// 「只要 `Path::exists()` 就读」的兜底——等于任意文件读取原语；配合
+/// 「只要 `Path::exists()` 就读」的回退——等于任意文件读取原语；配合
 /// `plugin_write_script` 即任意文件写入。同目录 `trace.rs` 早有 `resolve_within`
 /// 做包含性校验，此处缺失属遗漏。
 fn script_file(state: &ManagedState, script_ref: &str) -> CmdResult<Option<PathBuf>> {
@@ -32,13 +32,11 @@ fn script_file(state: &ManagedState, script_ref: &str) -> CmdResult<Option<PathB
     }
 }
 
-/// 列出全部插件。
 #[tauri::command]
 pub fn plugin_list(state: State<'_, Arc<ManagedState>>) -> CmdResult<Vec<PluginRecord>> {
     Ok(state.db.list_plugins()?)
 }
 
-/// 按名获取插件。
 #[tauri::command]
 pub fn plugin_get(
     state: State<'_, Arc<ManagedState>>,
@@ -47,18 +45,16 @@ pub fn plugin_get(
     Ok(state.db.get_plugin(&name)?)
 }
 
-/// 新增或更新插件记录。
-///
 /// 启用动作（新建即启用 / 停用 → 启用）会校验插件 `MB.requires` 声明的网关设置，
 /// 不满足时拒绝并返回 [`REQUIREMENTS_ERROR_PREFIX`] 开头的结构化错误——前端弹提示框，
 /// 不自动修改设置。
 #[tauri::command]
 pub fn plugin_save(state: State<'_, Arc<ManagedState>>, plugin: PluginRecord) -> CmdResult<()> {
     // 脚本可读取时，以脚本 `MB` 清单为准提取 category/config_schema（清单是权威
-    // 元数据，表单值只是兜底）；沙箱求值失败（如脚本语法错误）则保留表单值。
+    // 元数据，表单值只是回退）；沙箱求值失败（如脚本语法错误）则保留表单值。
     let script = match script_file(&state, &plugin.script_ref)? {
         Some(f) if f.is_file() => std::fs::read_to_string(&f).map_err(|e| e.to_string())?,
-        Some(_) => String::new(),          // 文件脚本尚未落盘
+        Some(_) => String::new(),          // 文件脚本尚未写入磁盘
         None => plugin.script_ref.clone(), // 内联脚本即内容
     };
     let mut plugin = plugin;
@@ -83,7 +79,6 @@ pub fn plugin_save(state: State<'_, Arc<ManagedState>>, plugin: PluginRecord) ->
     Ok(state.db.upsert_plugin(&plugin)?)
 }
 
-/// 删除插件。
 #[tauri::command]
 pub fn plugin_delete(state: State<'_, Arc<ManagedState>>, name: String) -> CmdResult<()> {
     Ok(state.db.delete_plugin(&name)?)
@@ -102,7 +97,7 @@ pub fn plugin_read_script(state: State<'_, Arc<ManagedState>>, name: String) -> 
             if file.is_file() {
                 Ok(std::fs::read_to_string(&file).map_err(|e| e.to_string())?)
             } else {
-                Ok(String::new()) // 文件脚本但尚未落盘
+                Ok(String::new()) // 文件脚本但尚未写入磁盘
             }
         }
         None => Ok(rec.script_ref), // 内联脚本
@@ -181,7 +176,6 @@ fn extract_lua_string(script: &str, key: &str) -> Option<String> {
     Some(rest[eq + open + 1..eq + open + 1 + close].to_string())
 }
 
-/// 单个文件的导入结果。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginImportOutcome {
@@ -192,7 +186,7 @@ pub struct PluginImportOutcome {
     pub message: Option<String>,
 }
 
-/// 启用门控：从 Lua 脚本尽力提取 `MB.requires = { key = value, ... }` 声明。
+/// 启用条件：从 Lua 脚本尽力提取 `MB.requires = { key = value, ... }` 声明。
 ///
 /// 键为网关配置（GatewayConfig）的 camelCase 字段名，值支持 true/false/整数/浮点数/
 /// 带引号字符串。行级剥离 `--` 注释后匹配，与 [`extract_lua_string_list`] 同一取舍。
@@ -284,11 +278,11 @@ fn unmet_requirements(cfg: &Value, requires: &[(String, Value)]) -> Vec<String> 
         .collect()
 }
 
-/// 启用门控错误前缀：前端据此弹出「设置不满足」提示框而非普通错误横幅。
+/// 启用条件错误前缀：前端据此弹出「设置不满足」提示框而非普通错误横幅。
 pub const REQUIREMENTS_ERROR_PREFIX: &str = "REQUIREMENTS";
 
 /// 从磁盘导入 `.lua` 插件文件：以文件名（去扩展名）为插件名，脚本拷贝进
-/// `plugins_dir` 并落库；同名插件已存在时跳过（不覆盖）。scopes/capabilities
+/// `plugins_dir` 并写入数据库；同名插件已存在时跳过（不覆盖）。scopes/capabilities
 /// 尽力从脚本 `MB = { scopes = {...}, capabilities = {...} }` 声明提取，缺省
 /// global/core。逐文件返回结果，单个失败不影响其余。
 #[tauri::command]
@@ -379,7 +373,7 @@ fn import_one(state: &ManagedState, path: &Path) -> PluginImportOutcome {
         config_schema,
     };
     if let Err(e) = state.db.upsert_plugin(&rec) {
-        return import_fail(&path_string, &name, "error", format!("落库失败: {e}"));
+        return import_fail(&path_string, &name, "error", format!("写入数据库失败: {e}"));
     }
     if let Err(e) = write_script_inner(state, &name, &content) {
         // 脚本写入失败时回滚记录，避免留下空脚本插件
@@ -401,7 +395,6 @@ fn import_one(state: &ManagedState, path: &Path) -> PluginImportOutcome {
     }
 }
 
-/// 列出某插件的全部作用域绑定。
 #[tauri::command]
 pub fn binding_list(
     state: State<'_, Arc<ManagedState>>,

@@ -46,7 +46,7 @@ async function onAuthenticated() {
   gateway.startPolling();
 }
 
-// 应用挂载后开始轮询网关状态（自启动可能仍在进行，外部变更也要能感知）
+// 应用挂载后开始轮询网关状态（自启动可能仍在进行，外部变更也要能捕获）
 onMounted(() => {
   window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
   if (needsLogin.value) return;

@@ -5,7 +5,7 @@
 //! reasoning_options / cost` 等。本模块在**后端**拉取并解析，只把精简后的扁平候选列表
 //! 交给前端（避免大 JSON 过网络，也把字段映射收在一处）。
 //!
-//! 导入内容分两处落库：模型**元数据**（slug/名称/上下文/输出上限/模态/推理档）→ `models` 表；
+//! 导入内容分两处写入数据库：模型**元数据**（slug/名称/上下文/输出上限/模态/推理档）→ `models` 表；
 //! **定价**（`cost` → `pricing`）→ 对应 provider 的 **offer**（`insert_offer_if_absent`，
 //! 并对同 slug 已有空定价的行 `backfill_offer_pricing`）。刻意**不触碰** provider 端点配置。
 
@@ -29,7 +29,6 @@ pub struct CatalogModel {
     pub provider_name: String,
     /// 模型 id（= 导入后的 `slug`）。
     pub id: String,
-    /// 模型展示名。
     pub name: Option<String>,
     /// 上下文窗口（token）。
     pub context_window: Option<i64>,
@@ -44,7 +43,7 @@ pub struct CatalogModel {
 }
 
 impl CatalogModel {
-    /// 转为可落库的模型定义（仅元数据；定价由导入流程写到对应 provider 的 offer）。
+    /// 转为可写入数据库的模型定义（仅元数据；定价由导入流程写到对应 provider 的 offer）。
     fn to_model_def(&self) -> ModelDef {
         let modalities = if self.modalities.is_empty() {
             None
@@ -75,7 +74,7 @@ impl CatalogModel {
         }
     }
 
-    /// 转为可落库的报价（承载 models.dev 定价；绑定全部端点）。
+    /// 转为可写入数据库的报价（承载 models.dev 定价；绑定全部端点）。
     fn to_offer(&self) -> Offer {
         Offer {
             provider_key: self.provider_key.clone(),
@@ -152,7 +151,7 @@ fn parse_model(provider_key: &str, provider_name: &str, id: &str, raw: &Value) -
                 pricing.insert(key.to_string(), v.clone());
             }
         }
-        // 过滤掉解析失败落进来的 Null
+        // 解析失败的条目以 Null 落进 map
         pricing.retain(|_, v| !v.is_null());
     }
 
@@ -223,7 +222,6 @@ pub async fn catalog_fetch(State(state): State<AdminState>) -> ApiResult<Json<Ve
     Ok(Json(parse_catalog(&root)))
 }
 
-/// 导入结果。
 #[derive(Debug, Serialize)]
 pub struct CatalogImportResult {
     pub imported: usize,
@@ -234,7 +232,7 @@ pub struct CatalogImportResult {
 /// slug 给本地已有同模型报价回填定价（仅填 `pricing` 为空的行——目录 key 与本地
 /// provider key 命名空间不同，Provider 页绑定又会先建空定价行，不回填就永久没定价）。
 ///
-/// 返回成功导入的数量。任一条写库失败即中断并返回错误（前端可整体重试）。
+/// 返回成功导入的数量。任一条写数据库失败即中断并返回错误（前端可整体重试）。
 pub async fn catalog_import(
     State(state): State<AdminState>,
     Json(models): Json<Vec<CatalogModel>>,

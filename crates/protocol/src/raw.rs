@@ -11,40 +11,32 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RawBody {
-    /// JSON 体（绝大多数 LLM API）。
     Json { value: Value },
-    /// 文本体。
     Text { text: String },
     /// 二进制体（base64 传输，Lua 侧以字符串呈现）。
     Binary { data: Vec<u8> },
-    /// 空体。
     Empty,
 }
 
 impl RawBody {
-    /// 从 JSON 值构造。
     pub fn json(value: Value) -> Self {
         RawBody::Json { value }
     }
-    /// 从文本构造。
     pub fn text(text: impl Into<String>) -> Self {
         RawBody::Text { text: text.into() }
     }
-    /// 引用内部 JSON 值。
     pub fn as_json(&self) -> Option<&Value> {
         match self {
             RawBody::Json { value } => Some(value),
             _ => None,
         }
     }
-    /// 可变引用内部 JSON 值。
     pub fn as_json_mut(&mut self) -> Option<&mut Value> {
         match self {
             RawBody::Json { value } => Some(value),
             _ => None,
         }
     }
-    /// 引用内部文本。
     pub fn as_text(&self) -> Option<&str> {
         match self {
             RawBody::Text { text } => Some(text),
@@ -62,27 +54,19 @@ impl RawBody {
     }
 }
 
-/// 非流式报文所处阶段。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RawStage {
-    /// 入站请求：客户端 → 网关。
     ClientRequest,
-    /// 出站请求：网关 → 上游。
     UpstreamRequest,
-    /// 入站响应：上游 → 网关。
     UpstreamResponse,
-    /// 出站响应：网关 → 客户端。
     ClientResponse,
 }
 
-/// 流式 chunk 所处阶段。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChunkStage {
-    /// 上游 SSE chunk。
     UpstreamChunk,
-    /// 回写客户端的 SSE chunk。
     ClientChunk,
 }
 
@@ -124,7 +108,7 @@ impl RawMessage {
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.as_str())
     }
-    /// 设置 header（存在则覆盖首个匹配，否则追加）。
+    /// 同名 header 存在时覆盖首个匹配，否则追加。
     pub fn set_header(&mut self, name: &str, value: impl Into<String>) {
         let value = value.into();
         if let Some(slot) = self
@@ -143,7 +127,6 @@ impl RawMessage {
     }
 }
 
-/// 单个 SSE chunk（流式）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RawChunk {
     pub stage: ChunkStage,
@@ -162,7 +145,6 @@ pub struct RawChunk {
 }
 
 impl RawChunk {
-    /// 构造一个 JSON data 的 chunk。
     pub fn json(
         stage: ChunkStage,
         protocol: moonbridge_core::Protocol,
@@ -181,7 +163,6 @@ impl RawChunk {
     }
 }
 
-/// 报文层钩子对完整报文的处置判定。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RawVerdict {
@@ -199,12 +180,10 @@ pub enum RawVerdict {
     Abort { message: String },
 }
 
-/// 报文层钩子对流式 chunk 的处置判定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChunkVerdict {
     /// 转发（使用就地修改后的 chunk）。
     Forward,
-    /// 丢弃该 chunk。
     Drop,
 }

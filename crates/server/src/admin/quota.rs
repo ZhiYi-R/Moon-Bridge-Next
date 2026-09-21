@@ -54,7 +54,7 @@ pub async fn quota_refresh_all(
 }
 
 /// POST /api/quota/test：以请求体里的 Provider 配置 dry-run 一次配额脚本
-/// （**不写库、不要求已保存**），逐端点返回本次结果供编辑表单预览。
+/// （**不写入数据库、不要求已保存**），逐端点返回本次结果供编辑表单预览。
 pub async fn quota_test(
     State(state): State<AdminState>,
     Json(provider): Json<Provider>,

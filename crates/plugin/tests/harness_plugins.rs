@@ -299,7 +299,7 @@ async fn kimi_code_passes_through_without_fields() {
     assert!(msg.session_id.is_none());
 }
 
-/// dsh：会话头优先；缺失时 body 的 dsh_session_log.session.id 兜底。
+/// dsh：会话头优先；缺失时 body 的 dsh_session_log.session.id 回退。
 #[tokio::test]
 async fn dsh_bridges_header_and_body_fallback() {
     let rt = runtime("dsh", include_str!("../../../plugins/harness/dsh.lua"));

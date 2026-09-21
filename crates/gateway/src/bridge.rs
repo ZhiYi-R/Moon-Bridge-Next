@@ -16,7 +16,7 @@ use moonbridge_store::Database;
 use crate::router;
 use crate::upstream::send;
 
-/// 插件 http 子请求未显式指定超时时的兜底（防止 raw 钩子内因无超时而挂死）。
+/// 插件 http 子请求未显式指定超时时的默认值（防止 raw 钩子内因无超时而挂死）。
 const DEFAULT_PLUGIN_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 网关注入给插件运行时的宿主桥。
@@ -59,7 +59,7 @@ impl HostBridge for GatewayBridge {
         if let Some(body) = &req.body {
             builder = builder.json(body);
         }
-        // 总是施加超时：插件指定则用其值，否则用兜底默认，避免 raw 钩子挂死
+        // 总是施加超时：插件指定则用其值，否则用默认值，避免 raw 钩子挂死
         let timeout_ms = req
             .timeout_ms
             .unwrap_or(DEFAULT_PLUGIN_HTTP_TIMEOUT.as_millis() as u64);

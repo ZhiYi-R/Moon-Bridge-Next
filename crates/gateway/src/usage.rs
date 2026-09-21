@@ -1,4 +1,4 @@
-//! 用量统计与落库。
+//! 用量统计与写入数据库。
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -92,10 +92,10 @@ pub fn cost_of(pricing: Option<&Value>, u: &Usage) -> f64 {
         / 1_000_000.0
 }
 
-/// 记录一次请求的用量（同步落库；失败仅告警，不影响主链路）。
+/// 记录一次请求的用量（同步写入数据库；失败仅告警，不影响主链路）。
 ///
 /// `ttft_ms` 为首字延迟（流式请求才有值；非流式/错误传 None）。
-/// 成本按 `(provider_key, upstream_model)` 命中的 offer 定价现算——存当时价
+/// 成本按 `(provider_key, upstream_model)` 命中的 offer 定价实时计算——存当时价
 /// 而非事后重算，价目变动不会回改历史账单。
 #[allow(clippy::too_many_arguments)]
 pub fn record(
@@ -138,7 +138,7 @@ pub fn record(
         created_at: 0,
     };
     if let Err(e) = db.insert_usage(&rec) {
-        tracing::warn!(error = %e, "usage 落库失败");
+        tracing::warn!(error = %e, "usage 写入数据库失败");
     }
 }
 
@@ -302,7 +302,7 @@ mod tests {
         );
     }
 
-    /// 计价数据流：offer 定价 → record() 落库的 cost。
+    /// 计价数据流：offer 定价 → record() 写入数据库的 cost。
     #[test]
     fn record_persists_computed_cost_and_provider() {
         let db = Arc::new(Database::open_in_memory().unwrap());

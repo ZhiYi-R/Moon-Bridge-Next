@@ -140,7 +140,7 @@ fn assert_encrypted(path: &Path, provider: &Provider) {
         assert!(stored.starts_with("mbk:v1:"));
     }
     if !provider.quota_config.is_null() {
-        assert!(quota_encs[0].starts_with("mbk:v1:"), "配额配置应加密落库");
+        assert!(quota_encs[0].starts_with("mbk:v1:"), "配额配置应加密写入数据库");
     }
     let (scheme, verifier) = state(&conn);
     assert_eq!(scheme, "aes256-gcm-v1");
@@ -314,7 +314,7 @@ fn seed_v12_custom_key(dir: &TestDir, old: &dyn EncKey) -> Provider {
     // 配额配置在 plaintext scheme 下是明文 JSON（与旧版 api_key 口径一致）
     assert!(
         quota_encs[0].contains(QUOTA_SECRET),
-        "plaintext scheme 下配额配置明文落库"
+        "plaintext scheme 下配额配置明文写入数据库"
     );
     downgrade_to_v12(&conn);
     provider

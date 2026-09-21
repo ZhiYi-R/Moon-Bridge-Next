@@ -13,7 +13,7 @@ fn str_vec(s: Option<String>) -> Vec<String> {
 }
 
 /// 归一化插件类别：未识别的值一律回落 `core`（请求链路插件）——
-/// 白名单收紧在注册表侧（只收 core），这里只保证落库值非空。
+/// 白名单收紧在注册表侧（只收 core），这里只保证写入数据库值非空。
 pub fn normalize_plugin_category(category: &str) -> String {
     match category {
         "quota" => "quota".to_string(),
@@ -52,7 +52,6 @@ fn row_to_binding(r: &rusqlite::Row) -> rusqlite::Result<PluginBinding> {
 }
 
 impl Database {
-    /// 列出全部插件。
     pub fn list_plugins(&self) -> Result<Vec<PluginRecord>> {
         let conn = self.conn.lock();
         let mut stmt =
@@ -65,7 +64,6 @@ impl Database {
         Ok(out)
     }
 
-    /// 按名获取插件。
     pub fn get_plugin(&self, name: &str) -> Result<Option<PluginRecord>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(&format!(
@@ -79,7 +77,6 @@ impl Database {
         }
     }
 
-    /// 插入或更新插件。
     pub fn upsert_plugin(&self, p: &PluginRecord) -> Result<()> {
         let conn = self.conn.lock();
         let config = if p.config.is_null() {
@@ -130,7 +127,6 @@ impl Database {
         Ok(())
     }
 
-    /// 列出某插件的作用域绑定。
     pub fn list_bindings(&self, plugin_name: &str) -> Result<Vec<PluginBinding>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
@@ -144,7 +140,7 @@ impl Database {
         Ok(out)
     }
 
-    /// 列出全部作用域绑定（供网关装配插件门控表）。
+    /// 列出全部作用域绑定（供网关装配插件绑定表）。
     pub fn list_bindings_all(&self) -> Result<Vec<PluginBinding>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
@@ -182,7 +178,6 @@ impl Database {
         Ok(())
     }
 
-    /// 插入或更新绑定。
     pub fn upsert_binding(&self, b: &PluginBinding) -> Result<()> {
         let conn = self.conn.lock();
         let config = if b.config.is_null() {
@@ -220,7 +215,6 @@ impl Database {
             .get_plugin(plugin_name)?
             .map(|p| p.enabled)
             .unwrap_or(false);
-        // 就近作用域优先
         for (scope, key) in [
             ("route", route),
             ("model", model),

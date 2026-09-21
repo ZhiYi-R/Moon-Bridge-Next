@@ -8,7 +8,6 @@ use crate::models::Setting;
 use crate::Database;
 
 impl Database {
-    /// 读取单个设置项。
     pub fn get_setting(&self, key: &str) -> Result<Option<Value>> {
         let conn = self.conn.lock();
         let raw: Option<String> = conn
@@ -32,7 +31,6 @@ impl Database {
         Ok(())
     }
 
-    /// 列出全部设置项。
     pub fn list_settings(&self) -> Result<Vec<Setting>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare("SELECT key, value_json FROM settings ORDER BY key")?;
@@ -52,7 +50,6 @@ impl Database {
         Ok(out)
     }
 
-    /// 删除设置项。
     pub fn delete_setting(&self, key: &str) -> Result<()> {
         let conn = self.conn.lock();
         conn.execute("DELETE FROM settings WHERE key = ?1", params![key])?;

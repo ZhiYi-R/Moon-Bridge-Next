@@ -1,7 +1,7 @@
 //! Trace（请求报文快照）浏览 commands。
 //!
 //! trace 由网关在 `GatewayConfig.trace_dir`（= `app_data_dir/traces`）下按
-//! `<session>/<model>/<created_at>-<id>.json` 落盘。此处提供只读浏览：列举、读取
+//! `<session>/<model>/<created_at>-<id>.json` 写入磁盘。此处提供只读浏览：列举、读取
 //! 单条、删除单条。所有路径均在 `trace_dir` 内做规范化校验，防止路径穿越。
 
 use std::path::{Path, PathBuf};
@@ -140,7 +140,6 @@ pub fn trace_read(state: State<'_, Arc<ManagedState>>, rel_path: String) -> CmdR
     Ok(value)
 }
 
-/// 删除单条 trace 文件。
 #[tauri::command]
 pub fn trace_delete(state: State<'_, Arc<ManagedState>>, rel_path: String) -> CmdResult<()> {
     let root = state.paths.trace_dir.clone();

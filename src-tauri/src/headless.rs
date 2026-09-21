@@ -2,7 +2,7 @@
 //!
 //! 由 `--headless` 启动参数进入（见 `main.rs`），全程不初始化 Tauri/WebView，
 //! 只做：解析参数 → 打开数据库 → [`moonbridge_gateway::bootstrap`] → 阻塞服务，
-//! `Ctrl-C` 优雅退出。
+//! `Ctrl-C` 平滑退出。
 //!
 //! 鉴权强制开启：必须显式传入 admin token（`--admin-token` 或环境变量
 //! `MOONBRIDGE_ADMIN_TOKEN`），缺失时拒绝启动，绝不以无鉴权状态监听。
@@ -37,7 +37,7 @@ pub struct HeadlessOpts {
     pub data_dir: Option<PathBuf>,
 }
 
-/// 解析 headless 参数。`args` 为程序名之后的全量参数（含 `--headless` 本体，
+/// 解析 headless 参数。`args` 为程序名之后的全量参数（含 `--headless` 本身，
 /// 解析时跳过）。未知长选项与位置参数一律报错，避免拼写错误被静默忽略。
 pub fn parse_args(args: &[String]) -> std::result::Result<HeadlessOpts, String> {
     parse_args_with_env(args, std::env::var(ADMIN_TOKEN_ENV).ok())
@@ -110,7 +110,6 @@ fn parse_args_with_env(
     })
 }
 
-/// headless 用法说明。
 pub fn usage() -> &'static str {
     "用法: moonbridge-app --headless --admin-token <TOKEN> [选项]\n\
      \n\
@@ -160,7 +159,7 @@ pub async fn run_headless(opts: HeadlessOpts) -> Result<()> {
     if let Some(addr) = opts.addr {
         app_config.gateway.addr = addr;
     }
-    // 显式传入优先：覆盖配置文件，且不回写（日志里也绝不打印 token 本体）。
+    // 显式传入优先：覆盖配置文件，且不回写（日志里也绝不打印 token 本身）。
     app_config.gateway.auth_token = Some(opts.admin_token);
     if app_config.gateway.trace_dir.is_none() {
         app_config.gateway.trace_dir = Some(paths.trace_dir.to_string_lossy().to_string());

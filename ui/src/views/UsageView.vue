@@ -291,7 +291,6 @@ watch(range, () => {
       </div>
     </Card>
 
-    <!-- 模型分布 -->
     <Card class="min-w-0 shrink-0">
       <div class="card-header">
         <h3 class="card-title">模型分布</h3>

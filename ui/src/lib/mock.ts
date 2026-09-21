@@ -259,7 +259,7 @@ const seedPlugins: PluginRecord[] = [
     capabilities: [],
     category: "quota",
     configSchema: {
-      management_token: { type: "string", label: "管理令牌", secret: true, help: "演示字段：密钥类字段加密落库" },
+      management_token: { type: "string", label: "管理令牌", secret: true, help: "演示字段：密钥类字段加密写入数据库" },
       unit: { type: "string", label: "货币单位", default: "$" },
       quota_per_unit: { type: "number", label: "每单位额度", default: 500000 },
     },
@@ -355,7 +355,7 @@ function quotaViewOf(p: Provider, results: QuotaKeyResult[]): ProviderQuotaView 
   };
 }
 
-/** 配额结果的可变存储：providerKey → 逐端点最近结果（引擎落库的 mock 对应物）。 */
+/** 配额结果的可变存储：providerKey → 逐端点最近结果（引擎写入数据库的 mock 对应物）。 */
 const quotaResults = new Map<string, QuotaKeyResult[]>();
 for (const p of seedProviders) {
   if (p.quotaPluginRef && p.quotaEnabled) {
@@ -723,7 +723,7 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
       return quotaViews() as T;
     }
     case "quota_test": {
-      // dry-run 语义：不写库、Provider 无需已保存；未绑定插件模拟引擎级失败
+      // dry-run 语义：不写入数据库、Provider 无需已保存；未绑定插件模拟引擎级失败
       const p = (args as { provider: Provider }).provider;
       if (!(p.quotaPluginRef ?? "").trim()) {
         return [

@@ -73,7 +73,6 @@ onUnmounted(() => navObserver?.disconnect());
     class="flex h-full shrink-0 flex-col border-r bg-card transition-[width] duration-150"
     :class="collapsed ? 'w-14' : 'w-60'"
   >
-    <!-- 品牌区 -->
     <div
       class="flex h-14 shrink-0 items-center border-b"
       :class="collapsed ? 'justify-center px-2' : 'gap-2 px-4'"
@@ -81,13 +80,12 @@ onUnmounted(() => navObserver?.disconnect());
       <Moon class="size-5 shrink-0 text-primary" />
       <template v-if="!collapsed">
         <span class="text-sm font-semibold tracking-tight">Moon Bridge</span>
-        <span class="rounded bg-accent px-1.5 py-0.5 text-[10px] font-medium text-accent-foreground">
+        <span class="rounded bg-primary px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-primary-foreground">
           Next
         </span>
       </template>
     </div>
 
-    <!-- 导航 -->
     <nav ref="navRef" class="scrollbar-thin relative min-h-0 flex-1 space-y-1 overflow-y-auto p-2">
       <!-- 当前页共享指示条：滑动至激活项，随 nav 滚动坐标定位 -->
       <span
@@ -108,7 +106,6 @@ onUnmounted(() => navObserver?.disconnect());
       </RouterLink>
     </nav>
 
-    <!-- 收起 / 展开 -->
     <div class="shrink-0 border-t p-2">
       <button
         class="flex w-full items-center rounded-md text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
