@@ -218,7 +218,7 @@ pub async fn oauth_begin(
     run_begin(&st, &preset, source).await
 }
 
-async fn run_begin(
+pub async fn run_begin(
     st: &Arc<ManagedState>,
     preset_id: &str,
     source: Option<String>,
