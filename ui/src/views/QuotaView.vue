@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { ChevronDown, RefreshCw, Wallet } from "lucide-vue-next";
-import { computed, onActivated, onMounted, ref, watch } from "vue";
+import { RefreshCw, Wallet } from "lucide-vue-next";
+import { computed, onActivated, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import Alert from "@/components/ui/Alert.vue";
 import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import Pagination from "@/components/ui/Pagination.vue";
-import { useAutoPageSize } from "@/composables/useAutoPageSize";
+import Select from "@/components/ui/Select.vue";
 import { useToast } from "@/composables/useToast";
 import { errMsg, usageApi, type ProviderCost, type ProviderQuotaView, type QuotaEntry, type QuotaPayload } from "@/lib/api";
 import { formatCost, formatTime } from "@/lib/utils";
@@ -17,13 +17,6 @@ const store = useQuotaStore();
 const toast = useToast();
 
 const error = ref<string | null>(null);
-
-/** 配额的显示状态：收起为文字，展开为环形图（默认收起）。 */
-const chartOpen = ref<Record<string, boolean>>({});
-
-function toggleChart(key: string) {
-  chartOpen.value[key] = !chartOpen.value[key];
-}
 
 // ── 展示辅助 ──
 
@@ -43,18 +36,18 @@ function quotaDetailLines(q: QuotaEntry): string[] {
   return parts;
 }
 
-/** 悬停完整提示：详情行 + 重置时间，一行串起。 */
-function quotaDetailText(q: QuotaEntry): string {
+/** 悬停完整提示：详情、重置时间、本地统计逐行折行展示。 */
+function quotaDetailText(v: ProviderQuotaView, q: QuotaEntry): string {
   const lines = quotaDetailLines(q);
   const reset = resetText(q);
   if (reset) lines.push(`重置 ${reset}`);
-  return lines.join(" · ") || "—";
+  const s = localStat(v, q);
+  if (s) lines.push(`本地统计 ${s.cost > 0 ? formatCost(s.cost) : "$0"} · ${s.requests} 次请求`);
+  return lines.join("\n") || "—";
 }
 
-const RING_C = 2 * Math.PI * 15.5;
-
-/** 环形图比例：percentage 取 percent；quota 由 used/(used+left) 算；缺数据返回 null（不渲染）。 */
-function quotaRingPercent(q: QuotaEntry): number | null {
+/** 进度条比例（已用%）：percentage 取 percent；quota 由 used/(used+left) 算；缺数据返回 null（不画条）。 */
+function quotaUsedPercent(q: QuotaEntry): number | null {
   const clamp = (v: number) => Math.min(100, Math.max(0, v));
   if (q.type === "percentage") {
     if (typeof q.usedPercent === "number") return clamp(q.usedPercent);
@@ -98,7 +91,7 @@ function scalarText(v: unknown): string {
   return String(v);
 }
 
-/** 查询结果里除配额（画成进度条/环形图）、失败原因和说明（逐 key 重复的样板文本）外的字段，按「字段名：值」逐行给出。 */
+/** 查询结果里除配额（画成环形图）、失败原因和说明外的字段，按「字段名：值」逐行给出。 */
 function payloadLines(payload: Record<string, unknown>): { label: string; value: string }[] {
   const lines: { label: string; value: string }[] = [];
   for (const [k, v] of Object.entries(payload)) {
@@ -108,14 +101,13 @@ function payloadLines(payload: Record<string, unknown>): { label: string; value:
   return lines;
 }
 
-/** 表格实际展示的配额行：counter 是无界计数（如请求数），不是配额，不展示。 */
+/** 展示的配额项：counter 是无界计数（如请求数），不是配额，不展示。 */
 function visibleQuotas(payload: QuotaPayload | null | undefined): QuotaEntry[] {
   return (payload?.quotas ?? []).filter((q) => q.type !== "counter");
 }
 
-/** 配额的一行文字：percentage 给百分比，quota/counter 给金额与余额，再合重置时间；
- *  缩略场景传 withReset=false（重置时间仍在 title）。 */
-function quotaText(q: QuotaEntry, withReset = true): string {
+/** 无环配额的兜底文字：percentage 给百分比，quota/counter 给金额与余额。 */
+function quotaText(q: QuotaEntry): string {
   const parts: string[] = [];
   if (q.type === "percentage") {
     if (typeof q.usedPercent === "number") parts.push(`已用 ${q.usedPercent.toFixed(0)}%`);
@@ -124,83 +116,142 @@ function quotaText(q: QuotaEntry, withReset = true): string {
     if (typeof q.usedAmount === "number") parts.push(`消耗 ${q.usedAmount}${q.unit ?? ""}`);
     if (q.type === "quota" && typeof q.leftAmount === "number") parts.push(`余额 ${q.leftAmount}${q.unit ?? ""}`);
   }
-  if (withReset) {
-    const reset = resetText(q);
-    if (reset) parts.push(`重置 ${reset}`);
-  }
   return parts.join(" · ") || "—";
 }
 
-// ── 列表：每个绑定配额插件的 Provider 一个组，端点 key 为数据行 ──
+// ── Provider 过滤与卡片列表 ──
 
 /** 视图列表按 provider key 中文排序稳定展示。 */
 const views = computed(() =>
   [...store.views].sort((a, b) => a.providerKey.localeCompare(b.providerKey, "zh")),
 );
 
-/** Provider 最近一次查询时刻（跨端点取 max）。 */
-function lastQuery(v: ProviderQuotaView): number {
-  let m = 0;
-  for (const r of v.results) if (r.queriedAt > m) m = r.queriedAt;
-  return m;
-}
-
-/** 组行悬停补充：绑定插件与查询间隔。 */
-function bindingText(v: ProviderQuotaView): string {
-  const interval = v.quotaIntervalSecs > 0 ? `每 ${v.quotaIntervalSecs} 秒` : "仅手动";
-  return `${v.quotaPluginRef} · ${interval}`;
-}
-
-// ── 分页：按 Provider 组整组分页，容量随可视高度自适应（估算行高留余量防溢出） ──
-const page = ref(1);
-const tableScroll = ref<HTMLElement | null>(null);
-const { availHeight } = useAutoPageSize(tableScroll, page);
-
-/** Provider 块的估算高度（px）：组行 + 各端点行；配额/附加字段按行高累加，展开态按环形图行高。 */
-function estViewHeight(v: ProviderQuotaView): number {
-  const GROUP = 32;
-  const EMPTY = 37;
-  const KEY_BASE = 25;
-  const QUOTA_LINE = 19;
-  const RING = 96;
-  let h = GROUP;
-  if (v.results.length === 0) return h + EMPTY;
-  for (const r of v.results) {
-    if (chartOpen.value[v.providerKey]) {
-      h += KEY_BASE + (visibleQuotas(r.payload).length ? RING : QUOTA_LINE);
-      continue;
-    }
-    const lines = visibleQuotas(r.payload).length + payloadLines(r.payload ?? {}).length;
-    h += KEY_BASE + Math.max(1, lines) * QUOTA_LINE;
+/** Provider 过滤：默认全部；选中时只看该 Provider 的 key 卡。 */
+const providerFilter = ref("all");
+const providerOptions = computed(() => [
+  { value: "all", label: "全部 Provider" },
+  ...views.value.map((v) => ({ value: v.providerKey, label: v.providerKey })),
+]);
+const filteredViews = computed(() =>
+  providerFilter.value === "all"
+    ? views.value
+    : views.value.filter((v) => v.providerKey === providerFilter.value),
+);
+/** 选中 Provider 已不在列表里（被删除）时回退全部。 */
+watch(views, () => {
+  if (providerFilter.value !== "all" && !views.value.some((v) => v.providerKey === providerFilter.value)) {
+    providerFilter.value = "all";
   }
-  return h;
+});
+
+// ── 自适应分页：容器宽高测行列，行高取行内最高卡片的估计值，累计超高即翻页 ──
+
+interface CardItem {
+  v: ProviderQuotaView;
+  result: ProviderQuotaView["results"][number] | null;
 }
 
-/** 每页容纳的 Provider：累计估算高度不超实测可用高度；单组超高时独占一页（内部滚动兜底）。 */
-const pages = computed<ProviderQuotaView[][]>(() => {
-  const avail = availHeight.value * 0.94;
-  const out: ProviderQuotaView[][] = [];
-  let cur: ProviderQuotaView[] = [];
+/** 扁平卡片流：有结果的每 key 一卡，无结果的 Provider 一张占位卡。 */
+const cards = computed<CardItem[]>(() =>
+  filteredViews.value.flatMap((v): CardItem[] =>
+    v.results.length ? v.results.map((result): CardItem => ({ v, result })) : [{ v, result: null }],
+  ),
+);
+
+/** 网格容器实测内容区宽高（高度由 flex 布局决定，不随卡片数增长）。 */
+const gridWrap = ref<HTMLElement | null>(null);
+const gridSize = ref({ w: 0, h: 0 });
+let gridRO: ResizeObserver | null = null;
+watch(
+  gridWrap,
+  (el) => {
+    gridRO?.disconnect();
+    if (!el) return;
+    const measure = () => {
+      const cs = getComputedStyle(el);
+      gridSize.value = {
+        w: el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight),
+        h: el.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom),
+      };
+    };
+    gridRO = new ResizeObserver(measure);
+    gridRO.observe(el);
+    measure();
+  },
+  { immediate: true },
+);
+onBeforeUnmount(() => gridRO?.disconnect());
+
+const CARD_W = 208; // minmax(13rem, 1fr) 的下限
+const GAP = 8; // gap-2
+
+/** 列数：卡片等宽，按 minmax 下限估算能放几列。 */
+const cols = computed(() => Math.max(1, Math.floor((gridSize.value.w + GAP) / (CARD_W + GAP))));
+
+/** 卡片估算高度（px）：头部两行 + 配额行（标签文本+细条约 24px/项）+ 附加字段/错误行。 */
+function estCardHeight(item: CardItem): number {
+  if (!item.result) return 88;
+  const r = item.result;
+  const quotas = Math.max(1, visibleQuotas(r.payload).length);
+  const extra = payloadLines(r.payload ?? {}).length + (r.status === "error" ? 1 : 0);
+  return 20 + 18 + 19 + 8 + quotas * 24 + extra * 18 + 8;
+}
+
+/** 分页：按网格行打包（一行 cols 张卡，行高取行内最高估计值），累计超高翻页。 */
+const page = ref(1);
+const pages = computed<CardItem[][]>(() => {
+  const avail = gridSize.value.h - 4;
+  const c = cols.value;
+  const items = cards.value;
+  const out: CardItem[][] = [];
+  let cur: CardItem[] = [];
   let h = 0;
-  for (const v of views.value) {
-    const vh = estViewHeight(v);
-    if (cur.length && h + vh > avail) {
+  for (let i = 0; i < items.length; i += c) {
+    const row = items.slice(i, i + c);
+    const rh = Math.max(...row.map(estCardHeight)) + GAP;
+    if (cur.length && h + rh > avail) {
       out.push(cur);
       cur = [];
       h = 0;
     }
-    cur.push(v);
-    h += vh;
+    cur.push(...row);
+    h += rh;
   }
-  if (cur.length) out.push(cur);
+  if (cur.length || !out.length) out.push(cur);
   return out;
 });
-const pageCount = computed(() => Math.max(1, pages.value.length));
-const pagedViews = computed(() => pages.value[page.value - 1] ?? []);
-const totalKeys = computed(() => views.value.reduce((n, v) => n + Math.max(1, v.results.length), 0));
+const pageCount = computed(() => pages.value.length);
+const pagedCards = computed(() => pages.value[page.value - 1] ?? []);
 watch(pageCount, (n) => {
   if (page.value > n) page.value = n;
 });
+
+/** 选中 Provider 的绑定信息行（插件 · 间隔 · key 数）。 */
+const filteredMeta = computed(() => {
+  if (providerFilter.value === "all") return null;
+  const v = views.value.find((x) => x.providerKey === providerFilter.value);
+  if (!v) return null;
+  const interval = v.quotaIntervalSecs > 0 ? `每 ${v.quotaIntervalSecs} 秒` : "仅手动";
+  return `${v.quotaPluginRef} · ${interval} · ${v.keyCount} 个 key`;
+});
+
+/** 上下文刷新：全部 → 刷新全部配额；选中 → 只刷该 Provider。 */
+async function refresh() {
+  error.value = null;
+  try {
+    if (providerFilter.value === "all") {
+      await store.refreshAll();
+      toast.success("已刷新全部配额查询");
+    } else {
+      await store.refreshOne(providerFilter.value);
+    }
+  } catch (e) {
+    error.value = errMsg(e);
+  }
+}
+const refreshing = computed(() =>
+  providerFilter.value === "all" ? store.refreshingAll : store.refreshingKeys.has(providerFilter.value),
+);
 
 // ── 本地等值额度：按配额窗口汇总 usage_records 中该 provider 的实际消耗 ──
 const localCosts = ref(new Map<number, Map<string, ProviderCost>>());
@@ -249,13 +300,6 @@ function localStat(v: ProviderQuotaView, q: QuotaEntry): ProviderCost | null {
   return localCosts.value.get(s)?.get(v.providerKey) ?? { providerKey: v.providerKey, cost: 0, requests: 0 };
 }
 
-/** 本地消耗文案：零值压成 $0，避免 $0.0000 这类四位小数噪音。 */
-function localStatText(v: ProviderQuotaView, q: QuotaEntry): string | null {
-  const s = localStat(v, q);
-  if (!s) return null;
-  return `本地 ${s.cost > 0 ? formatCost(s.cost) : "$0"}`;
-}
-
 // 查询结果刷新（queriedAt 变化）后重拉本地统计；视图列表加载完成也会触发。
 watch(
   () => views.value.map((v) => v.results.map((r) => r.queriedAt).join(",")).join("|"),
@@ -266,25 +310,6 @@ watch(
 
 onMounted(() => store.list());
 onActivated(() => store.list());
-
-async function refreshAll() {
-  error.value = null;
-  try {
-    await store.refreshAll();
-    toast.success("已刷新全部配额查询");
-  } catch (e) {
-    error.value = errMsg(e);
-  }
-}
-
-async function refreshOne(providerKey: string) {
-  error.value = null;
-  try {
-    await store.refreshOne(providerKey);
-  } catch (e) {
-    error.value = errMsg(e);
-  }
-}
 </script>
 
 <template>
@@ -296,13 +321,15 @@ async function refreshOne(providerKey: string) {
       </Button>
     </Alert>
 
-    <!-- 页头操作 -->
+    <!-- 页头操作：Provider 过滤 + 上下文刷新（全部→全刷，选中→单刷） -->
     <div class="flex shrink-0 items-center justify-end gap-2">
-      <Button variant="outline" size="sm" :disabled="store.refreshingAll" @click="refreshAll">
-        <RefreshCw class="size-4" :class="store.refreshingAll ? 'animate-spin' : ''" />
-        一键刷新
+      <Select v-model="providerFilter" :options="providerOptions" small class="w-44" />
+      <Button variant="outline" size="sm" :disabled="refreshing" :title="providerFilter === 'all' ? '刷新全部配额' : '刷新该 Provider 配额'" @click="refresh">
+        <RefreshCw class="size-4" :class="refreshing ? 'animate-spin' : ''" />
+        {{ providerFilter === "all" ? "一键刷新" : "刷新" }}
       </Button>
     </div>
+    <p v-if="filteredMeta" class="-mt-2 shrink-0 text-right text-xs text-muted-foreground">{{ filteredMeta }}</p>
 
     <EmptyState v-if="store.loading && store.views.length === 0">加载中…</EmptyState>
 
@@ -319,153 +346,72 @@ async function refreshOne(providerKey: string) {
       </div>
     </EmptyState>
 
-    <!-- 配额表：Provider 为组行，端点 key 为数据行；配额内联细进度条，组行展开切环形图 -->
-    <div v-else-if="store.views.length > 0" class="flex min-h-0 flex-1 flex-col">
-      <section ref="tableScroll" class="scrollbar-thin min-h-0 flex-1 overflow-auto">
-      <table class="w-full text-center text-sm">
-        <thead class="thead-sticky">
-          <tr class="border-b text-muted-foreground">
-            <th class="py-2 font-medium">Key</th>
-            <th class="py-2 font-medium">配额</th>
-            <th class="py-2 font-medium">状态</th>
-            <th class="py-2 font-medium">上次查询</th>
-            <th class="py-2 font-medium">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <template v-for="v in pagedViews" :key="v.providerKey">
-            <!-- Provider 组行：元信息与组级操作对齐到列位 -->
-            <tr class="border-b bg-muted/30">
-              <td class="py-1.5">
-                <div class="flex min-w-0 items-center justify-center gap-1.5">
-                  <button
-                    type="button"
-                    class="shrink-0 rounded-sm p-0.5 text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                    :title="chartOpen[v.providerKey] ? '收起环形图' : '展开环形图'"
-                    @click="toggleChart(v.providerKey)"
-                  >
-                    <ChevronDown
-                      class="size-3.5 transition-transform"
-                      :class="chartOpen[v.providerKey] ? '' : '-rotate-90'"
-                    />
-                  </button>
-                  <span class="text-xs font-medium" :title="`${v.providerKey} · ${bindingText(v)}`">{{ v.providerKey }}</span>
-                  <span class="truncate text-xs text-muted-foreground">{{ bindingText(v) }}</span>
+    <!-- 各端点 Key 的信息卡网格；「全部」模式下卡片带 provider 名 -->
+    <div v-else-if="filteredViews.length > 0" class="flex min-h-0 flex-1 flex-col">
+      <section ref="gridWrap" class="min-h-0 flex-1 overflow-hidden">
+        <div class="grid grid-cols-[repeat(auto-fill,minmax(13rem,1fr))] gap-2 pb-1">
+        <template v-for="item in pagedCards" :key="item.result ? `${item.v.providerKey}:${item.result.keyIndex}` : `${item.v.providerKey}:empty`">
+          <!-- 未查询占位卡 -->
+          <div
+            v-if="!item.result"
+            class="rounded-md border border-dashed p-3 text-xs text-muted-foreground"
+          >
+            <div class="flex items-center justify-between gap-2">
+              <span v-if="providerFilter === 'all'" class="truncate font-medium text-foreground">{{ item.v.providerKey }}</span>
+              <span v-else class="font-mono">—</span>
+              <Badge v-if="!item.v.quotaEnabled" variant="secondary">停用</Badge>
+            </div>
+            <p class="mt-2">尚未查询</p>
+          </div>
+          <!-- key 卡：掩码 key + 状态 + 配额环图；明细与本地统计进悬停 -->
+          <div
+            v-else
+            class="rounded-md border p-2.5"
+          >
+            <div class="flex items-center justify-between gap-2">
+              <span class="truncate font-mono text-xs" :title="`API Key ${item.result.keyLabel}（掩码）`">
+                {{ item.result.keyLabel || `Key ${item.result.keyIndex + 1}` }}
+              </span>
+              <Badge :variant="item.result.status === 'ok' ? 'success' : 'destructive'" class="shrink-0">
+                {{ item.result.status === "ok" ? "正常" : "异常" }}
+              </Badge>
+            </div>
+            <div class="mt-0.5 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+              <span v-if="providerFilter === 'all'" class="truncate">{{ item.v.providerKey }}</span>
+              <span v-else />
+              <span class="shrink-0 tabular-nums" :title="formatTime(item.result.queriedAt)">{{ shortTime(item.result.queriedAt) }}</span>
+            </div>
+            <!-- 配额：纵向交错堆叠「标签+数值」文本行与全宽细进度条 -->
+            <div class="mt-2 space-y-1.5">
+              <div
+                v-for="(q, i) in visibleQuotas(item.result.payload)"
+                :key="i"
+                :title="`${q.label}：${quotaDetailText(item.v, q)}`"
+              >
+                <div class="flex items-baseline justify-between gap-2 text-[11px]">
+                  <span class="truncate text-muted-foreground">{{ q.label }}</span>
+                  <span class="shrink-0 tabular-nums">{{ quotaText(q) }}</span>
                 </div>
-              </td>
-              <td class="py-1.5 text-xs text-muted-foreground">
-                {{ v.keyCount ? `${v.keyCount} 个 key` : "—" }}
-              </td>
-              <td class="py-1.5"><Badge v-if="!v.quotaEnabled" variant="secondary">停用</Badge></td>
-              <td class="py-1.5 text-xs tabular-nums text-muted-foreground">{{ shortTime(lastQuery(v)) }}</td>
-              <td class="py-1.5">
-                <div class="flex items-center justify-center gap-0.5">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    class="size-7"
-                    title="刷新该 Provider 配额"
-                    :disabled="store.refreshingAll || store.refreshingKeys.has(v.providerKey)"
-                    @click="refreshOne(v.providerKey)"
-                  >
-                    <RefreshCw class="size-3.5" :class="store.refreshingKeys.has(v.providerKey) ? 'animate-spin' : ''" />
-                  </Button>
+                <div v-if="quotaUsedPercent(q) !== null" class="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-muted">
+                  <div class="h-full bg-primary" :style="{ width: quotaUsedPercent(q) + '%' }" />
                 </div>
-              </td>
-            </tr>
-            <!-- 未查询占位行 -->
-            <tr v-if="v.results.length === 0" class="border-b">
-              <td class="py-2 font-mono text-xs text-muted-foreground">—</td>
-              <td class="py-2 text-xs text-muted-foreground">尚未查询</td>
-              <td></td>
-              <td></td>
-              <td></td>
-            </tr>
-            <!-- 端点 key 数据行 -->
-            <tr v-for="result in v.results" :key="result.keyIndex" class="border-b transition-colors hover:bg-accent/40">
-              <td class="py-2 font-mono text-xs" :title="`API Key ${result.keyLabel}（掩码）`">{{ result.keyLabel || `Key ${result.keyIndex + 1}` }}</td>
-              <td class="py-2">
-                <!-- 收起：配额行内细进度条 + 文本；展开：环形图 -->
-                <div v-if="!chartOpen[v.providerKey]" class="flex flex-col items-center gap-0.5">
-                  <div class="grid grid-cols-[4rem_3.5rem_auto_5.5rem] items-center gap-x-1.5 gap-y-0.5 text-xs">
-                    <template v-for="(q, i) in visibleQuotas(result.payload)" :key="`q${i}`">
-                      <span class="truncate text-right text-muted-foreground" :title="`${q.label}：${quotaDetailText(q)}`">{{ q.label }}</span>
-                      <span
-                        v-if="quotaRingPercent(q) !== null"
-                        class="inline-block h-1.5 w-14 overflow-hidden rounded-full bg-muted"
-                        :title="`${q.label}：${quotaDetailText(q)}`"
-                      >
-                        <span class="block h-full bg-primary" :style="{ width: quotaRingPercent(q) + '%' }" />
-                      </span>
-                      <span v-else />
-                      <span class="tabular-nums" :title="`${q.label}：${quotaDetailText(q)}`">{{ quotaText(q, false) }}</span>
-                      <span
-                        v-if="localStat(v, q)"
-                        class="truncate text-right text-muted-foreground tabular-nums"
-                        :title="`本地统计：跟随配额窗口的实际消耗 · ${localStat(v, q)!.requests} 次请求`"
-                      >{{ localStatText(v, q) }}</span>
-                      <span v-else />
-                    </template>
-                    <template v-for="(line, i) in payloadLines(result.payload ?? {})" :key="`p${i}`">
-                      <span class="truncate text-right text-muted-foreground">{{ line.label }}</span>
-                      <span class="col-span-3 tabular-nums">{{ line.value }}</span>
-                    </template>
-                  </div>
-                  <div v-if="result.status === 'error'" class="text-xs text-destructive">{{ result.error || result.payload?.message || "查询失败" }}</div>
-                  <div
-                    v-if="result.status === 'ok' && !visibleQuotas(result.payload).length && !payloadLines(result.payload ?? {}).length"
-                    class="text-xs text-muted-foreground"
-                  >—</div>
-                </div>
-                <div v-else-if="visibleQuotas(result.payload).length" class="flex flex-wrap items-start justify-center gap-x-3 gap-y-2">
-                  <template v-for="(q, i) in visibleQuotas(result.payload)" :key="i">
-                    <div
-                      v-if="quotaRingPercent(q) !== null"
-                      class="flex w-20 shrink-0 flex-col items-center gap-1 text-center"
-                      :title="`${q.label}：${quotaDetailText(q)}`"
-                    >
-                      <div class="relative size-11 shrink-0">
-                        <svg viewBox="0 0 36 36" class="size-full -rotate-90">
-                          <circle cx="18" cy="18" r="15.5" fill="none" stroke-width="3" class="stroke-muted" />
-                          <circle
-                            cx="18" cy="18" r="15.5" fill="none" stroke-width="3" stroke-linecap="round"
-                            class="stroke-primary transition-[stroke-dashoffset] duration-500"
-                            :stroke-dasharray="RING_C"
-                            :stroke-dashoffset="RING_C * (1 - (quotaRingPercent(q) ?? 0) / 100)"
-                          />
-                        </svg>
-                        <div class="absolute inset-0 flex items-center justify-center text-[10px] font-semibold tabular-nums">
-                          {{ (quotaRingPercent(q) ?? 0).toFixed(0) }}%
-                        </div>
-                      </div>
-                      <div class="w-full truncate text-[11px]">{{ q.label }}</div>
-                      <div v-if="localStat(v, q)" class="w-full truncate text-[10px] text-muted-foreground tabular-nums">
-                        {{ localStatText(v, q) }}
-                      </div>
-                    </div>
-                    <div
-                      v-else
-                      class="flex min-h-16 w-20 shrink-0 items-center justify-center text-center"
-                      :title="`${q.label}：${quotaDetailText(q)}`"
-                    >
-                      <div class="w-full truncate text-[11px] text-muted-foreground">{{ q.label }}</div>
-                    </div>
-                  </template>
-                </div>
-                <div v-else class="text-xs text-muted-foreground">—</div>
-              </td>
-              <td class="py-2">
-                <Badge :variant="result.status === 'ok' ? 'success' : 'destructive'">{{ result.status === "ok" ? "正常" : "异常" }}</Badge>
-              </td>
-              <td class="py-2 text-xs tabular-nums text-muted-foreground" :title="formatTime(result.queriedAt)">{{ shortTime(result.queriedAt) }}</td>
-              <td class="py-2" />
-            </tr>
-          </template>
-        </tbody>
-      </table>
+              </div>
+              <p
+                v-if="item.result.status === 'ok' && !visibleQuotas(item.result.payload).length && !payloadLines(item.result.payload ?? {}).length"
+                class="text-xs text-muted-foreground"
+              >—</p>
+            </div>
+            <div v-if="item.result.status === 'error'" class="mt-1.5 text-xs text-destructive">{{ item.result.error || item.result.payload?.message || "查询失败" }}</div>
+            <div v-for="(line, i) in payloadLines(item.result.payload ?? {})" :key="i" class="mt-1 flex items-baseline gap-1.5 text-[11px]">
+              <span class="shrink-0 text-muted-foreground">{{ line.label }}</span>
+              <span class="min-w-0 truncate tabular-nums">{{ line.value }}</span>
+            </div>
+          </div>
+        </template>
+        </div>
       </section>
       <div v-if="pageCount > 1" class="shrink-0 border-t pt-3">
-        <Pagination v-model:page="page" :page-count="pageCount" :total="totalKeys" />
+        <Pagination v-model:page="page" :page-count="pageCount" :total="cards.length" />
       </div>
     </div>
   </div>
