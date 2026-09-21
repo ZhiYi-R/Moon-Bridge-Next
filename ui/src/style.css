@@ -27,6 +27,13 @@
     --input: 0 0% 88%;
     --ring: 0 0% 60%;
     --radius: 0.375rem;
+
+    /* 动效令牌：只动 transform/opacity；进场指数缓出、出场约 75% 时长加速离开 */
+    --dur-micro: 120ms;
+    --dur-base: 200ms;
+    --dur-med: 280ms;
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
   }
 
   .dark {
@@ -86,6 +93,58 @@
   .scrollbar-thin::-webkit-scrollbar-track {
     background: transparent;
   }
+
+  /* 毛玻璃：只用于悬浮层（下拉浮层/Toast）。默认近实底兜底；
+     支持 backdrop-filter 时降为半透明加模糊，模糊半径取中段值避免「隐私屏」观感。
+     大面积区域不使用（GPU 开销），sticky 表头维持实底（既有否决结论）。 */
+  .glass {
+    @apply border-border/60;
+    background-color: hsl(var(--popover) / 0.85);
+  }
+
+  /* 面板级玻璃：承载表单与正文，透明度比浮层高；仅用于浮于遮罩之上的 Modal。
+     页面内内容卡不使用——背后是纯色底，模糊不可见且白烧合成层。 */
+  .glass-panel {
+    @apply border-border/60;
+    background-color: hsl(var(--popover) / 0.92);
+  }
+}
+
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass {
+    background-color: hsl(var(--popover) / 0.62);
+    -webkit-backdrop-filter: blur(14px) saturate(180%);
+    backdrop-filter: blur(14px) saturate(180%);
+  }
+  .glass-panel {
+    background-color: hsl(var(--popover) / 0.78);
+    -webkit-backdrop-filter: blur(20px) saturate(160%);
+    backdrop-filter: blur(20px) saturate(160%);
+  }
+  /* 弹窗遮罩附带轻模糊：让面板玻璃的半透明真正有内容可透 */
+  .modal-overlay {
+    -webkit-backdrop-filter: blur(5px);
+    backdrop-filter: blur(5px);
+  }
+  /* 亮色下黑遮罩透上来会把面板拉灰、与主窗口亮度脱节：
+     面板近乎实底只留一点通透，遮罩同步减淡 */
+  :root:not(.dark) .glass-panel {
+    background-color: hsl(var(--popover) / 0.92);
+  }
+  :root:not(.dark) .modal-overlay {
+    background-color: rgb(0 0 0 / 0.45);
+  }
+}
+
+/* 系统级减少动态偏好：所有动画/过渡塌缩到近零时长，仅保留状态切换 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 /* 卡片内部布局工具类（配合 Card.vue 容器使用） */
@@ -112,11 +171,22 @@
     @apply sticky top-0 z-10 bg-card;
   }
 
-  /* 侧栏当前页指示条：RouterLink 激活时自动带 aria-current="page" */
+  /* 侧栏当前页共享指示条：translateY 由脚本对准激活项（AppSidebar），滑动过渡 */
   .nav-indicator {
-    @apply absolute left-1 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-primary opacity-0 transition-opacity;
+    @apply absolute left-1 top-0 h-4 w-0.5 rounded-full bg-primary opacity-0;
+    transition:
+      transform var(--dur-base) var(--ease-out),
+      opacity var(--dur-micro) var(--ease-out);
+    pointer-events: none;
   }
-  a[aria-current="page"] .nav-indicator {
-    opacity: 1;
+
+  /* 标签条共享下划线：translateX+width 由脚本对准激活 tab（ModelsView），滑动过渡 */
+  .tab-ink {
+    @apply absolute bottom-0 left-0 h-0.5 bg-foreground opacity-0;
+    transition:
+      transform var(--dur-base) var(--ease-out),
+      width var(--dur-base) var(--ease-out),
+      opacity var(--dur-micro) var(--ease-out);
+    pointer-events: none;
   }
 }

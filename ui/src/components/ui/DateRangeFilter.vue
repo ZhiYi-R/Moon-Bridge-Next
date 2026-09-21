@@ -234,15 +234,16 @@ onUnmounted(() => {
   </div>
 
   <Teleport to="body">
-    <div
-      v-if="open"
-      ref="popoverRef"
-      role="dialog"
-      aria-label="时间范围筛选"
-      class="fixed z-[60] flex max-h-[22rem] overflow-hidden rounded-md border bg-popover shadow-md"
-      :style="floatStyle"
-      @keydown.escape="close()"
-    >
+    <Transition name="pop">
+      <div
+        v-if="open"
+        ref="popoverRef"
+        role="dialog"
+        aria-label="时间范围筛选"
+        class="glass fixed z-[60] flex max-h-[22rem] overflow-hidden rounded-md border shadow-md"
+        :style="floatStyle"
+        @keydown.escape="close()"
+      >
       <!-- 预设列 -->
       <div class="scrollbar-thin w-28 shrink-0 overflow-y-auto p-1">
         <button
@@ -324,6 +325,25 @@ onUnmounted(() => {
           </button>
         </div>
       </div>
-    </div>
+      </div>
+    </Transition>
   </Teleport>
 </template>
+
+<style scoped>
+.pop-enter-active,
+.pop-leave-active {
+  transition:
+    opacity var(--dur-micro) var(--ease-out),
+    transform var(--dur-micro) var(--ease-out);
+  transform-origin: top center;
+}
+.pop-leave-active {
+  transition-duration: calc(var(--dur-micro) * 0.75);
+}
+.pop-enter-from,
+.pop-leave-to {
+  opacity: 0;
+  transform: translateY(-4px) scale(0.97);
+}
+</style>

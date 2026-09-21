@@ -188,13 +188,14 @@ onUnmounted(() => {
   </div>
 
   <Teleport to="body">
-    <div
-      v-if="open"
-      ref="popoverRef"
-      role="listbox"
-      class="fixed z-[60] max-h-60 overflow-y-auto rounded-md border bg-popover p-1 shadow-md scrollbar-thin"
-      :style="{ ...floatStyle, minWidth: '11rem' }"
-    >
+    <Transition name="pop">
+      <div
+        v-if="open"
+        ref="popoverRef"
+        role="listbox"
+        class="glass fixed z-[60] max-h-60 overflow-y-auto rounded-md border p-1 shadow-md scrollbar-thin"
+        :style="{ ...floatStyle, minWidth: '11rem' }"
+      >
       <div v-if="searchable" class="relative mb-1">
         <Search class="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
         <input
@@ -231,6 +232,25 @@ onUnmounted(() => {
         仅显示前 {{ visibleOptions.length }} 条（共 {{ filteredOptions.length }} 条），请输入关键词缩小范围。
       </p>
       <p v-else-if="visibleOptions.length === 0" class="px-2 py-1.5 text-xs text-muted-foreground">无匹配结果</p>
-    </div>
+      </div>
+    </Transition>
   </Teleport>
 </template>
+
+<style scoped>
+.pop-enter-active,
+.pop-leave-active {
+  transition:
+    opacity var(--dur-micro) var(--ease-out),
+    transform var(--dur-micro) var(--ease-out);
+  transform-origin: top center;
+}
+.pop-leave-active {
+  transition-duration: calc(var(--dur-micro) * 0.75);
+}
+.pop-enter-from,
+.pop-leave-to {
+  opacity: 0;
+  transform: translateY(-4px) scale(0.97);
+}
+</style>

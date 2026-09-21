@@ -13,8 +13,8 @@ import {
   Settings,
   Wallet,
 } from "lucide-vue-next";
-import { ref } from "vue";
-import { RouterLink } from "vue-router";
+import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { RouterLink, useRoute } from "vue-router";
 
 const nav = [
   { to: "/dashboard", title: "仪表盘", icon: Gauge },
@@ -35,6 +35,37 @@ function toggle() {
   collapsed.value = !collapsed.value;
   localStorage.setItem(STORAGE_KEY, collapsed.value ? "1" : "0");
 }
+
+// ── 共享指示条：单元素 translateY 滑向激活项，方向与页面切换滚动一致 ──
+const route = useRoute();
+const navRef = ref<HTMLElement | null>(null);
+const indicatorY = ref(0);
+const indicatorVisible = ref(false);
+
+const INDICATOR_H = 16; // 与 style.css .nav-indicator 的 height 一致
+
+function updateIndicator() {
+  const nav = navRef.value;
+  const active = nav?.querySelector<HTMLElement>('a[aria-current="page"]');
+  if (!nav || !active) {
+    indicatorVisible.value = false;
+    return;
+  }
+  indicatorY.value = active.offsetTop + (active.offsetHeight - INDICATOR_H) / 2;
+  indicatorVisible.value = true;
+}
+
+// 指示条是 nav 的绝对定位子元素，跟随滚动坐标——nav 自身滚动不需要重算；
+// 路由切换、侧栏收放（项高变化）、窗口尺寸变化时需要。
+let navObserver: ResizeObserver | null = null;
+watch(() => route.path, () => nextTick(updateIndicator));
+watch(collapsed, () => nextTick(updateIndicator));
+onMounted(() => {
+  updateIndicator();
+  navObserver = new ResizeObserver(updateIndicator);
+  if (navRef.value) navObserver.observe(navRef.value);
+});
+onUnmounted(() => navObserver?.disconnect());
 </script>
 
 <template>
@@ -57,7 +88,12 @@ function toggle() {
     </div>
 
     <!-- 导航 -->
-    <nav class="scrollbar-thin min-h-0 flex-1 space-y-1 overflow-y-auto p-2">
+    <nav ref="navRef" class="scrollbar-thin relative min-h-0 flex-1 space-y-1 overflow-y-auto p-2">
+      <!-- 当前页共享指示条：滑动至激活项，随 nav 滚动坐标定位 -->
+      <span
+        class="nav-indicator"
+        :style="{ transform: `translateY(${indicatorY}px)`, opacity: indicatorVisible ? 1 : 0 }"
+      />
       <RouterLink
         v-for="item in nav"
         :key="item.to"
@@ -67,8 +103,6 @@ function toggle() {
         :class="collapsed ? 'justify-center p-2' : 'gap-3 px-3 py-2'"
         active-class="!bg-accent !text-accent-foreground font-medium"
       >
-        <!-- 当前页指示条：RouterLink 激活时自动带 aria-current="page"（见 style.css） -->
-        <span class="nav-indicator" />
         <component :is="item.icon" class="size-4 shrink-0" />
         <span v-if="!collapsed" class="truncate">{{ item.title }}</span>
       </RouterLink>

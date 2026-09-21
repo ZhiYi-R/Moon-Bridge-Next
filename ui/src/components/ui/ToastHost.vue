@@ -24,7 +24,7 @@ const iconCls: Record<ToastType, string> = {
         <div
           v-for="t in toasts"
           :key="t.id"
-          class="pointer-events-auto flex items-start gap-2 rounded-md border bg-card px-3 py-2.5 shadow-lg"
+          class="glass pointer-events-auto flex items-start gap-2 rounded-md border px-3 py-2.5 shadow-lg"
           role="status"
         >
           <component :is="icons[t.type]" class="mt-0.5 size-4 shrink-0" :class="iconCls[t.type]" />
@@ -46,8 +46,11 @@ const iconCls: Record<ToastType, string> = {
 .toast-enter-active,
 .toast-leave-active {
   transition:
-    opacity 0.18s ease,
-    transform 0.18s ease;
+    opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
+}
+.toast-leave-active {
+  transition-duration: calc(var(--dur-base) * 0.75);
 }
 .toast-enter-from,
 .toast-leave-to {
@@ -55,6 +58,6 @@ const iconCls: Record<ToastType, string> = {
   transform: translateY(8px);
 }
 .toast-move {
-  transition: transform 0.18s ease;
+  transition: transform var(--dur-base) var(--ease-out);
 }
 </style>

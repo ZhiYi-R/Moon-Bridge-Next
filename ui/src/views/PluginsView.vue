@@ -77,8 +77,17 @@ const editing = ref(false);
 const isNew = ref(false);
 const busy = ref(false);
 /** 编辑器内折叠状态：元信息默认收起，脚本默认展开。 */
+// 元信息/脚本为互斥手风琴：同时至多一个展开（也可全收起），切换时 flex-grow 过渡
 const metaOpen = ref(false);
 const scriptOpen = ref(true);
+function toggleMeta() {
+  metaOpen.value = !metaOpen.value;
+  if (metaOpen.value) scriptOpen.value = false;
+}
+function toggleScript() {
+  scriptOpen.value = !scriptOpen.value;
+  if (scriptOpen.value) metaOpen.value = false;
+}
 
 interface Form {
   name: string;
@@ -396,11 +405,12 @@ onActivated(() => {
   <div class="flex h-full min-h-0 flex-col">
     <Alert v-if="error" class="shrink-0">{{ error }}</Alert>
     <Alert v-if="needsRestart" variant="warning" class="shrink-0">
-      有插件变更尚未生效——点击右上「重启网关」应用。
+      有插件变更尚未生效——点击列表底部「重启网关」应用。
     </Alert>
 
-    <!-- 编辑器模式：满页切换，不再弹窗 -->
-    <div v-if="editing" class="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <!-- 编辑器模式：满页切换，不再弹窗；列表↔编辑器进出用淡出/淡入衔接 -->
+    <Transition name="editor" mode="out-in">
+    <div v-if="editing" key="editor" class="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div class="flex shrink-0 items-center justify-between border-b px-5 py-3">
         <div class="flex items-center gap-2">
           <Button variant="ghost" size="icon" class="size-7" title="返回列表" @click="tryCloseEditor">
@@ -424,7 +434,7 @@ onActivated(() => {
       <button
         class="flex w-full shrink-0 items-center justify-between px-5 py-2.5"
         :class="!metaOpen && 'border-b'"
-        @click="metaOpen = !metaOpen"
+        @click="toggleMeta"
       >
         <span class="card-title">元信息</span>
         <ChevronDown
@@ -432,11 +442,8 @@ onActivated(() => {
           :class="metaOpen ? '' : '-rotate-90'"
         />
       </button>
-      <div
-        v-show="metaOpen"
-        class="grid gap-4 px-5 py-4 grid-cols-2 grid-rows-[auto_auto_1fr]"
-        :class="scriptOpen ? 'shrink-0 border-b' : 'min-h-0 flex-1 overflow-y-auto'"
-      >
+      <div class="collapse-body" :class="metaOpen && 'collapse-open border-b'">
+      <div class="grid h-full gap-4 overflow-y-auto px-5 py-4 grid-cols-2 grid-rows-[auto_auto_1fr]">
         <div class="space-y-1.5">
           <Label for="pl-name">名称</Label>
           <Input id="pl-name" v-model="form.name" placeholder="如 my_plugin" :disabled="!isNew" />
@@ -493,12 +500,13 @@ onActivated(() => {
           <CodeEditor v-model="form.configText" lang="json" height="100%" class="min-h-32 flex-1" />
         </div>
       </div>
+      </div>
 
       <!-- 脚本：可折叠，默认展开并填满剩余高度 -->
       <button
         class="flex w-full shrink-0 items-center justify-between px-5 py-2.5"
         :class="scriptOpen && 'border-b'"
-        @click="scriptOpen = !scriptOpen"
+        @click="toggleScript"
       >
         <span class="card-title">脚本</span>
         <ChevronDown
@@ -506,32 +514,16 @@ onActivated(() => {
           :class="scriptOpen ? '' : '-rotate-90'"
         />
       </button>
-      <div v-show="scriptOpen" class="flex min-h-0 flex-1 flex-col px-5 py-4">
-        <CodeEditor v-model="script" height="100%" class="min-h-0 flex-1" />
+      <div class="collapse-body" :class="scriptOpen && 'collapse-open'">
+        <div class="flex h-full flex-col px-5 py-4">
+          <CodeEditor v-model="script" height="100%" class="min-h-0 flex-1" />
+        </div>
       </div>
     </div>
 
     <!-- 插件列表：满版面板 -->
-    <div v-else class="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <div class="flex shrink-0 items-center justify-end gap-2 border-b px-5 py-3">
-        <Button variant="outline" size="sm" :disabled="!needsRestart" @click="restart">
-          <RotateCw class="size-4" /> 重启网关
-        </Button>
-        <Button variant="outline" size="sm" :disabled="busy" @click="importPlugins">
-          <Upload class="size-4" /> 导入
-        </Button>
-        <Button size="sm" @click="newPlugin">
-          <Plus class="size-4" /> 新建
-        </Button>
-        <input
-          ref="fileInput"
-          type="file"
-          accept=".lua"
-          multiple
-          class="hidden"
-          @change="onFilesPicked"
-        />
-      </div>
+    <div v-else key="list" class="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <input ref="fileInput" type="file" accept=".lua" multiple class="hidden" @change="onFilesPicked" />
       <div class="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">
         <EmptyState v-if="plugins.length === 0" :icon="Puzzle">
           <p>
@@ -579,9 +571,38 @@ onActivated(() => {
               <span class="font-mono">{{ p.scopes.join(" · ") }}</span>
             </div>
           </li>
+          <!-- 尾行：页级与条目操作（与模型页尾行同一惯例） -->
+          <li class="py-1">
+            <div class="flex items-center justify-end gap-4">
+              <button
+                type="button"
+                class="flex items-center gap-1.5 rounded-sm py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
+                :disabled="!needsRestart"
+                @click="restart"
+              >
+                <RotateCw class="size-3.5" /> 重启网关
+              </button>
+              <button
+                type="button"
+                class="flex items-center gap-1.5 rounded-sm py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
+                :disabled="busy"
+                @click="importPlugins"
+              >
+                <Upload class="size-3.5" /> 导入
+              </button>
+              <button
+                type="button"
+                class="flex items-center gap-1.5 rounded-sm py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                @click="newPlugin"
+              >
+                <Plus class="size-3.5" /> 新建插件
+              </button>
+            </div>
+          </li>
         </ul>
       </div>
     </div>
+    </Transition>
 
     <!-- 启用门控：插件 MB.requires 声明的设置未满足时弹框提示，不自动修改 -->
     <Modal :open="reqError !== null" title="无法启用插件" width="max-w-md" @close="reqError = null">
@@ -598,3 +619,34 @@ onActivated(() => {
     </Modal>
   </div>
 </template>
+
+<style scoped>
+/* 手风琴折叠区：flex-grow 可插值——互斥切换时一区收一区放同步进行，
+   比 height/max-height 方案顺滑且无魔法数。 */
+.collapse-body {
+  flex: 0 1 0%;
+  min-height: 0;
+  overflow: hidden;
+  transition: flex-grow var(--dur-med) var(--ease-out);
+}
+.collapse-body.collapse-open {
+  flex-grow: 1;
+}
+
+/* 列表 ↔ 编辑器整页互换：旧页快速淡出，新页淡入并轻微上浮 */
+.editor-enter-active {
+  transition:
+    opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
+}
+.editor-leave-active {
+  transition: opacity calc(var(--dur-base) * 0.6) var(--ease-in);
+}
+.editor-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+.editor-leave-to {
+  opacity: 0;
+}
+</style>

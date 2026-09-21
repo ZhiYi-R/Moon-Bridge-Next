@@ -393,7 +393,7 @@ onActivated(() => store.list());
                   <span class="shrink-0 tabular-nums">{{ quotaText(q) }}</span>
                 </div>
                 <div v-if="quotaUsedPercent(q) !== null" class="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-muted">
-                  <div class="h-full bg-primary" :style="{ width: quotaUsedPercent(q) + '%' }" />
+                  <div class="h-full bg-primary transition-[width] duration-500" :style="{ width: quotaUsedPercent(q) + '%' }" />
                 </div>
               </div>
               <p

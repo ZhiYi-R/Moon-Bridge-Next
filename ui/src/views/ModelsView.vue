@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Boxes, Check, CircleDollarSign, CloudDownload, Pencil, Plus, Search, Trash2, X } from "lucide-vue-next";
-import { computed, onActivated, onMounted, reactive, ref, watch, type Ref } from "vue";
+import { computed, nextTick, onActivated, onMounted, onUnmounted, reactive, ref, watch, type Ref } from "vue";
 
 import Alert from "@/components/ui/Alert.vue";
 import Button from "@/components/ui/Button.vue";
@@ -351,6 +351,41 @@ watch(
   },
   { immediate: true },
 );
+
+// ── 标签条共享下划线：translateX+width 滑向激活 tab（同侧栏指示条思路）──
+const tabBarRef = ref<HTMLElement | null>(null);
+const tabInk = reactive({ x: 0, w: 0, on: false });
+
+function updateTabInk() {
+  const bar = tabBarRef.value;
+  const active = bar?.querySelector<HTMLElement>("[data-active]");
+  if (!bar || !active) {
+    tabInk.on = false;
+    return;
+  }
+  tabInk.x = active.offsetLeft;
+  tabInk.w = active.offsetWidth;
+  tabInk.on = true;
+}
+
+let tabBarObserver: ResizeObserver | null = null;
+watch([activeProvider, providers], () => nextTick(updateTabInk));
+
+// ── 切 tab 内容横向滑动：标签横向排列 → 内容沿标签方向横滚（同路由纵向滚动逻辑）──
+// 旧内容不透明滑出盖住新内容，方向 = 新旧 tab 的索引差；scrollEl 本身不换挂载
+const paneDir = ref(1);
+const paneTransitioning = ref(false);
+watch(activeProvider, (to, from) => {
+  const order = ["", ...providers.value.map((p) => p.key)];
+  const d = Math.sign(order.indexOf(to) - order.indexOf(from));
+  if (d !== 0) paneDir.value = d;
+});
+onMounted(() => {
+  updateTabInk();
+  tabBarObserver = new ResizeObserver(updateTabInk);
+  if (tabBarRef.value) tabBarObserver.observe(tabBarRef.value);
+});
+onUnmounted(() => tabBarObserver?.disconnect());
 const offers = ref<Offer[]>([]);
 const offersLoading = ref(false);
 const offerBusy = ref(false);
@@ -951,15 +986,20 @@ onActivated(() => {
 
     <!-- 模型 + 报价：满版单表；报价列归组表头所选上游服务 -->
     <div class="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <!-- Provider tab：报价列归属于当前选中的上游服务 -->
-      <div v-if="providers.length > 0" class="flex shrink-0 border-b px-5">
+      <!-- Provider tab：报价列归属于当前选中的上游服务；下划线为共享滑动墨线 -->
+      <div v-if="providers.length > 0" ref="tabBarRef" class="relative flex shrink-0 border-b px-5">
+        <span
+          class="tab-ink"
+          :style="{ transform: `translateX(${tabInk.x}px)`, width: `${tabInk.w}px`, opacity: tabInk.on ? 1 : 0 }"
+        />
         <button
           type="button"
-          class="-mb-px flex min-w-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          :data-active="activeProvider === '' || undefined"
+          class="flex min-w-0 items-center gap-1.5 whitespace-nowrap px-3 py-2.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           :class="
             activeProvider === ''
-              ? 'border-foreground font-semibold text-foreground'
-              : 'border-transparent font-medium text-muted-foreground hover:text-foreground'
+              ? 'font-semibold text-foreground'
+              : 'font-medium text-muted-foreground hover:text-foreground'
           "
           @click="activeProvider = ''"
         >
@@ -969,11 +1009,12 @@ onActivated(() => {
           v-for="p in providers"
           :key="p.key"
           type="button"
-          class="-mb-px flex min-w-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          :data-active="p.key === activeProvider || undefined"
+          class="flex min-w-0 items-center gap-1.5 whitespace-nowrap px-3 py-2.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           :class="[
             p.key === activeProvider
-              ? 'border-foreground font-semibold text-foreground'
-              : 'border-transparent font-medium text-muted-foreground hover:text-foreground',
+              ? 'font-semibold text-foreground'
+              : 'font-medium text-muted-foreground hover:text-foreground',
             !p.enabled ? 'opacity-50' : '',
           ]"
           :title="p.enabled ? p.key : `${p.key}（已停用）`"
@@ -985,7 +1026,18 @@ onActivated(() => {
           }}</span>
         </button>
       </div>
-      <div ref="scrollEl" class="scrollbar-thin min-h-0 flex-1 overflow-auto px-5 py-4">
+      <div
+        ref="scrollEl"
+        class="pane-stack scrollbar-thin min-h-0 flex-1 overflow-auto px-5 py-4"
+        :class="[{ 'pane-transitioning': paneTransitioning }, paneDir > 0 ? 'dir-fwd' : 'dir-back']"
+      >
+        <Transition
+          name="pane"
+          @before-leave="paneTransitioning = true"
+          @after-leave="paneTransitioning = false"
+          @leave-cancelled="paneTransitioning = false"
+        >
+          <div :key="activeProvider" class="pane-item">
         <EmptyState v-if="modelsLoading && allEmpty">加载中…</EmptyState>
         <EmptyState v-else-if="allEmpty" :icon="Boxes">
           暂无模型定义。
@@ -1148,6 +1200,8 @@ onActivated(() => {
             </tr>
           </tbody>
         </table>
+          </div>
+        </Transition>
       </div>
       <div v-if="rows.length > pageSize" class="shrink-0 border-t px-5 py-2">
         <Pagination v-model:page="page" :page-count="pageCount" :total="rows.length" />
@@ -1340,3 +1394,57 @@ onActivated(() => {
     </Modal>
   </div>
 </template>
+
+<style scoped>
+/* 切 tab：内容区 grid 叠放。两方向都只向左侧越界——可滚动区不增长，
+   无横向滚动条闪现（dir-fwd 向右选 tab：旧内容向左滑出揭开新内容；
+   dir-back：新内容自左滑入盖住旧内容）。与路由纵向滑动同构。 */
+.pane-stack {
+  display: grid;
+}
+.pane-stack > * {
+  grid-area: 1 / 1;
+  min-width: 0;
+  min-height: 0;
+}
+.pane-stack.dir-fwd .pane-leave-active {
+  position: relative;
+  z-index: 1;
+  pointer-events: none;
+  animation: pane-out-left var(--dur-base) var(--ease-in) both;
+}
+.pane-stack.dir-back .pane-enter-active {
+  position: relative;
+  z-index: 1;
+  pointer-events: none;
+  animation: pane-in-right var(--dur-base) var(--ease-out) both;
+}
+.pane-stack.dir-back .pane-leave-active {
+  animation: pane-stay var(--dur-base) linear both;
+}
+.pane-stack.dir-fwd > .pane-leave-active {
+  background-color: hsl(var(--background));
+}
+.pane-stack.dir-back > .pane-enter-active {
+  background-color: hsl(var(--background));
+}
+@keyframes pane-out-left {
+  to {
+    transform: translateX(-100%);
+  }
+}
+@keyframes pane-in-right {
+  from {
+    transform: translateX(-100%);
+  }
+}
+@keyframes pane-stay {
+  to {
+    transform: translateX(0.01px);
+  }
+}
+/* 过渡期间表头压平，跟表身一起滑走/被揭开（同路由切换的处理） */
+.pane-transitioning .thead-sticky {
+  position: static;
+}
+</style>

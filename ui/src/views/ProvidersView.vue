@@ -761,11 +761,6 @@ function loadPluginList() {
 
     <!-- 上游服务：满版面板（直接铺进 main，不套卡片外壳） -->
     <div class="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <div class="flex shrink-0 items-center justify-end border-b px-5 py-3">
-        <Button size="sm" @click="newProvider">
-          <Plus class="size-4" /> 新建
-        </Button>
-      </div>
       <div class="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">
         <EmptyState v-if="store.loading && store.providers.length === 0">加载中…</EmptyState>
         <EmptyState v-else-if="store.providers.length === 0" :icon="Server">
@@ -806,6 +801,18 @@ function loadPluginList() {
                     <Trash2 class="size-3.5 text-destructive" />
                   </Button>
                 </div>
+              </td>
+            </tr>
+            <!-- 尾行：新建入口（与路由页/模型页同一惯例） -->
+            <tr class="last:border-0">
+              <td colspan="5" class="py-1">
+                <button
+                  type="button"
+                  class="flex w-full items-center gap-1.5 rounded-sm py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  @click="newProvider"
+                >
+                  <Plus class="size-3.5" /> 新建上游服务
+                </button>
               </td>
             </tr>
           </tbody>

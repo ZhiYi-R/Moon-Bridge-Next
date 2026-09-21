@@ -98,7 +98,7 @@ onUnmounted(() => {
 
 <template>
   <Teleport to="body">
-    <Transition name="modal">
+    <Transition name="modal" :duration="{ enter: 200, leave: 150 }">
       <div v-if="open" class="fixed inset-0 flex items-center justify-center p-4" :class="props.zClass ?? 'z-50'">
         <!-- 遮罩 -->
         <div class="modal-overlay absolute inset-0 bg-black/60" @click="requestClose" />
@@ -109,7 +109,7 @@ onUnmounted(() => {
           aria-modal="true"
           :aria-label="title"
           tabindex="-1"
-          class="modal-panel relative z-10 flex max-h-[85vh] w-full flex-col rounded-md border bg-card shadow-xl outline-none"
+          class="modal-panel glass-panel relative z-10 flex max-h-[85vh] w-full flex-col rounded-md border shadow-xl outline-none"
           :class="width ?? 'max-w-2xl'"
         >
           <div class="flex shrink-0 items-center justify-between px-5 py-3">
@@ -141,30 +141,30 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.modal-enter-active,
-.modal-leave-active {
-  transition: opacity 0.16s ease;
+/* WebKit 下 backdrop-filter 在 opacity<1 的元素/祖先内被整体跳过——
+   带模糊的遮罩与面板全程保持不透明：遮罩只渐变 background-color，
+   面板只动 transform。元素移除时机由 Transition 的 :duration 决定（根无过渡）。 */
+.modal-overlay {
+  transition: background-color var(--dur-base) var(--ease-out);
 }
-.modal-enter-from,
-.modal-leave-to {
-  opacity: 0;
+.modal-leave-active .modal-overlay {
+  transition-duration: calc(var(--dur-base) * 0.75);
+  transition-timing-function: var(--ease-in);
+}
+.modal-enter-from .modal-overlay,
+.modal-leave-to .modal-overlay {
+  background-color: transparent;
 }
 .modal-enter-active .modal-panel {
-  transition:
-    opacity 0.16s ease,
-    transform 0.16s ease;
+  transition: transform var(--dur-base) var(--ease-out);
 }
 .modal-leave-active .modal-panel {
-  transition:
-    opacity 0.12s ease,
-    transform 0.12s ease;
+  transition: transform calc(var(--dur-base) * 0.75) var(--ease-in);
 }
 .modal-enter-from .modal-panel {
-  opacity: 0;
   transform: translateY(10px) scale(0.98);
 }
 .modal-leave-to .modal-panel {
-  opacity: 0;
   transform: translateY(6px) scale(0.98);
 }
 </style>

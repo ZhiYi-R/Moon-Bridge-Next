@@ -158,6 +158,7 @@ onActivated(() => {
               v-for="r in routes"
               :key="r.alias"
               class="border-b transition-colors last:border-0 hover:bg-accent/40"
+              :class="{ 'row-edit-in': editAlias === r.alias }"
               @keydown="onRowKeydown($event, editAlias === r.alias)"
             >
               <template v-if="editAlias === r.alias">
@@ -197,7 +198,7 @@ onActivated(() => {
               </template>
             </tr>
             <!-- 尾行：常态是「新建路由」入口，点击原位展开成编辑行 -->
-            <tr v-if="!adding" class="last:border-0">
+            <tr v-if="!adding" class="row-edit-in last:border-0">
               <td colspan="4" class="py-1">
                 <button
                   type="button"
@@ -210,7 +211,7 @@ onActivated(() => {
               </td>
             </tr>
             <!-- 新增虚拟行 -->
-            <tr v-else class="border-b last:border-0" @keydown="onRowKeydown($event, true)">
+            <tr v-else class="row-edit-in border-b last:border-0" @keydown="onRowKeydown($event, true)">
               <td class="py-1 pr-2">
                 <Input v-model="form.alias" class="h-7 px-2 font-mono text-xs" placeholder="别名" autofocus />
               </td>
@@ -237,3 +238,17 @@ onActivated(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* 行内编辑进入：从上轻坠+淡入，读起来像行被「撑开」。
+   tr 的 transform 在部分 WebKit 内核不生效，届时优雅降级为纯淡入。 */
+.row-edit-in {
+  animation: row-edit-in var(--dur-base) var(--ease-out) both;
+}
+@keyframes row-edit-in {
+  from {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+}
+</style>
