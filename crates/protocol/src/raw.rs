@@ -104,6 +104,12 @@ pub struct RawMessage {
     pub headers: Vec<(String, String)>,
     #[serde(default = "default_body")]
     pub body: RawBody,
+    /// 会话身份覆写通道：仅 `client_request` 阶段生效——钩子把它改成客户端
+    /// 自带的会话 id（如 `x-opencode-session` 头值）即成为最高优先级身份源，
+    /// 写入 `ctx.session_id` 后走外部身份分支；设 nil = 否决宿主已提取的身份。
+    /// 其他阶段仅回读当前已解析值（改写无效果）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 fn default_body() -> RawBody {

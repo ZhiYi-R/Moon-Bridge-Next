@@ -59,6 +59,7 @@ pub async fn handle_request(
         status: None,
         headers: req_headers,
         body: RawBody::json(raw_body),
+        session_id: ctx.session_id.clone(),
     };
     match state
         .hooks
@@ -101,6 +102,10 @@ pub async fn handle_request(
         }
         RawVerdict::Pass => {}
     }
+    // 插件会话覆写：on_client_request_raw 改写 msg.session_id（客户端自带会话
+    // 头经插件转为身份源）优先于 extract_session 的结果——它是更显式的通道；
+    // 置 nil 即否决宿主提取值，回退到水印/新分配路径。
+    ctx.session_id = inbound.session_id.take().filter(|s| !s.is_empty());
     // 留存入站请求快照供 trace 落盘（inbound.body 随后被 take_json_body 消费，
     // 失败路径也需要它构造 trace）
     let client_request_snapshot = body_snapshot(&inbound.body);
@@ -236,6 +241,7 @@ pub async fn handle_request(
             status: None,
             headers: u.headers.clone(),
             body: RawBody::json(u.body.clone()),
+            session_id: ctx.session_id.clone(),
         };
         match state
             .hooks
@@ -536,6 +542,7 @@ async fn non_stream(
         status: Some(status),
         headers: resp_headers,
         body: RawBody::json(body_value),
+        session_id: ctx.session_id.clone(),
     };
     match state
         .hooks
@@ -633,6 +640,7 @@ async fn non_stream(
         status: Some(200),
         headers: vec![("content-type".to_string(), "application/json".to_string())],
         body: RawBody::json(client_json),
+        session_id: ctx.session_id.clone(),
     };
     match state
         .hooks
@@ -1113,6 +1121,7 @@ mod tests {
             status: None,
             headers: up.headers.clone(),
             body: RawBody::json(up.body.clone()),
+            session_id: None,
         }
     }
 

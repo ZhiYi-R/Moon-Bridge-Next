@@ -292,7 +292,9 @@ SQLite（rusqlite, bundled + WAL），手写版本化 migration，每表一个 D
 ```
 Client → axum: POST /v1/responses | /v1/messages | /v1/chat/completions
   → 认证(Bearer) / session 解析(session_id / previous_response_id / X-Codex-Window-Id)
-  → [RAW] on_client_request_raw            改 headers/body，可 short_circuit / abort
+  → [RAW] on_client_request_raw            改 headers/body，可 short_circuit / abort；
+    改写 msg.session_id = 覆写会话身份（客户端自带会话头经插件转为身份源，
+    优先于 extract_session 与 marker；置 nil = 否决宿主提取值）
   → 按入口路径选 ClientAdapter → to_core_request(raw) → CoreRequest
   → 会话水印：就地剥除请求内全部 marker → 解析/分配 ctx.session_id（见下）
   → 路由解析: alias → (provider, 上游 model) → Provider + 上游 Protocol
@@ -335,7 +337,22 @@ Client → axum: POST /v1/responses | /v1/messages | /v1/chat/completions
 >   表深 `session_table_depth` 默认 64，`<1` 钳到 1）还原；表里查不到的短 tag 合成
 >   确定性 `mb-{tag}`——同一 tag 反复回带恒落同一会话。短 tag 撞车时换新 tag 而非
 >   顶掉已有会话。
-> - **解析优先级**：外部显式身份 > marker 载荷 > 新分配。
+> - **解析优先级**：插件覆写（`on_client_request_raw` 写 `msg.session_id`，如把客户端
+>   自带 `x-opencode-session` 头转为身份源，见 `plugins/harness/`）>
+>   外部显式身份（body `session_id` / `previous_response_id` / `X-Codex-Window-Id`）>
+>   marker 载荷 > 新分配。插件覆写与外部身份都走 `ctx.session_id` 分支，
+>   其 marker 载荷同样是 `tag_from_id` 短 tag。
+> - **harness 预设（`plugins/harness/`）**：常见 agent 的会话标识提取插件，按需启用——
+>   头携带的提取后剥除原头（`opencode`：`x-opencode-session` / `x-session-affinity` /
+>   `x-session-id`；`codex`：`session-id` / `thread-id` / `x-codex-window-id`；
+>   `grok-build`：`x-grok-session-id` / `x-grok-conv-id`；`dsh`：
+>   `x-deepseek-harness-session-id`），body 语义无恙转发的只取不剥（`claude-code` 从
+>   `metadata.user_id` 取会话 UUID，兼容 1.x 扁平串与 2.x JSON blob；`kimi-code` 读
+>   `prompt_cache_key` / `metadata.user_id`；`dsh` 头缺失时回退 `dsh_session_log.
+>   session.id`）。身份写入 `msg.session_id` 后即成为最高优先级身份源，水印降级为
+>   客户端不带标识时的兜底。qwen-code 的 `X-Qwen-Code-Session-Id` 上游尚处提案且
+>   默认只对一方 host 注入，暂无预设——水印仍是它的身份通道。
+>   `plugins/utils/FxxkDax.lua` 只负责出站方向的头注入。
 > - **两处打标**：非流式 `tag_response` 把 `" [mb:<载荷>]"` 插进首个非 redacted 推理块的
 >   明文首部（前置空格剥除时连带吃掉，打标→剥除字节还原）；流式在首个可承载推理块的
 >   `BlockStart`（或首个裸推理增量）处向**同 index** 注入一条推理明文增量，marker 成为

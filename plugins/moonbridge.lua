@@ -149,6 +149,9 @@ MB = {}
 ---@field headers table[] 请求/响应头，保序数组 `{{k,v},...}`（配 mb.headers 操作）
 ---@field body any JSON table / 文本字符串 / nil；超上限时为 nil 且 body_truncated=true
 ---@field body_truncated boolean|nil
+---@field session_id string|nil 会话身份覆写通道：仅 client_request 阶段可写生效——
+---    改成客户端自带会话 id（如 x-opencode-session 头值）即成为最高优先级身份源；
+---    设 nil = 否决宿主已提取身份。其他阶段回读当前已解析值，改写无效果。
 
 ---@class MbRawChunk
 ---@field stage string "upstream_chunk"|"client_chunk"

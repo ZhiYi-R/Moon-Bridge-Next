@@ -133,6 +133,7 @@ pub fn raw_message_to_lua(lua: &Lua, m: &RawMessage, max_body_bytes: usize) -> R
     t.set("url", m.url.clone())?;
     t.set("status", m.status)?;
     t.set("headers", lua.to_value(&m.headers)?)?;
+    t.set("session_id", m.session_id.clone())?;
     if body_exceeds(&m.body, max_body_bytes) {
         t.set("body", LuaValue::Nil)?;
         t.set("body_truncated", true)?;
@@ -165,6 +166,9 @@ pub fn apply_lua_to_message(lua: &Lua, t: &Table, m: &mut RawMessage) -> Result<
     }
     if let Ok(meth) = t.get::<Option<String>>("method") {
         m.method = meth;
+    }
+    if let Ok(s) = t.get::<Option<String>>("session_id") {
+        m.session_id = s;
     }
     Ok(())
 }

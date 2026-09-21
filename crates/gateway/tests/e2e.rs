@@ -1796,6 +1796,54 @@ async fn e2e_session_marker_round_trips_and_never_reaches_upstream() {
     let _ = std::fs::remove_dir_all(&trace_dir);
 }
 
+/// 插件会话覆写：`on_client_request_raw` 写 `msg.session_id` 是最高优先级
+/// 身份源——客户端自带会话头（`x-opencode-session`）经插件转为 session，
+/// 水印 marker 降级为不带头时的兜底（生产问题：剥离 thinking 的客户端
+/// 让 marker 断链、亲和头逐请求漂移）。
+#[tokio::test]
+async fn e2e_plugin_session_id_overrides_watermark() {
+    let (state, _db, trace_dir) = setup_state_lua(
+        "sess-override",
+        include_str!("../../../plugins/harness/opencode.lua"),
+        &["raw_request"],
+        thinking_mock_body(),
+    )
+    .await;
+
+    // 带头请求：客户端身份胜出——不带 marker 也落成它的会话
+    let body = json!({
+        "model": "test-model", "max_tokens": 64,
+        "messages": [{ "role": "user", "content": "Hi" }], "stream": false
+    });
+    let headers = vec![("x-opencode-session".to_string(), "oc-sess-123".to_string())];
+    let resp = dispatch::handle_request(
+        state.clone(),
+        Protocol::Anthropic,
+        body,
+        headers,
+        None,
+    )
+    .await
+    .expect("dispatch 应成功");
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let out: Value = serde_json::from_slice(&bytes).unwrap();
+
+    let tr = traces(&trace_dir);
+    assert_eq!(tr.len(), 1);
+    assert_eq!(
+        tr[0]["sessionId"], "oc-sess-123",
+        "插件覆写的 session_id 应成为 ctx.session_id"
+    );
+    // 外部身份的 marker 载荷是 6-hex 短 tag（tag_from_id），非 uuid
+    let think = out["content"][0]["thinking"].as_str().unwrap();
+    let tag = tag_of(think).expect("响应应打水印");
+    assert_eq!(tag.len(), 6, "外部身份的载荷应是短 tag: {tag}");
+
+    let _ = std::fs::remove_dir_all(&trace_dir);
+}
+
 /// 活跃表淘汰/进程重启不再改判会话身份：uuid 载荷自带身份，带回即还原——
 /// 这正是长对话中 `x-opencode-session` 等下游亲和头不再漂移的保证。
 #[tokio::test]

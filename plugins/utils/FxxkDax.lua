@@ -13,6 +13,8 @@ MB = {
   requires = { sessionMarker = true },
 }
 
+-- 入站侧的 `x-opencode-session` 头剥离由 harness/opencode 插件负责；
+-- 本插件只管出站注入。
 function MB.on_upstream_request_raw(ctx, msg)
   msg.headers = mb.headers.set(msg.headers, "x-opencode-session", ctx.session_id or "no-session")
 end

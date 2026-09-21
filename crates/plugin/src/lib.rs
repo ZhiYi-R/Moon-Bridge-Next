@@ -129,6 +129,7 @@ mod tests {
             status: None,
             headers: vec![("content-type".into(), "application/json".into())],
             body: RawBody::json(json!({"model": "orig"})),
+            session_id: None,
         };
         let verdict = rt.on_upstream_request_raw(&ctx, &mut msg).await.unwrap();
         assert!(matches!(verdict, RawVerdict::Pass));
@@ -160,6 +161,7 @@ mod tests {
             status: None,
             headers: vec![],
             body: RawBody::json(json!({})),
+            session_id: None,
         };
         let verdict = rt.on_client_request_raw(&ctx, &mut msg).await.unwrap();
         match verdict {
@@ -284,6 +286,7 @@ mod tests {
             status: None,
             headers: vec![("content-type".into(), "application/json".into())],
             body: RawBody::json(json!({ "model": "orig", "max_tokens": 99999 })),
+            session_id: None,
         };
         let v = rt2.on_upstream_request_raw(&ctx, &mut msg).await.unwrap();
         assert!(matches!(v, RawVerdict::Pass));
@@ -413,6 +416,7 @@ mod tests {
             status: None,
             headers: vec![],
             body: RawBody::json(original.clone()),
+            session_id: None,
         };
         let v = rt.on_client_request_raw(&ctx, &mut msg).await.unwrap();
         assert!(matches!(v, RawVerdict::Pass), "降级后插件应正常放行: {v:?}");
@@ -470,6 +474,7 @@ mod tests {
             status: None,
             headers: vec![],
             body: RawBody::json(json!({"model": "m"})),
+            session_id: None,
         };
         let v = rt.on_client_request_raw(&ctx, &mut msg).await.unwrap();
         assert!(
