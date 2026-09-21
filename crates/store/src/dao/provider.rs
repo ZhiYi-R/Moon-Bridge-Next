@@ -140,6 +140,12 @@ impl Database {
             "DELETE FROM plugin_bindings WHERE scope = 'provider' AND scope_key = ?1",
             params![key],
         )?;
+        // 认证令牌包级联清理：secrets 表的 scope 约定为 `provider:{key}`
+        // （见 gateway::oauth::provider_scope），删除账户即销毁其凭据
+        tx.execute(
+            "DELETE FROM secrets WHERE scope = ?1",
+            params![format!("provider:{key}")],
+        )?;
         tx.commit()?;
         Ok(())
     }
