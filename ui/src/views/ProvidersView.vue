@@ -308,8 +308,8 @@ function toggleProtocolPanel(protocol: string) {
   }
 }
 
-async function loadModelsOnce() {
-  if (allModels.value.length > 0) return;
+// keep-alive 下组件常驻：模型目录在 Models 页导入后可能已变化，编辑器打开与页面激活时都要重拉
+async function loadModels() {
   allModels.value = await modelApi.list().catch(() => [] as ModelDef[]);
 }
 
@@ -389,7 +389,7 @@ async function newProvider() {
   expandedProtocol.value = null;
   providerOffers.value = [];
   originalOffers.value = [];
-  void loadModelsOnce();
+  void loadModels();
   await loadPluginStates("");
   takeSnapshot();
 }
@@ -413,7 +413,7 @@ async function editProvider(p: Provider) {
   error.value = null;
   editing.value = true;
   expandedProtocol.value = null;
-  void loadModelsOnce();
+  void loadModels();
   await loadOfferBindings(p.key);
   await loadPluginStates(p.key);
   takeSnapshot();
@@ -489,6 +489,8 @@ onActivated(() => {
     void store.load();
     void loadPluginList();
   }
+  // 模型清单只作勾选面板数据源，编辑器开着时刷新也安全（不触碰表单与三态绑定）
+  void loadModels();
   activated = true;
 });
 
