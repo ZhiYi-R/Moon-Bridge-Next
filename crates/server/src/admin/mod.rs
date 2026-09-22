@@ -29,7 +29,7 @@ use serde_json::Value;
 
 use crate::config::{AppConfig, AppPaths};
 
-/// admin 请求体上限（10MB）：够传插件脚本与大段 JSON 配置，又不至于被超大 body 拖垮。
+/// admin 请求体上限（10MB）：够传插件脚本与大段 JSON 配置，又不至于被过大的 body 耗尽内存。
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Clone)]

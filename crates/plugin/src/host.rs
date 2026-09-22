@@ -84,7 +84,7 @@ const DANGEROUS_GLOBALS: [&str; 9] = [
 /// `create_thread` 上挂载的那颗钩子只覆盖它自己那一层；插件内
 /// `coroutine.wrap(function() while true do end end)()` 会在一个全新、无钩子的线程里
 /// 死循环，绕过 `max_instructions` 与 `call_timeout`，并因 `Mutex<Lua>` 的 `MutexGuard` 跨 await
-/// 持有而永久卡死该插件的请求链路。
+/// 持有而永久阻塞该插件的请求链路。
 ///
 /// 做法：包一层 `coroutine.create`/`wrap`，线程创建后立即经宿主回调补挂载钩子。
 /// 两者都必须经**同一个 upvalue 构造函数**拿线程，不能让 `wrap` 去查全局

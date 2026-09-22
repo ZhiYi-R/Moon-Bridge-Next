@@ -551,7 +551,7 @@ async fn provider_endpoints_split_into_per_key_results() {
 #[tokio::test]
 async fn per_key_failure_is_independent() {
     let db = Arc::new(Database::open_in_memory().unwrap());
-    // 只对第二个 key 抛错：引擎级失败按端点独立，不拖垮其它行
+    // 只对第二个 key 抛错：引擎级失败按端点独立，不影响其它行
     let script = r#"
     MB = {}
     function MB.query(ctx)
@@ -782,7 +782,7 @@ async fn reset_at_accepts_number_and_string() {
     assert_eq!(quotas[0]["resetAt"], json!("1789616942"));
     // 字符串原样透传
     assert_eq!(quotas[1]["resetAt"], json!("每月 1 日"));
-    // 非法类型（bool）按 None 处理，不拖垮整条配额
+    // 非法类型（bool）按 None 处理，不使整条配额失效
     assert!(quotas[2].get("resetAt").is_none(), "{:?}", quotas[2]);
     assert_close(quotas[2]["leftPercent"].as_f64(), 95.0);
 }

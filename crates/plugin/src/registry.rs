@@ -2,7 +2,7 @@
 //!
 //! 过滤策略：按插件 manifest 声明的 capability 决定是否触发某类钩子——
 //! 未声明 `raw_stream` 的插件在流式每-chunk 完全不产生 Lua 调用（零开销）。
-//! 容错策略：单个插件钩子出错只记 warn 并跳过，不拖垮整条请求链路。
+//! 容错策略：单个插件钩子出错只记 warn 并跳过，不中断整条请求链路。
 
 use std::collections::HashMap;
 use std::sync::Arc;

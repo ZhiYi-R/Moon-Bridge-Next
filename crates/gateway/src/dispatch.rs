@@ -322,7 +322,7 @@ pub async fn handle_request(
                 let status = r.status();
                 let retryable = status.as_u16() == 429 || status.is_server_error();
                 if retryable && attempt + 1 < total {
-                    // 排空响应体（有界）：连接可复用且异常上游的大 body 不会拖垮内存
+                    // 排空响应体（有界）：连接可复用且异常上游的大 body 不会耗尽内存
                     let _ = read_body_capped(r, state.config.max_body_bytes).await;
                     tracing::warn!(
                         provider = %resolved.provider_key,

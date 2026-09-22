@@ -227,7 +227,7 @@ end
 - `os`、`io`、`loadfile`、`dofile`、`require`、`package` 六个危险全局整体不可用；
 - 指令数配额（默认 2 亿条）经调试钩子强制执行，覆盖插件自建的协程，死循环会被中止；
 - 内存上限（默认 1024 MB）与 wall-clock 执行超时拦截缓慢型失控；
-- 超大报体（默认阈值 100 MB）不展开为 Lua table，标记 `body_truncated` 后照常转发原始报文。
+- 过大的报文（默认阈值 100 MB）不展开为 Lua table，标记 `body_truncated` 后照常转发原始报文。
 
 ### 编写插件的参考材料
 

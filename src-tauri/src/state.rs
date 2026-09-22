@@ -111,7 +111,7 @@ impl ManagedState {
     /// `if let Some(h) = self.gateway.lock().unwrap().as_ref() { return self.status(); }`
     /// 在 edition 2021 下 `if let`  scrutinee 的临时量活到块结束，`MutexGuard` 仍被持有，
     /// 而 `status()` 再次获取同一把**非重入** `std::sync::Mutex` ⇒ 永久死锁，
-    /// 连带 `gateway_status` / `gateway_stop` / 托盘切换全部卡死。
+    /// 连带 `gateway_status` / `gateway_stop` / 托盘切换全部阻塞。
     /// 实测 edition 2021 与 2024 都会死锁，升级 edition 不是解法。
     fn has_live_gateway(&self) -> bool {
         let guard = self.gateway.lock().unwrap();

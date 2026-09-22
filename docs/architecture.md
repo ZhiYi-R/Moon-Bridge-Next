@@ -205,7 +205,7 @@ function MB.on_request(ctx, req) ... end -- 就地修改 req 即生效，亦可 
 
 - **清单**：`Manifest { name, version, scopes, capabilities, config_schema, entry }`。`name` 以 store 记录为权威。
 - **运行时**：每插件一个 `mlua::Lua`（`lua54 + async + send + serialize + vendored`），封装为 `Arc<tokio::sync::Mutex<Lua>>` 串行化；利用 Lua table 引用语义实现「就地修改 → 宿主回写」。
-- **注册表**：`LuaPluginRegistry` 串联多插件、`impl PluginHooks`，按 capability 过滤；单插件钩子出错只记 warn 并跳过，不拖垮请求链路。
+- **注册表**：`LuaPluginRegistry` 串联多插件、`impl PluginHooks`，按 capability 过滤；单插件钩子出错只记 warn 并跳过，不中断请求链路。
 - **启用条件 `MB.requires`（仅 app 层）**：脚本可额外声明 `MB.requires = { <网关配置键> = <期望值>, ... }`
   （bool / int / float / 字符串；提取时行级剥掉 `--` 注释，注释里的声明不生效）。`src-tauri`
   的 `plugin_save` 在**启用动作**（新建即启用、或停用→启用）时对照当前网关配置逐项校验，
@@ -229,10 +229,10 @@ function MB.on_request(ctx, req) ... end -- 就地修改 req 即生效，亦可 
 | `mb.crypto.{sha256,hmac_sha256,base64_encode,base64_decode}` | 上游签名/编码 |
 
 - **沙箱与配额**（`crates/plugin/src/quota.rs` + `host::sandbox`）：把 `os / io / loadfile / dofile / require / package` 六个全局**整体置 nil**（`require` 与 `package` 必须一起移除——留着它们等于留着 `require("io")` / `package.loadlib` 的重取通道），并施加四项硬性配额：
-  - **指令计数**：每插件一个 `ExecutionBudget`，经 Lua debug hook（`every_nth_instruction`，默认 step 2000）累加，超 `max_instructions`（默认 2 亿）即中止，中止死循环。因 Lua debug hook **按 `lua_State`（线程）生效且不被新建线程继承**，需两处补挂载：宿主侧 `call_async` 以 `create_thread + Thread::set_hook + into_async` 绑定本次调用的协程；插件侧则注入 `COROUTINE_PATCH` 覆写 `coroutine.create`/`wrap`，线程一诞生即经宿主回调 `__mb_bind_thread` 补挂载**同一颗**预算钩子。否则插件内 `coroutine.wrap(function() while true do end end)()` 会在全新无钩线程里死循环，绕过指令配额与超时，并因 `Mutex<Lua>` 的 `MutexGuard` 跨 await 持有而永久卡死该插件的请求链路。补丁内 `bind` 与 `new_thread` 均为 upvalue，插件覆写 `coroutine.create` 或置空 `__mb_bind_thread` 都无法造出无钩线程。
+  - **指令计数**：每插件一个 `ExecutionBudget`，经 Lua debug hook（`every_nth_instruction`，默认 step 2000）累加，超过 `max_instructions`（默认 2 亿）即中止，中止死循环。因 Lua debug hook **按 `lua_State`（线程）生效且不被新建线程继承**，需两处补挂载：宿主侧 `call_async` 以 `create_thread + Thread::set_hook + into_async` 绑定本次调用的协程；插件侧则注入 `COROUTINE_PATCH` 覆写 `coroutine.create`/`wrap`，线程一诞生即经宿主回调 `__mb_bind_thread` 补挂载**同一颗**预算钩子。否则插件内 `coroutine.wrap(function() while true do end end)()` 会在全新无钩线程里死循环，绕过指令配额与超时，并因 `Mutex<Lua>` 的 `MutexGuard` 跨 await 持有而永久阻塞该插件的请求链路。补丁内 `bind` 与 `new_thread` 均为 upvalue，插件覆写 `coroutine.create` 或置空 `__mb_bind_thread` 都无法造出无钩线程。
   - **内存上限**：`Lua::set_memory_limit`（默认 1024 MB），越界分配触发 `MemoryError`。
   - **执行超时**：hook 内附带 wall-clock 截止时间（`call_timeout`），覆盖缓慢（非死循环）的长计算。
-  - **body 降级**：raw body 超 `max_body_bytes` 时不展开为 Lua table（置 `nil` + `body_truncated` 标记），回写时保留原始报文，避免超大报文撑爆沙箱。阈值随 `GatewayConfig.max_body_bytes`（默认 100 MB），故大报文展开由内存上限（默认 1024 MB）作最终限制。
+  - **body 降级**：raw body 超过 `max_body_bytes` 时不展开为 Lua table（置 `nil` + `body_truncated` 标记），回写时保留原始报文，避免过大的报文耗尽沙箱内存。阈值随 `GatewayConfig.max_body_bytes`（默认 100 MB），故大报文展开由内存上限（默认 1024 MB）作最终限制。
   - `mb.http.request` 未显式指定超时则由 gateway bridge 施加默认超时（默认 30s），防止 raw 钩子内挂死。
   - 配额上限由 `SandboxLimits` 描述，gateway 从 `GatewayConfig` 派生注入。注意 `request_timeout_secs` **只**用于推导插件的 `call_timeout`；上游 HTTP 请求**刻意不设总超时**（长流式请求不应被网关截断），仅受连接与 egress 策略约束。
 - **HostBridge**（crates/plugin/src/bridge.rs）：受控宿主能力契约，由 gateway 实现并注入，维持 plugin 不依赖 gateway 的单向依赖。
@@ -570,7 +570,7 @@ Vue 3.5 + Vite 7 + TS 5 + Pinia + Vue Router + TailwindCSS 3 + shadcn-vue 风格
 - `src/lib/api.ts`：前后端契约层（DTO 类型 + command 封装，按领域分组）。
 - `src/stores/`：Pinia（gateway 状态、provider 列表）。
 - `src/router`：hash 路由（Tauri 自定义协议友好）。
-- `src/views/`：Dashboard（网关状态 + 用量 + Provider 概览）、Providers（完整 CRUD；可用模型选择器先列已选 chips，候选列表在搜索框聚焦时才展开下拉）、Models（模型 CRUD + 从 models.dev 搜索勾选批量导入 + provider 维度 Offer 管理，Offer 可绑定端点协议；两区可拖拽分栏）、Routes（别名 CRUD + 必填校验 + 可搜索模型下拉）、Plugins（在线脚本编辑 + 启停/增删 + 一键重启网关生效）、Usage（汇总卡片 + token 时序堆叠柱图 + 模型分布 Top 3 + 其他聚合 + 明细表，纯CSS/SVG 无额外依赖）、Balance（余额&健康看板：卡片引用上游 Provider 或手动 Key 列表（手动优先）+ 可选查询 URL + 新建时可从内置模板库填充脚本（new-api 中转/DeepSeek/Moonshot/SiliconFlow/OpenRouter/智谱/Kimi Coding Plan/Claude Code 等真实接口模板）+ 多 key 在同一卡片内逐行展示（掩码 key chip + 单 key 刷新）+ 按提供商分组 + 百分比/金额两种模式与卡片级显示切换 + 状态徽章 + 一键刷新 + 单列弹窗内测试拉取预览（逐 key 结果）+ 带编写指南的 Lua 脚本编辑）、Traces（主从布局 + 可拖宽列表 + ↑↓ 键盘导航 + 各阶段报文只读高亮，超 256KB 回退纯文本 + 删除）、Settings（网关分区默认展开）。
+- `src/views/`：Dashboard（网关状态 + 用量 + Provider 概览）、Providers（完整 CRUD；可用模型选择器先列已选 chips，候选列表在搜索框聚焦时才展开下拉）、Models（模型 CRUD + 从 models.dev 搜索勾选批量导入 + provider 维度 Offer 管理，Offer 可绑定端点协议；两区可拖拽分栏）、Routes（别名 CRUD + 必填校验 + 可搜索模型下拉）、Plugins（在线脚本编辑 + 启停/增删 + 一键重启网关生效）、Usage（汇总卡片 + token 时序堆叠柱图 + 模型分布 Top 3 + 其他聚合 + 明细表，纯CSS/SVG 无额外依赖）、Balance（余额&健康看板：卡片引用上游 Provider 或手动 Key 列表（手动优先）+ 可选查询 URL + 新建时可从内置模板库填充脚本（new-api 中转/DeepSeek/Moonshot/SiliconFlow/OpenRouter/智谱/Kimi Coding Plan/Claude Code 等真实接口模板）+ 多 key 在同一卡片内逐行展示（掩码 key chip + 单 key 刷新）+ 按提供商分组 + 百分比/金额两种模式与卡片级显示切换 + 状态徽章 + 一键刷新 + 单列弹窗内测试拉取预览（逐 key 结果）+ 带编写指南的 Lua 脚本编辑）、Traces（主从布局 + 可拖宽列表 + ↑↓ 键盘导航 + 各阶段报文只读高亮，超过 256KB 截断为纯文本 + 删除）、Settings（网关分区默认展开）。
 - `src/components/ui`：Button / Badge / Card / Input / Label / Modal（动画 + dirty 检查）/ Select / Switch / Pagination / ToastHost / CodeEditor（CodeMirror 6）等，精简 shadcn 风格。
 - `src/composables/`：`useConfirm`（Promise 化确认弹窗）、`useToast`（全局通知）、`useAutoPageSize`（实测行高分页 + 页首行锚定防漂移）、`usePointerDrag`（拖宽/分栏共用）。
 - 反馈与自适应：保存/删除统一走 toast；网关状态 4s 轮询；列表区分加载态与空态；表单网格 `auto-fit minmax` 随窗口宽度换列。
@@ -653,7 +653,7 @@ M8 余额&健康看板（一次性 Lua 查询脚本 + 定时调度 + 多 key 在
   tool_calls 链必 400」；Responses 入口 → Chat thinking 上游的凭据/推理回程有端到端回归
   （`e2e_reasoning_content_roundtrips_responses_to_chat`）。
 - **插件沙箱硬化**：危险全局移除 / 指令计数 / 内存上限 / 执行超时 / body 降级 / http 默认超时（见 §6），
-  均有回归测试（死循环中止、内存越界报错、超大 body 降级且保留原始报文、`require`/`package`
+  均有回归测试（死循环中止、内存越界报错、过大的 body 降级且保留原始报文、`require`/`package`
   逃逸通道被切断、`coroutine.wrap` 死循环仍被指令配额中止、且补丁不破坏协程正常语义）。
 - **trace 写入磁盘**：网关按 `GatewayConfig.trace_dir` 将每次请求的各阶段报文快照写入
   `<trace_dir>/<session>/<model>/<created_at>-<short_id>.json`（见 §7/§8）；流式请求的

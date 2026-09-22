@@ -430,7 +430,7 @@ fn mask_key(key: &str) -> String {
 ///
 /// 严格契约：`type` 必填且只认 `percentage|quota|counter`；`percentage` 至少有一个
 /// percent 字段，`quota`/`counter` 至少有一个 amount 字段。非法元素被剔除并把原因记进
-/// `payload.warnings`（追加到脚本已有的 warnings 后），不静默丢也不拖垮整份 payload。
+/// `payload.warnings`（追加到脚本已有的 warnings 后），不静默丢弃也不使整份 payload 失败。
 /// `quotas` 缺失或不是数组时整份 payload 原样返回（脚本诊断字段不干预）。
 fn normalize_quotas(ret: &Value) -> Value {
     let Some(quotas) = ret.get("quotas") else {

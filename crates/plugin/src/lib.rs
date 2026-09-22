@@ -379,7 +379,7 @@ mod tests {
         );
     }
 
-    /// 沙箱硬化：超大 raw body 降级为 nil + truncated 标记，且回写时保留原始报文。
+    /// 沙箱硬化：过大的 raw body 降级为 nil + truncated 标记，且回写时保留原始报文。
     #[tokio::test]
     async fn oversized_body_degraded_and_preserved() {
         let limits = SandboxLimits {
@@ -487,7 +487,7 @@ mod tests {
     ///
     /// 历史缺陷：Lua debug hook 按线程生效且不被新建协程继承，
     /// `coroutine.wrap(function() while true do end end)()` 绕过 `max_instructions`
-    /// 与 `call_timeout`，把该插件的 `Mutex<Lua>`（`MutexGuard` 跨 await 持有）永久卡死。
+    /// 与 `call_timeout`，把该插件的 `Mutex<Lua>`（`MutexGuard` 跨 await 持有）永久阻塞。
     ///
     /// 判定方式：每个用例产出一个「返回 (ok, err)」的表达式来起协程死循环。
     /// 若配额生效，必然 `ok == false` 且 err 含配额文案；循环真的跑完则为 SURVIVED，

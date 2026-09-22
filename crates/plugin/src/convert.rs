@@ -120,7 +120,7 @@ fn body_exceeds(body: &RawBody, limit: usize) -> bool {
 }
 
 /// `max_body_bytes`：body 降级阈值。超过时不展开为 Lua table（置 `body=nil` 并标记
-/// `body_truncated=true`），避免超大报文撑爆沙箱；回写时据此保留原始报文。
+/// `body_truncated=true`），避免过大的报文耗尽沙箱内存；回写时据此保留原始报文。
 pub fn raw_message_to_lua(lua: &Lua, m: &RawMessage, max_body_bytes: usize) -> Result<Table> {
     let t = lua.create_table()?;
     t.set("stage", stage_str(m.stage))?;
