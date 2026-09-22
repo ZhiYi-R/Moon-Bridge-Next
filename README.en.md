@@ -1,10 +1,41 @@
+<div align="center">
+
 # Moon Bridge Next
 
-[中文](README.md) · English
+### A local LLM gateway: protocol translation, Lua plugins, usage & quota dashboards
 
-Moon Bridge Next is a local LLM gateway that bridges the incompatible API protocols between clients and upstream model providers: the client sends requests to the gateway in the protocol it knows, and the gateway translates and forwards them in the upstream provider's protocol. OpenAI Responses, OpenAI Chat Completions, Anthropic Messages, and Google Gemini can be freely combined in either direction.
+[![License](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)]()
+[![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app/)
+[![Backend](https://img.shields.io/badge/backend-Rust-dea584.svg)](https://www.rust-lang.org/)
+[![Frontend](https://img.shields.io/badge/frontend-Vue%203-42b883.svg)](https://vuejs.org/)
 
-Beyond protocol translation, the gateway ships with a Lua plugin system — plugins can modify protocol-neutral request/response semantics, or rewrite the raw HTTP messages flowing in and out — plus usage metering, request tracing, multi-endpoint failover, and other supporting capabilities. Everything is configured in the bundled desktop app; no hand-maintained config files.
+[中文](README.md) · English · [Architecture](docs/architecture.md) · [Development](DEVELOPMENT.md)
+
+</div>
+
+## Why Moon Bridge
+
+Every vendor speaks a different model API: Claude Code talks Anthropic Messages, Codex talks Responses, most tools talk Chat Completions — switching upstream providers often means switching clients, rewriting configs, or not being able to use the provider at all.
+
+Moon Bridge Next is a local gateway between your clients and upstream providers: clients keep speaking the protocol they know, and the gateway translates it into whatever the upstream speaks. On top of translation it ships a Lua plugin system — plugins can modify protocol-neutral request/response semantics, or rewrite the raw HTTP messages flowing in and out. Everything is configured in the bundled management UI; no hand-maintained config files.
+
+- **Any-to-any across four protocols** — OpenAI Responses / Chat Completions / Anthropic Messages / Google Gemini, freely combined in either direction, streaming and non-streaming
+- **One plugin for every protocol** — semantic hooks operate on the unified Core IR so they apply to all four protocols at once; wire hooks read and write headers, bodies, and individual SSE chunks
+- **Usage & quota built in** — every request records five token counters, latency, and cost; quota plugins show per-key upstream balances, with 12 bundled adapters ready to bind
+- **Four-stage request tracing** — raw message snapshots of inbound, outbound, upstream response, and client response, the first place to check plugin rewrites and upstream issues
+- **Desktop app + headless server** — a desktop app that works out of the box, plus `moonbridge-server`, a single port hosting the gateway, the management API, and the management UI
+- **Credentials encrypted at rest** — provider keys and quota configuration under AES-GCM, with entry tokens, private-network allowlists, and egress proxy support
+
+## Screenshots
+
+|                     Dashboard                     |                    Usage                     |
+| :-----------------------------------------------: | :------------------------------------------: |
+| ![Dashboard](docs/screenshots/dashboard.png)      |  ![Usage](docs/screenshots/usage.png)        |
+|                  **Request Traces**               |              **Quota Dashboard**             |
+|   ![Traces](docs/screenshots/traces.png)          |  ![Quota](docs/screenshots/quota.png)        |
+|                  **Plugin Editor**                |               **Model Catalog**              |
+| ![Plugin Editor](docs/screenshots/plugin-editor.png) | ![Models](docs/screenshots/models.png)   |
 
 ## Protocol Support
 
@@ -38,6 +69,10 @@ Every request is recorded with its session, client-facing model, upstream model,
 
 With tracing enabled, the raw messages of every request are snapshotted to disk at four stages: inbound, outbound, upstream response, and client response. For streaming requests, the gateway reassembles the event stream into the complete message body before recording, so you can tell exactly "what the upstream actually sent" from "what the client actually received". The Traces page supports browsing, side-by-side inspection, and deletion — the primary means of verifying plugin rewrites and diagnosing upstream issues.
 
+### Quota Dashboard
+
+The Quota page groups by provider and shows the quota and health of every upstream endpoint key in a table: once a provider is bound to a **`quota`-category plugin** (a plugin class that never enters the request pipeline), the engine runs **`MB.query` once per endpoint key** and renders one row per key (masked key labels, independent status and quota figures, per-provider refresh). Bundled quota plugins work out of the box (new-api relays, DeepSeek, Moonshot/Kimi open platform, SiliconFlow, OpenRouter, Zhipu GLM Coding Plan, Kimi Coding Plan, CommandCode, Claude Code subscriptions, and more); you can also write your own on the Plugins page (sandboxed, with `mb.http.request` to reach upstream quota endpoints, returning a `type`-tagged quota contract — percentage / amount / counter, optionally with window duration and reset time). The provider editor offers a query interval (can disable scheduling), instance configuration (encrypted into the database), and a **test query** preview to validate before saving; when a key's query fails, its row is flagged and keeps the last successful result. The number and names of quota bars are entirely script-defined.
+
 ### Session Recognition
 
 Session identity is resolved with the following precedence: explicit identifiers carried by the request (the `session_id` or `previous_response_id` body fields, or the `X-Codex-Window-Id` header) come first. For clients that carry no session identifier at all (Qwen Code, for example), the gateway embeds an `[mb:<payload>]` marker at the head of the assistant's **reasoning (chain-of-thought) plaintext**; when the client returns the full conversation history on the next turn, the session is recognized from that marker. For gateway-assigned sessions the payload is the session UUID itself, so the identity does not drift when the active-session table evicts the entry or the gateway restarts (turns without a reasoning block carry no marker). The marker is stripped before anything is forwarded upstream — it never enters the model's context and cannot be imitated by the model. The feature can be disabled in Settings; even then, inbound residual markers continue to be stripped. Session recognition determines the isolation granularity of the plugin API `mb.session` and the session-based organization of trace directories.
@@ -46,33 +81,7 @@ Session identity is resolved with the following precedence: explicit identifiers
 
 The desktop gateway can require an access token (`auth_token`) on its entry points; when configured, client POST requests must carry `Authorization: Bearer <token>`. `GET /health` and `GET /v1/models` remain public as existing behavior. With no token, the desktop gateway performs no entry validation, which is suitable only for loopback listening; Web mode requires separate admin and gateway tokens.
 
-### Desktop Application
-
-All management happens in the UI: Dashboard (gateway status, usage, provider overview), Providers (endpoints and keys), Models (catalog import and offers), Routes (aliases), Plugins (in-app script editing, enable/disable, effective after gateway restart), Usage (charts and details), Quota (per-key quota dashboard), Traces (message browsing), and Settings (gateway parameters). The system tray provides window recall, one-click gateway start/stop, and quit.
-
-### Server Deployment (Web Mode)
-
-For headless deployments, use `moonbridge-server`: one port serves the LLM gateway, the `/api/*` management REST API, and the frontend static files. Open the address in a browser and enter the admin token to use the same management UI as the desktop app.
-
-- Supply the admin token with `--admin-token` / `MOONBRIDGE_ADMIN_TOKEN`; it is used only by the management API and is never stored or echoed. Supply the gateway token with `--gateway-token` / `MOONBRIDGE_GATEWAY_TOKEN`, or use the existing configured token. It must be non-empty and different from the admin token.
-- When upgrading from a shared-token release, put the old value in `MOONBRIDGE_GATEWAY_TOKEN` and generate a different admin token; model clients keep their existing key, while the browser signs in with the new admin token. The web token is held only in page memory, so refresh requires signing in again; the UI is protected by CSP.
-- The management API returns `authToken: null`; saving `null` or an empty value preserves the existing gateway token, while an explicit update persists a new gateway token. Saving unrelated settings does not persist an environment override.
-- The multi-stage `Dockerfile` builds the frontend, compiles the server, and runs a slim image as uid 10001; `deploy/soul/` contains a Docker Compose example. “Restart gateway” gracefully drains requests in-process, runs lifecycle hooks, and rebinds without a supervisor; status reports the actual bound address. Each gateway generation has one quota scheduler, and restart cancels the previous generation's tasks.
-- For public exposure, place a reverse proxy in front for TLS termination, and protect the two tokens separately.
-
-### Credential Storage and Upgrade Backups
-
-The default file database encrypts provider credentials and quota-query configuration uniformly with AES-GCM; V13 migrates legacy data and encryption metadata transactionally. The default key file is `<db>.key`; use `--key-file` / `MOONBRIDGE_KEY_FILE` to choose another path. Unix key files use mode `0600`; Windows wraps the key with current-user DPAPI, so recovery is bound to that account. Missing or incorrect keys fail closed rather than falling back to plaintext.
-
-Back up the database and key file together. Before upgrading, keep a separate database backup: an old image cannot directly roll back against a database written by the new encrypted library; restore the pre-upgrade database and matching credential material to roll back. The frontend may still handle credentials while editing or querying; encryption protects the listed fields at rest, not the entire database, configuration, or traces.
-
-### Quota Query Security Boundaries
-
-Quota-script HTTP requests may reach only the same origin or an explicitly authorized origin; private and cloud-metadata addresses are denied by default. To allow a private origin, set `MOONBRIDGE_QUOTA_PRIVATE_ORIGINS` at startup to a JSON array of exact origins, for example `["https://quota.internal.example:8443"]`; quota configuration cannot grant access, and metadata endpoints remain forbidden. Requests do not use the system proxy, do not follow redirects, and pin the validated DNS address; decompressed responses are limited to 1 MiB, with a 30-second per-request timeout and a 45-second per-provider timeout.
-
-When `egressProxy` is explicitly configured, quota HTTP reports proxy use as unsupported instead of silently going direct; gateway inference requests still support the proxy. Script results of `nil` or an invalid `status` are errors. The new-api plugin computes balance from current `data.quota / quota_per_unit` (default 500000), not `used_quota`; the Kimi plugin tolerates a single available quota window.
-
-## Usage
+## Quick Start
 
 1. Launch the app; the gateway listens on `127.0.0.1:38440` by default (configurable in Settings).
 2. Add a provider on the Providers page: select the protocol, then enter the base URL and API key. Add more endpoints for failover if needed.
@@ -83,6 +92,8 @@ When `egressProxy` is explicitly configured, quota HTTP reports proxy use as uns
    - Anthropic-protocol clients: set the base URL to `http://127.0.0.1:38440`;
    - API key field: use the gateway's `auth_token` if configured; otherwise any non-empty placeholder works.
 6. Assemble plugins as needed on the Plugins page; save and restart the gateway to apply.
+
+See [DEVELOPMENT.md](DEVELOPMENT.md) for building from source; the frontend can also run standalone with demo data via `VITE_USE_MOCK=1 npm run dev`.
 
 ## Plugin System
 
@@ -231,6 +242,64 @@ Each plugin owns a dedicated Lua VM running in a sandbox:
 - `plugins/examples/raw_rewrite.lua` — wire-layer example: authorization checks, outbound header rewrites, body patching, heartbeat-chunk dropping;
 - `plugins/utils/FxxkDax.lua` — a minimal plugin in production use: injects the session-identifier header its upstream requires;
 - `plugins/moonbridge.lua` — an LSP stub: add it to your lua-language-server workspace library for completion and type hints on `MB` and `mb`. In VS Code, for example: `"Lua.workspace.library": { "/path/to/moon-bridge-next/plugins": true }` in settings.json.
+
+## Deployment
+
+### Desktop App
+
+All management happens in the UI: Dashboard (gateway status, usage, provider overview), Providers (endpoints and keys), Models (catalog import and offers), Routes (aliases), Plugins (in-app script editing, enable/disable, effective after gateway restart), Usage (charts and details), Quota (per-key quota dashboard), Traces (message browsing), and Settings (gateway parameters). The system tray provides window recall, one-click gateway start/stop, and quit.
+
+### Server Deployment (Web Mode)
+
+For headless deployments, use `moonbridge-server`: one port serves the LLM gateway, the `/api/*` management REST API, and the frontend static files. Open the address in a browser and enter the admin token to use the same management UI as the desktop app.
+
+- Supply the admin token with `--admin-token` / `MOONBRIDGE_ADMIN_TOKEN`; it is used only by the management API and is never stored or echoed. Supply the gateway token with `--gateway-token` / `MOONBRIDGE_GATEWAY_TOKEN`, or use the existing configured token. It must be non-empty and different from the admin token.
+- When upgrading from a shared-token release, put the old value in `MOONBRIDGE_GATEWAY_TOKEN` and generate a different admin token; model clients keep their existing key, while the browser signs in with the new admin token. The web token is held only in page memory, so refresh requires signing in again; the UI is protected by CSP.
+- The management API returns `authToken: null`; saving `null` or an empty value preserves the existing gateway token, while an explicit update persists a new gateway token. Saving unrelated settings does not persist an environment override.
+- The multi-stage `Dockerfile` builds the frontend, compiles the server, and runs a slim image as uid 10001; `deploy/soul/` contains a Docker Compose example. "Restart gateway" gracefully drains requests in-process, runs lifecycle hooks, and rebinds without a supervisor; status reports the actual bound address. Each gateway generation has one quota scheduler, and restart cancels the previous generation's tasks.
+- For public exposure, place a reverse proxy in front for TLS termination, and protect the two tokens separately.
+
+### Credential Storage and Upgrade Backups
+
+The default file database encrypts provider credentials and quota-query configuration uniformly with AES-GCM; V13 migrates legacy data and encryption metadata transactionally. The default key file is `<db>.key`; use `--key-file` / `MOONBRIDGE_KEY_FILE` to choose another path. Unix key files use mode `0600`; Windows wraps the key with current-user DPAPI, so recovery is bound to that account. Missing or incorrect keys fail closed rather than falling back to plaintext.
+
+Back up the database and key file together. Before upgrading, keep a separate database backup: an old image cannot directly roll back against a database written by the new encrypted library; restore the pre-upgrade database and matching credential material to roll back. The frontend may still handle credentials while editing or querying; encryption protects the listed fields at rest, not the entire database, configuration, or traces.
+
+### Quota Query Security Boundaries
+
+Quota-script HTTP requests may reach only the same origin or an explicitly authorized origin; private and cloud-metadata addresses are denied by default. To allow a private origin, set `MOONBRIDGE_QUOTA_PRIVATE_ORIGINS` at startup to a JSON array of exact origins, for example `["https://quota.internal.example:8443"]`; quota configuration cannot grant access, and metadata endpoints remain forbidden. Requests do not use the system proxy, do not follow redirects, and pin the validated DNS address; decompressed responses are limited to 1 MiB, with a 30-second per-request timeout and a 45-second per-provider timeout.
+
+When `egressProxy` is explicitly configured, quota HTTP reports proxy use as unsupported instead of silently going direct; gateway inference requests still support the proxy. Script results of `nil` or an invalid `status` are errors. The new-api plugin computes balance from current `data.quota / quota_per_unit` (default 500000), not `used_quota`; the Kimi plugin tolerates a single available quota window.
+
+## FAQ
+
+<details>
+<summary><strong>When do plugin changes take effect?</strong></summary>
+
+Plugins are loaded into the Lua runtime when the gateway starts. After creating, editing, enabling, disabling, or deleting a plugin on the Plugins page, click "Restart gateway" to apply — in-flight requests are drained in-process, `shutdown`/`init` lifecycle hooks run, and the listener is rebound. The app itself does not need a restart.
+
+</details>
+
+<details>
+<summary><strong>Why are there no traces?</strong></summary>
+
+Traces require a `trace_dir`, which desktop and Web modes enable by default under the data directory. To keep only metadata without message bodies, turn off "record request/response bodies" in Settings. Traces are also pruned by modification time, keeping the most recent N entries (500 by default) — older files are removed automatically.
+
+</details>
+
+<details>
+<summary><strong>Can quota queries reach private-network addresses?</strong></summary>
+
+Not by default — quota-script HTTP requests deny private and cloud-metadata addresses. To allow specific origins, whitelist exact origins via the `MOONBRIDGE_QUOTA_PRIVATE_ORIGINS` environment variable (see "Quota Query Security Boundaries" above).
+
+</details>
+
+<details>
+<summary><strong>Where is my data stored?</strong></summary>
+
+Desktop and Web modes share the application data directory (`com.moonbridge.next`) by default: the `moonbridge.db` database, the `moonbridge.db.key` key file, the plugins directory, and the traces directory. The server can point elsewhere with `--config-dir` / `--data-dir` / `--key-file`.
+
+</details>
 
 ## Documentation
 

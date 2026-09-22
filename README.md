@@ -1,10 +1,41 @@
+<div align="center">
+
 # Moon Bridge Next
 
-[English](README.en.md) · 中文
+### 本地 LLM 网关：协议互转 · Lua 插件 · 用量与额度看板
 
-Moon Bridge Next 是一个本地 LLM 网关，把客户端和上游模型服务之间互不兼容的 API 协议打通：客户端用它熟悉的协议把请求发给网关，网关翻成上游服务商的协议再转发出去。OpenAI Responses、OpenAI Chat Completions、Anthropic Messages、Google Gemini 四种协议任意组合均可互转。
+[![License](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)]()
+[![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app/)
+[![Backend](https://img.shields.io/badge/backend-Rust-dea584.svg)](https://www.rust-lang.org/)
+[![Frontend](https://img.shields.io/badge/frontend-Vue%203-42b883.svg)](https://vuejs.org/)
 
-协议翻译之外，网关还内置 Lua 插件系统——插件既能修改协议无关的请求/响应语义，也能直接改写进出的原始 HTTP 报文；另有用量计量、请求留痕（Traces）、多端点故障转移等配套能力。所有配置都在自带的桌面应用里完成，不需要手工维护配置文件。
+[English](README.en.md) · 中文 · [架构文档](docs/architecture.md) · [开发指南](DEVELOPMENT.md)
+
+</div>
+
+## 为什么用 Moon Bridge
+
+各家的模型 API 协议互不兼容：Claude Code 说 Anthropic Messages，Codex 说 Responses，大多数工具说 Chat Completions——换一个上游服务商，往往意味着换客户端、改配置，或者干脆用不了。
+
+Moon Bridge Next 是一台架在客户端与上游之间的本地网关：客户端继续用它熟悉的协议，网关负责翻译成上游的协议再转发。协议翻译之外还有一套 Lua 插件系统，既能修改协议无关的请求/响应语义，也能直接改写进出的原始 HTTP 报文。所有配置都在自带的管理界面里完成，不需要手工维护配置文件。
+
+- **四种协议任意互转**——OpenAI Responses / Chat Completions / Anthropic Messages / Google Gemini，入口与上游自由组合，流式与非流式全覆盖
+- **一个插件管所有协议**——语义层钩子操作统一的 Core IR，写一次对全部协议生效；报文层钩子直接读写 headers、body、乃至逐 SSE chunk
+- **用量与额度内建**——每次请求记录五类 token、延迟、费用；配额插件按 key 展示上游余额，12 个内置适配器开箱即用
+- **四阶段请求留痕**——入站、出站、上游响应、客户端响应的原始报文快照落盘，排查插件改写与上游问题的第一手现场
+- **桌面 + 无头双形态**——桌面应用开箱即用；`moonbridge-server` 单端口托管网关、管理 API 与管理页面，适合服务器部署
+- **凭据静态加密**——Provider key 与配额配置 AES-GCM 落盘，入口令牌、私网白名单、egress 代理均可配置
+
+## 界面截图
+
+|                    仪表盘                     |                  用量计量                  |
+| :-------------------------------------------: | :----------------------------------------: |
+|  ![仪表盘](docs/screenshots/dashboard.png)    |   ![用量](docs/screenshots/usage.png)      |
+|                  **调用追踪**                 |                **额度看板**                |
+|   ![调用追踪](docs/screenshots/traces.png)    |   ![额度](docs/screenshots/quota.png)      |
+|                 **插件编辑器**                |                **模型目录**                |
+| ![插件编辑器](docs/screenshots/plugin-editor.png) | ![模型](docs/screenshots/models.png)   |
 
 ## 协议支持
 
@@ -21,7 +52,7 @@ Moon Bridge Next 是一个本地 LLM 网关，把客户端和上游模型服务�
 
 另有 `GET /health`（健康检查）与 `GET /v1/models`（模型列表）两个辅助接口。
 
-## 功能概览
+## 功能特性
 
 ### Provider 与模型管理
 
@@ -50,33 +81,7 @@ Moon Bridge Next 是一个本地 LLM 网关，把客户端和上游模型服务�
 
 桌面网关可为自身入口配置访问令牌（`auth_token`），配置后客户端的 POST 请求须携带 `Authorization: Bearer <token>`。`GET /health` 与 `GET /v1/models` 继续保持公开，这是既有行为。桌面模式未配置令牌时不做入口校验，仅适用于回环监听；Web 模式必须配置独立的管理令牌和网关令牌。
 
-### 桌面应用
-
-所有管理工作在图形界面完成：Dashboard（网关状态、用量与 Provider 概览）、Providers（端点与密钥）、Models（目录导入与 Offer）、Routes（别名）、Plugins（在线脚本编辑、启停，重启网关生效）、Usage（图表与明细）、Quota（额度看板）、Traces（报文浏览）、Settings（网关参数）。系统托盘提供主窗口唤出、网关一键启停与退出。
-
-### 服务器部署（Web 模式）
-
-不带桌面的服务器场景可用无头服务端 `moonbridge-server`：同一端口同时提供 LLM 网关、`/api/*` 管理 REST API 与前端页面的静态托管——浏览器打开地址、填入 admin token 即可使用与桌面端相同的管理界面。
-
-- 管理令牌由 `--admin-token` / `MOONBRIDGE_ADMIN_TOKEN` 提供，仅用于管理 API，不保存、不回显。网关令牌由 `--gateway-token` / `MOONBRIDGE_GATEWAY_TOKEN` 或既有配置提供，不能为空，也不能与管理令牌相同。
-- 从旧版共享令牌升级时，将旧值放入 `MOONBRIDGE_GATEWAY_TOKEN`，另生成不同的管理令牌；模型客户端无需改 key，浏览器改用新管理令牌登录。Web 登录令牌仅保存在页面内存，刷新需重新登录；页面提供 CSP 防护。
-- 管理 API 读取配置时 `authToken` 为 `null`；保存配置传 `null` 或空值保留既有网关令牌，只有显式更新才持久化新网关令牌。无关配置保存不会将环境变量覆盖值写入配置。
-- 提供多阶段 `Dockerfile`（构建前端 + 编译服务端 + slim 运行时，uid 10001），`deploy/soul/` 有 docker compose 部署样例。「重启网关」在进程内排空请求、执行生命周期钩子后重新监听，不依赖 supervisor；状态显示实际绑定地址。每代网关只有一个配额调度器，重启取消旧任务。
-- 公网暴露时建议前置反向代理（TLS 终止），并分别保管两种令牌。
-
-### 凭据存储与升级备份
-
-默认文件数据库对 Provider 凭据与配额查询配置统一使用 AES-GCM 加密，V13 在事务中迁移旧数据与加密元数据。密钥文件默认位于 `<db>.key`，服务端可用 `--key-file` / `MOONBRIDGE_KEY_FILE` 指定。Unix 文件权限为 `0600`；Windows 使用当前用户 DPAPI 包装密钥，恢复受该账户绑定限制。已有加密数据缺少密钥或密钥错误时拒绝打开，不回退为明文。
-
-备份必须同时保留数据库和密钥文件。升级前另存数据库备份：旧镜像不能直接回滚使用新加密数据库，回退须恢复升级前数据库及其匹配的凭据材料。前端在编辑或查询时仍可能处理凭据，加密保护的是上述字段的静态存储，并非整个数据库、配置或 trace。
-
-### 配额查询安全边界
-
-配额脚本的 HTTP 请求仅可访问同源或明确授权的 origin，默认拒绝私网与云元数据地址。确需访问私网时，在启动环境设置 `MOONBRIDGE_QUOTA_PRIVATE_ORIGINS` 为精确 origin 的 JSON 数组（例如 `["https://quota.internal.example:8443"]`），不能通过配额配置自行放行；元数据地址始终禁止。请求不使用系统代理、不跟随重定向，并固定已校验的 DNS 地址；响应解压后最多 1 MiB，单次 HTTP 最长 30 秒、单个 Provider 最长 45 秒。
-
-显式配置 `egressProxy` 时，配额 HTTP 会明确报不支持代理，不会静默直连；网关推理请求仍支持代理。脚本返回 `nil` 或非法 `status` 均视为错误。new-api 插件按当前 `data.quota / quota_per_unit`（默认 500000）计算余额，不使用 `used_quota` 代替余额；Kimi 插件允许仅一个配额窗口可用。
-
-## 使用方式
+## 快速开始
 
 1. 启动应用，网关默认监听 `127.0.0.1:38440`（可在 Settings 中修改）。
 2. 在 Providers 页新增上游：选择协议，填写 base URL 与 API Key；需要高可用时可追加多个端点。
@@ -87,6 +92,8 @@ Moon Bridge Next 是一个本地 LLM 网关，把客户端和上游模型服务�
    - Anthropic 协议客户端：base URL 设为 `http://127.0.0.1:38440`；
    - API Key 一栏：网关配置了 `auth_token` 则填该值，否则填任意非空占位值。
 6. 在 Plugins 页按需装配插件，保存后重启网关生效。
+
+从源码构建的方式见 [DEVELOPMENT.md](DEVELOPMENT.md)；前端脱离后端也可用 `VITE_USE_MOCK=1 npm run dev` 以演示数据启动界面。
 
 ## 插件系统
 
@@ -235,6 +242,64 @@ end
 - `plugins/examples/raw_rewrite.lua`——报文层示例：鉴权检查、出站头改写、body 补丁、心跳 chunk 丢弃；
 - `plugins/utils/FxxkDax.lua`——生产在用的最小插件：为出站请求注入上游要求的会话标识头；
 - `plugins/moonbridge.lua`——LSP stub：把它加入 lua-language-server 的工作区库即可获得 `MB` 与 `mb` 的补全和类型提示。以 VS Code 为例，在 settings.json 中配置：`"Lua.workspace.library": { "/path/to/moon-bridge-next/plugins": true }`。
+
+## 部署形态
+
+### 桌面应用
+
+所有管理工作在图形界面完成：Dashboard（网关状态、用量与 Provider 概览）、Providers（端点与密钥）、Models（目录导入与 Offer）、Routes（别名）、Plugins（在线脚本编辑、启停，重启网关生效）、Usage（图表与明细）、Quota（额度看板）、Traces（报文浏览）、Settings（网关参数）。系统托盘提供主窗口唤出、网关一键启停与退出。
+
+### 服务器部署（Web 模式）
+
+不带桌面的服务器场景可用无头服务端 `moonbridge-server`：同一端口同时提供 LLM 网关、`/api/*` 管理 REST API 与前端页面的静态托管——浏览器打开地址、填入 admin token 即可使用与桌面端相同的管理界面。
+
+- 管理令牌由 `--admin-token` / `MOONBRIDGE_ADMIN_TOKEN` 提供，仅用于管理 API，不保存、不回显。网关令牌由 `--gateway-token` / `MOONBRIDGE_GATEWAY_TOKEN` 或既有配置提供，不能为空，也不能与管理令牌相同。
+- 从旧版共享令牌升级时，将旧值放入 `MOONBRIDGE_GATEWAY_TOKEN`，另生成不同的管理令牌；模型客户端无需改 key，浏览器改用新管理令牌登录。Web 登录令牌仅保存在页面内存，刷新需重新登录；页面提供 CSP 防护。
+- 管理 API 读取配置时 `authToken` 为 `null`；保存配置传 `null` 或空值保留既有网关令牌，只有显式更新才持久化新网关令牌。无关配置保存不会将环境变量覆盖值写入配置。
+- 提供多阶段 `Dockerfile`（构建前端 + 编译服务端 + slim 运行时，uid 10001），`deploy/soul/` 有 docker compose 部署样例。「重启网关」在进程内排空请求、执行生命周期钩子后重新监听，不依赖 supervisor；状态显示实际绑定地址。每代网关只有一个配额调度器，重启取消旧任务。
+- 公网暴露时建议前置反向代理（TLS 终止），并分别保管两种令牌。
+
+### 凭据存储与升级备份
+
+默认文件数据库对 Provider 凭据与配额查询配置统一使用 AES-GCM 加密，V13 在事务中迁移旧数据与加密元数据。密钥文件默认位于 `<db>.key`，服务端可用 `--key-file` / `MOONBRIDGE_KEY_FILE` 指定。Unix 文件权限为 `0600`；Windows 使用当前用户 DPAPI 包装密钥，恢复受该账户绑定限制。已有加密数据缺少密钥或密钥错误时拒绝打开，不回退为明文。
+
+备份必须同时保留数据库和密钥文件。升级前另存数据库备份：旧镜像不能直接回滚使用新加密数据库，回退须恢复升级前数据库及其匹配的凭据材料。前端在编辑或查询时仍可能处理凭据，加密保护的是上述字段的静态存储，并非整个数据库、配置或 trace。
+
+### 配额查询安全边界
+
+配额脚本的 HTTP 请求仅可访问同源或明确授权的 origin，默认拒绝私网与云元数据地址。确需访问私网时，在启动环境设置 `MOONBRIDGE_QUOTA_PRIVATE_ORIGINS` 为精确 origin 的 JSON 数组（例如 `["https://quota.internal.example:8443"]`），不能通过配额配置自行放行；元数据地址始终禁止。请求不使用系统代理、不跟随重定向，并固定已校验的 DNS 地址；响应解压后最多 1 MiB，单次 HTTP 最长 30 秒、单个 Provider 最长 45 秒。
+
+显式配置 `egressProxy` 时，配额 HTTP 会明确报不支持代理，不会静默直连；网关推理请求仍支持代理。脚本返回 `nil` 或非法 `status` 均视为错误。new-api 插件按当前 `data.quota / quota_per_unit`（默认 500000）计算余额，不使用 `used_quota` 代替余额；Kimi 插件允许仅一个配额窗口可用。
+
+## 常见问题
+
+<details>
+<summary><strong>插件改动什么时候生效？</strong></summary>
+
+插件在网关启动时装载进 Lua 运行时。在 Plugins 页新建、编辑、启停或删除后，点击「重启网关」生效——进程内排空在途请求、执行 `shutdown`/`init` 生命周期钩子后重新监听，不需要重启应用。
+
+</details>
+
+<details>
+<summary><strong>没有 trace 是为什么？</strong></summary>
+
+Trace 需要 `trace_dir` 配置，桌面与 Web 模式默认开启到数据目录下。如果只希望记录元数据而不落报文体，在设置中关闭「trace 记录请求/响应体」。另外 trace 按 mtime 只保留最近 N 条（默认 500），更早的会被自动清理。
+
+</details>
+
+<details>
+<summary><strong>配额查询能访问内网地址吗？</strong></summary>
+
+默认不能——配额脚本的 HTTP 请求拒绝私网与云元数据地址。确需访问时，用 `MOONBRIDGE_QUOTA_PRIVATE_ORIGINS` 环境变量按精确 origin 白名单放行（见上方「配额查询安全边界」）。
+
+</details>
+
+<details>
+<summary><strong>数据存在哪里？</strong></summary>
+
+桌面与 Web 默认共用应用数据目录（`com.moonbridge.next`）：数据库 `moonbridge.db`、密钥文件 `moonbridge.db.key`、插件目录、trace 目录。服务端可用 `--config-dir` / `--data-dir` / `--key-file` 显式指定其它位置。
+
+</details>
 
 ## 文档
 
