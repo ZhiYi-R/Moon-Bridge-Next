@@ -173,6 +173,7 @@ impl LuaRuntime {
             capabilities: Default::default(),
             config_schema: None,
             entry: None,
+            fs_read_allow: Vec::new(),
         };
         let Ok(mb) = lua.globals().get::<Table>("MB") else {
             return Ok(fallback);
@@ -182,6 +183,7 @@ impl LuaRuntime {
         let scopes: Vec<String> = mb.get("scopes").unwrap_or_default();
         let caps: Vec<String> = mb.get("capabilities").unwrap_or_default();
         let entry: Option<String> = mb.get("entry").ok().flatten();
+        let fs_read_allow: Vec<String> = mb.get("fs_read_allow").unwrap_or_default();
         let config_schema = match mb.get::<LuaValue>("config_schema") {
             Ok(LuaValue::Nil) | Err(_) => None,
             Ok(v) => lua.from_value::<serde_json::Value>(v).ok(),
@@ -194,6 +196,7 @@ impl LuaRuntime {
             capabilities: caps.into_iter().collect(),
             config_schema,
             entry,
+            fs_read_allow,
         })
     }
 
@@ -235,6 +238,31 @@ impl LuaRuntime {
         let args = lua.to_value(ctx)?;
         self.budget.begin(self.limits.call_timeout);
         let ret: LuaValue = self.call_hook(&lua, f, args).await?;
+        match ret {
+            LuaValue::Nil => Ok(serde_json::Value::Null),
+            other => Ok(lua.from_value(other)?),
+        }
+    }
+
+    /// 多参形态：`MB.<name>(args...)`（如 `auth_refresh(ctx, bundle)`）。
+    pub async fn call_mb(
+        &self,
+        name: &str,
+        args: &[serde_json::Value],
+    ) -> Result<serde_json::Value> {
+        let lua = self.lua.lock().await;
+        let f = mb_fn(&lua, name)
+            .ok_or_else(|| PluginError::Config(format!("脚本未定义 MB.{name}")))?;
+        let mut lua_args = Vec::with_capacity(args.len());
+        for a in args {
+            lua_args.push(lua.to_value(a)?);
+        }
+        self.budget.begin(self.limits.call_timeout);
+        // 必须显式 MultiValue：Vec<LuaValue> 命中 IntoLua 的数组 table 语义
+        // （经 IntoLua 的 IntoLuaMulti 毯实现成为单个 table 实参），而不是展开为多参
+        let ret: LuaValue = self
+            .call_hook(&lua, f, mlua::MultiValue::from_vec(lua_args))
+            .await?;
         match ret {
             LuaValue::Nil => Ok(serde_json::Value::Null),
             other => Ok(lua.from_value(other)?),

@@ -23,6 +23,7 @@ pub mod config;
 pub mod dispatch;
 pub mod error;
 pub mod handlers;
+pub mod oauth;
 pub mod router;
 pub mod server;
 pub mod session;
@@ -147,18 +148,32 @@ pub fn parse_script_ref(script_ref: &str, plugins_dir: Option<&std::path::Path>)
 /// 运行时过滤：由 [`LuaPluginRegistry`] 按「就近作用域覆盖」逐请求过滤。
 /// 无插件或全部加载失败时回退 [`NoopHooks`]。单个插件加载失败仅记录错误，
 /// 不影响其它插件与网关启动。
+/// 插件加载产物：钩子链 + 注册表（dispatch 解析 CAP_AUTH 插件用）+ 回调监听注册表。
+pub struct LoadedPlugins {
+    /// 钩子链（Lua 注册表或 Noop）。
+    pub hooks: Arc<dyn PluginHooks>,
+    /// Lua 注册表（无插件为 None）。
+    pub registry: Option<Arc<LuaPluginRegistry>>,
+    /// 回环回调监听注册表（与注入插件的宿主桥共享）。
+    pub callbacks: Arc<crate::oauth::CallbackRegistry>,
+}
+
 pub fn load_plugins(
     db: &Arc<Database>,
     registry: &Arc<Registry>,
     client: &reqwest::Client,
+    plugin_client: &reqwest::Client,
     limits: SandboxLimits,
     plugins_dir: Option<&std::path::Path>,
-) -> Arc<dyn PluginHooks> {
+) -> LoadedPlugins {
     let sessions = SessionStore::new();
+    let callbacks = crate::oauth::CallbackRegistry::new();
     let bridge = Arc::new(GatewayBridge::new(
         client.clone(),
+        plugin_client.clone(),
         db.clone(),
         registry.clone(),
+        callbacks.clone(),
         limits.call_timeout,
     ));
     let mut runtimes: Vec<Arc<LuaRuntime>> = Vec::new();
@@ -219,14 +234,23 @@ pub fn load_plugins(
     }
 
     if runtimes.is_empty() {
-        Arc::new(NoopHooks)
+        LoadedPlugins {
+            hooks: Arc::new(NoopHooks),
+            registry: None,
+            callbacks,
+        }
     } else {
         // `sessions` 与所有插件运行时共享：会话淘汰时经它回收 `mb.session` 桶
-        Arc::new(LuaPluginRegistry::new(
+        let reg = Arc::new(LuaPluginRegistry::new(
             runtimes,
             overrides,
             sessions.clone(),
-        ))
+        ));
+        LoadedPlugins {
+            hooks: reg.clone(),
+            registry: Some(reg),
+            callbacks,
+        }
     }
 }
 
@@ -261,15 +285,25 @@ fn read_script(script_ref: &str, plugins_dir: Option<&std::path::Path>) -> Optio
 pub fn bootstrap(config: GatewayConfig, db: Arc<Database>) -> Result<Arc<AppState>> {
     let registry = Arc::new(builtin_registry());
     let client = build_client(&config)?;
+    let plugin_client = crate::upstream::build_plugin_client(&config)?;
     let limits = sandbox_limits(&config);
-    let hooks = load_plugins(
+    let loaded = load_plugins(
         &db,
         &registry,
         &client,
+        &plugin_client,
         limits,
         config.plugins_dir.as_deref().map(std::path::Path::new),
     );
-    Ok(AppState::new(config, db, registry, hooks, client))
+    Ok(AppState::new(
+        config,
+        db,
+        registry,
+        loaded.hooks,
+        loaded.registry,
+        client,
+        loaded.callbacks,
+    ))
 }
 
 /// 启动网关服务器（阻塞直到退出）。
@@ -325,7 +359,9 @@ mod tests {
         std::fs::write(&inside, "MB = {}").unwrap();
         assert_eq!(
             parse_script_ref(inside.to_str().unwrap(), Some(&plugins)),
-            ScriptRef::File(inside.canonicalize().unwrap())
+            // 返回值按当前实现是原样路径（canonicalize 只发生在 is_within_root 的包含性
+            // 校验内）；Windows 上 canonicalize() 会加 \? UNC 前缀，断言不能再用它。
+            ScriptRef::File(inside.clone())
         );
 
         for evil in [

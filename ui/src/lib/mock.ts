@@ -11,6 +11,7 @@ import type {
   QuotaKeyResult,
   QuotaResult,
   CatalogModel,
+  DetectedModel,
   GatewayConfig,
   GatewayStatus,
   Json,
@@ -613,7 +614,7 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
 
     // ── 模型目录（models.dev）──
     case "catalog_fetch":
-      return seedCatalog.map((m) => ({ ...m })) as T;
+      return { models: seedCatalog.map((m) => ({ ...m })), cached: false } as T;
     case "catalog_import": {
       const list = (args as { models: CatalogModel[] }).models ?? [];
       for (const c of list) {
@@ -644,9 +645,65 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
           }
         }
       }
-      return list.length as T;
+      return { imported: list.length, skipped: 0 } as T;
     }
 
+    // ── 上游预设与模型检测 ──
+    case "preset_list":
+      return [
+        { id: "ollama", label: "Ollama", category: "api", protocol: "openai-chat", baseUrl: "http://localhost:11434/v1", dashboardUrl: null, keyOptional: true, note: "本地 Ollama 服务（OpenAI 兼容端点），通常无需 Key", modelsDevId: null, authPlugin: null, enabled: true },
+        { id: "deepseek", label: "DeepSeek", category: "api", protocol: "openai-chat", baseUrl: "https://api.deepseek.com", dashboardUrl: "https://platform.deepseek.com/api_keys", keyOptional: false, note: null, modelsDevId: "deepseek", authPlugin: null, enabled: true },
+        { id: "openrouter", label: "OpenRouter", category: "api", protocol: "openai-chat", baseUrl: "https://openrouter.ai/api/v1", dashboardUrl: "https://openrouter.ai/keys", keyOptional: false, note: "聚合商：模型量大，导入时注意勾选", modelsDevId: "openrouter", authPlugin: null, enabled: true },
+        { id: "kimi-oauth", label: "Kimi", category: "account", protocol: "openai-chat", baseUrl: "https://api.kimi.com/coding/v1", dashboardUrl: null, keyOptional: false, note: "Kimi 账户设备码登录（浏览器验证码授权）", modelsDevId: null, authPlugin: "auth-kimi", enabled: true },
+        { id: "command-code-auth", label: "Command Code - Auth", category: "account", protocol: "openai-chat", baseUrl: "https://api.commandcode.ai/provider/v1", dashboardUrl: "https://commandcode.ai/studio/", keyOptional: false, note: "Command Code 账户登录（浏览器授权 / 本地 CLI 凭据导入）", modelsDevId: null, authPlugin: "auth-commandcode", enabled: true },
+      ] as T;
+    case "provider_detect_models": {
+      const key = String((args as { providerKey?: string }).providerKey ?? "");
+      const detected: DetectedModel[] = [
+        { providerKey: key, providerName: key, id: "deepseek-flash", name: "DeepSeek V4.1 Flash", contextWindow: 1048576, maxOutputTokens: 131072, modalities: ["text"], reasoningLevels: ["low", "high"], pricing: { input: 0.27, output: 1.1 }, exists: false },
+        { providerKey: key, providerName: key, id: "deepseek-reasoner", name: "DeepSeek Reasoner", contextWindow: 1048576, maxOutputTokens: 65536, modalities: ["text"], reasoningLevels: [], pricing: { input: 0.55, output: 2.19 }, exists: false },
+      ];
+      return { source: "live", warning: null, models: detected } as T;
+    }
+    case "oauth_describe": {
+      const preset = String((args as { preset?: string }).preset ?? "");
+      if (preset === "command-code-auth")
+        return {
+          preset,
+          describe: {
+            kind: "callback",
+            label: "Command Code 账户",
+            supports_paste: true,
+            instructions: "浏览器完成授权后自动回跳；也可手动粘贴回调信息或 API Key",
+            sources: [
+              { id: "local-cli", label: "导入本地 CLI 凭据" },
+              { id: "browser", label: "浏览器授权登录" },
+            ],
+          },
+        } as T;
+      return {
+        preset,
+        describe: { kind: "device_code", label: "Kimi 账户", instructions: "打开验证页，输入验证码完成授权" },
+      } as T;
+    }
+    case "oauth_begin":
+      // mock：直接视为已完成（浏览器 dev 不走真实 OAuth）
+      return {
+        flowId: "",
+        kind: "callback",
+        alreadyDone: true,
+        verificationUrl: null,
+        userCode: null,
+        instructions: null,
+        notice: null,
+        supportsPaste: false,
+        providerKey: String((args as { preset?: string }).preset ?? ""),
+      } as T;
+    case "oauth_status":
+      return { state: "done", message: null, providerKey: "mock" } as T;
+    case "oauth_cancel":
+    case "oauth_paste":
+      return undefined as T;
     // ── Route ──
     case "route_list":
       return routes.map((r) => ({ ...r })) as T;

@@ -21,6 +21,20 @@ pub fn build_client(config: &GatewayConfig) -> Result<reqwest::Client> {
     builder.build().map_err(Into::into)
 }
 
+/// 构建插件子请求客户端：与上游同口径 egress 代理，但**不跟随重定向**——
+/// 认证/凭据类子请求的重定向会把请求体重放到 Location 主机。
+pub fn build_plugin_client(config: &GatewayConfig) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none());
+    if let Some(proxy) = &config.egress_proxy {
+        let p = reqwest::Proxy::all(proxy)
+            .map_err(|e| GatewayError::Other(format!("egress 代理配置错误: {e}")))?;
+        builder = builder.proxy(p);
+    }
+    builder.build().map_err(Into::into)
+}
+
 /// 发送上游请求（非流式与流式共用；调用方按 stream 决定如何消费响应）。
 pub async fn send(client: &reqwest::Client, up: &UpstreamRequest) -> Result<reqwest::Response> {
     let mut req = client.request(up.method.clone(), &up.url);

@@ -33,11 +33,12 @@
 ---@field version string|nil 版本
 ---@field category string|nil 类别："core"（缺省，请求链路插件）|"quota"（配额查询插件：由配额引擎驱动，不进钩子注册表）
 ---@field scopes string[]|nil 作用域："global"|"provider"|"model"|"route"（仅 core 类生效）
----@field capabilities string[] 能力："core"|"raw_request"|"raw_response"|"raw_stream"（仅 core 类生效）
+---@field capabilities string[] 能力："core"|"raw_request"|"raw_response"|"raw_stream"（仅 core 类生效）|"auth"（认证插件：provider 作用域绑定，由宿主显式调用）
 ---@field requires table|nil 启用条件：`{ <网关配置键> = <期望值>, ... }`（bool/int/float/字符串）。
 ---仅 app 层校验——启用动作（新建即启用 / 停用→启用）时不满足则拒绝并弹提示；网关侧不处理。
 ---@field config_schema table|nil 配置 JSON Schema（供 UI 渲染表单）
 ---@field entry string|nil 入口提示
+---@field fs_read_allow string[]|nil `mb.fs.read` 可读路径白名单（home 相对 `~/...`，精确匹配，不支持通配；未声明即完全禁止读文件）
 ---@field init fun()|nil 加载后调用一次
 ---@field shutdown fun()|nil 卸载时调用
 ---Core IR 语义层钩子（需声明 "core"）。
@@ -55,6 +56,12 @@
 ---流式 chunk 钩子（需声明 "raw_stream"；高频，未声明则完全跳过）。
 ---@field on_upstream_chunk_raw (fun(ctx: MbCtx, chunk: MbRawChunk): MbChunkVerdict|nil)|nil
 ---@field on_client_chunk_raw (fun(ctx: MbCtx, chunk: MbRawChunk): MbChunkVerdict|nil)|nil
+---认证钩子（需声明 "auth"；provider 作用域绑定生效，由宿主按 provider 解析后显式调用，不进入报文链路）。
+---@field auth_describe (fun(ctx: MbAuthCtx): MbAuthDescribe)|nil 流程元数据（UI 据此渲染）
+---@field auth_begin (fun(ctx: MbAuthCtx): MbAuthBeginResult)|nil 发起登录（可直出 done/error 终态）
+---@field auth_poll (fun(ctx: MbAuthCtx, handle: table, paste: string|nil): MbAuthPollResult)|nil 单步推进登录（编排器掌握循环/超时/取消）
+---@field auth_refresh (fun(ctx: MbAuthCtx, bundle: MbAuthBundle): MbAuthBundle)|nil 平台刷新授予
+---@field auth_headers (fun(ctx: MbAuthCtx, bundle: MbAuthBundle): MbHeaderList)|nil 产出认证头（Authorization + 平台专有头）
 ---配额查询（category = "quota" 插件）：由 Provider 绑定并调用 `MB.query`，
 ---不进钩子注册表、不参与上面的能力过滤与钩子链路（见 crates/gateway/src/quota.rs）。
 ---@field query (fun(ctx: MbQuotaQueryCtx): MbQuotaReturn)|nil 查询一次配额（仅 quota 类插件）
@@ -186,6 +193,51 @@ MB = {}
 ---@field headers MbHeaderList
 ---@field body any JSON 优先解析，否则为字符串
 
+---@class MbAuthCtx
+---认证钩子上下文（非报文钩子 ctx；由宿主按 provider 构造）。
+---@field provider string 上游服务 key（= 账户预设 id）
+---@field source string|nil 登录来源（用户在 UI 的选择；插件在 describe.sources 中广告可选值）
+---@field host { os: string, arch: string, name: string }|nil 宿主平台信息（沙箱无 os 库；设备指纹类请求头用）
+
+---@class MbAuthBundle
+---令牌包：插件自有 JSON。core 只认两个约定字段，其余字段（refresh/device_id/…）随包透传。
+---@field access string 出站凭据（非空，core 校验）
+---@field expires_at number|nil 过期时刻（unix 毫秒，**服务端原始值**；缺省=永不过期。skew 由 core 统一扣，插件不得预先扣减）
+
+---@class MbAuthDescribe
+---@field kind string "device_code"|"callback"|"paste"（本轮 UI 支持 device_code/callback）
+---@field label string|nil 展示名
+---@field instructions string|nil 指引文案
+---@field supports_paste boolean|nil 是否展示手动粘贴输入框
+---@field sources { id: string, label: string }[]|nil 可选凭据来源（多个时 UI 先让用户选，经 ctx.source 回传）
+
+---@class MbAuthBeginResult
+---@field status string|nil "done"（本地导入命中，bundle 直出）/"error"（显式失败，message 说明）；缺省=进入轮询流
+---@field message string|nil error 时的原因
+---@field bundle MbAuthBundle|nil done 时的令牌包
+---@field verification_url string|nil 需要用户打开的页面
+---@field user_code string|nil 设备码（device_code 流）
+---@field interval_secs number|nil 建议轮询间隔（秒，默认 2，限 1..30）
+---@field expires_in_secs number|nil 流程总超时（秒，默认 120，限 30..1800）
+---@field notice string|nil 提示（如「未检测到本地凭据，已改用浏览器登录」）
+---@field handle table|nil 轮询句柄（插件私有，auth_poll 原样收回）
+
+---@class MbAuthPollResult
+---@field status string "pending"|"slow_down"|"done"|"error"|"expired"
+---@field message string|nil pending 时的进度提示 / error|expired 时的原因
+---@field bundle MbAuthBundle|nil done 时的令牌包
+---@field interval_secs number|nil slow_down 时的新间隔（秒，限 1..60）
+
+---@class MbCallbackSpec
+---@field path string|nil 监听路径（默认 "/callback"；仅 / 开头的安全字符）
+---@field origins string[]|nil CORS 允许源（浏览器页面内 fetch 回调时按源钉死；空数组不发 CORS 头）
+---@field preferred_port number|nil 首选端口（被占用时宿主退随机端口）
+
+---@class MbCallbackHandle
+---@field id string 监听 id
+---@field port number 实际绑定端口
+---@field url string 完整回调 URL（http://127.0.0.1:{port}{path}）
+
 ---@class MbHostApi
 ---日志（target 为 "plugin"，带插件名）。
 ---@field log { debug: fun(msg: string), info: fun(msg: string), warn: fun(msg: string), error: fun(msg: string) }
@@ -198,7 +250,20 @@ MB = {}
 ---跨 provider 编排调用：以 Core IR 直接请求另一 provider（async）。
 ---@field provider { invoke: async fun(providerKey: string, model: string, req: MbCoreRequest): MbCoreResponse }
 ---摘要与编码工具。
----@field crypto { sha256: fun(s: string): string, hmac_sha256: fun(key: string, msg: string): string, base64_encode: fun(s: string): string, base64_decode: fun(s: string): string }
+---@field crypto { sha256: fun(s: string): string, hmac_sha256: fun(key: string, msg: string): string, base64_encode: fun(s: string): string, base64_decode: fun(s: string): string, base64url_encode: fun(s: string): string, base64url_decode: fun(s: string): string }
+---加密小值（scope 强制按插件名隔离，插件间互不可见；OAuth 令牌包不经过这里——它由宿主在登录编排与出站链路之间直传）。
+---@field secret { get: async fun(scope: string, key: string): string|nil, set: async fun(scope: string, key: string, val: string), delete: async fun(scope: string, key: string) }
+---CSPRNG（沙箱无安全随机源；OAuth state 等必须从这里取）。
+---@field random { state: fun(): string, bytes: fun(n: number): string }
+---OAuth 回环回调监听（宿主托管：一次性、带超时、完成即清理；插件不能自己 bind 端口）。
+---@field oauth { listen_callback: async fun(spec: MbCallbackSpec): MbCallbackHandle, callback_await: async fun(id: string, timeout_ms: number|nil): table|nil, callback_close: async fun(id: string) }
+---在外部浏览器打开 URL（仅 http/https）。
+---@field open_external async fun(url: string)
+---受限文件读（白名单制：MB.fs_read_allow 声明的 home 相对路径，精确匹配；上限 256KiB）。
+---@field fs { read: async fun(path: string): string }
+---墙钟（沙箱无 os 库；过期时刻换算用）。
+---@field time { now_ms: fun(): number }
+
 ---header 辅助（大小写不敏感，操作保序数组）。
 ---@field headers MbHeadersHelper
 

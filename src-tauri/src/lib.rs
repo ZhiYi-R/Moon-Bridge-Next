@@ -5,10 +5,12 @@
 //!
 //! 依赖方向：app → gateway, store, core（不反向）。
 
-mod commands;
-mod config;
+mod auth_plugins;
+pub mod commands;
+pub mod config;
 pub mod headless;
-mod state;
+pub mod presets;
+pub mod state;
 mod tray;
 
 use config::AppPaths;
@@ -120,6 +122,7 @@ pub fn run() {
             commands::gateway::gateway_restart,
             commands::gateway::gateway_status,
             commands::provider::provider_list,
+            commands::provider::preset_list,
             commands::provider::provider_get,
             commands::provider::provider_save,
             commands::provider::provider_delete,
@@ -132,6 +135,14 @@ pub fn run() {
             commands::model::offer_delete,
             commands::catalog::catalog_fetch,
             commands::catalog::catalog_import,
+            commands::catalog::provider_detect_models,
+            // OAuth 账户登录（通用编排，平台细节在 CAP_AUTH 插件）
+            commands::oauth::oauth_describe,
+            commands::oauth::oauth_begin,
+            commands::oauth::oauth_status,
+            commands::oauth::oauth_cancel,
+            commands::oauth::oauth_paste,
+            // Route
             commands::route::route_list,
             commands::route::route_get,
             commands::route::route_save,

@@ -323,6 +323,7 @@ mod tests {
             url: url.into(),
             headers: vec![("Authorization".into(), "Bearer secret-token".into())],
             body: None,
+            form: None,
             timeout_ms: Some(2000),
         }
     }

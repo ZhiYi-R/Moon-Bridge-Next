@@ -13,7 +13,7 @@ use moonbridge_core::{
 };
 use moonbridge_protocol::{ChunkVerdict, PluginHooks, RawChunk, RawMessage, RawVerdict, ReqCtx};
 
-use crate::manifest::{CAP_CORE, CAP_RAW_REQUEST, CAP_RAW_RESPONSE, CAP_RAW_STREAM};
+use crate::manifest::{CAP_AUTH, CAP_CORE, CAP_RAW_REQUEST, CAP_RAW_RESPONSE, CAP_RAW_STREAM};
 use crate::runtime::LuaRuntime;
 use crate::session::SessionStore;
 
@@ -135,6 +135,32 @@ impl LuaPluginRegistry {
         ctx: &'a ReqCtx,
     ) -> impl Iterator<Item = &'a Arc<LuaRuntime>> {
         self.by_cap(cap).filter(move |p| self.effective(p, ctx))
+    }
+
+    /// 解析 provider 维度生效的 auth 能力插件（出站链路的 auth_headers 调用点用）。
+    ///
+    /// 命中条件刻意**只看 provider 维度的显式启用绑定**：认证是账户级能力，
+    /// 「全局启用」对 auth 没有意义——若按常规三态门控，用户把 auth 插件全局
+    /// 打开后它会对每个 provider 的出站都注入（读不到对应令牌包 → 全部请求
+    /// 失败）。多个绑定同时生效时取首个并记 warn（同一 provider 的认证来源
+    /// 应当是唯一的）。
+    pub fn auth_plugin_for(&self, provider_key: &str) -> Option<Arc<LuaRuntime>> {
+        let mut it = self.by_cap(CAP_AUTH).filter(|p| {
+            self.overrides
+                .get(&p.name)
+                .and_then(|t| t.provider.get(provider_key))
+                == Some(&true)
+        });
+        let first = it.next()?;
+        if let Some(extra) = it.next() {
+            tracing::warn!(
+                provider = %provider_key,
+                picked = %first.name,
+                ignored = %extra.name,
+                "多个 auth 插件在同一 provider 生效，取首个"
+            );
+        }
+        Some(first.clone())
     }
 }
 

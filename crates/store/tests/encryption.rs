@@ -260,7 +260,7 @@ fn v12_plaintext_database_migrates_without_guessing_ciphertext_from_prefix() {
     drop(conn);
 
     let migrated = Database::open(dir.db()).unwrap();
-    assert_eq!(migrated.version().unwrap(), 14);
+    assert_eq!(migrated.version().unwrap(), 15);
     let provider = strip_quota(&provider);
     assert_roundtrip(&migrated, &provider);
     assert_encrypted(&dir.db(), &provider);
@@ -345,7 +345,7 @@ fn v12_custom_provider_source_is_required_and_only_used_once() {
     let migrated =
         Database::open_with_legacy_key(dir.db(), Box::new(AesGcmKey::new(&[42; 32])), &old)
             .unwrap();
-    assert_eq!(migrated.version().unwrap(), 14);
+    assert_eq!(migrated.version().unwrap(), 15);
     assert_roundtrip(&migrated, &provider);
     assert_eq!(
         old.decrypt_calls.load(Ordering::Relaxed),

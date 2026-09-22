@@ -195,6 +195,26 @@ pub async fn handle_request(
     })?;
     core_req.tools.extend(extra_tools);
 
+    // ── 认证头：provider 绑定 CAP_AUTH 插件时，出站前取认证头（必要时单飞刷新）──
+    let auth_rt = state
+        .plugin_registry
+        .as_ref()
+        .and_then(|r| r.auth_plugin_for(&resolved.provider_key));
+    let mut auth_headers: Vec<(String, String)> = Vec::new();
+    if let Some(rt) = &auth_rt {
+        auth_headers = crate::oauth::prepare_headers(&state, rt, &resolved.provider_key)
+            .await
+            .map_err(|e| {
+                fail_audit(
+                    &state,
+                    &ctx,
+                    start,
+                    routed_trace(&ctx, &resolved, &client_request_snapshot),
+                    GatewayError::Route(e),
+                )
+            })?;
+    }
+
     // ── Core → 上游协议（逐端点故障转移）──
 
     // 故障转移：按序尝试各端点，连接错误/超时、429、5xx 且还有后续端点时切换；
@@ -204,7 +224,9 @@ pub async fn handle_request(
     let mut up: Option<UpstreamRequest> = None;
     let mut resp: Option<reqwest::Response> = None;
     let mut used_protocol = resolved.protocol;
-    for (attempt, ep) in resolved.endpoints.iter().enumerate() {
+    // 401 强制刷新每请求至多一次（仅当 provider 绑定了 auth 插件）
+    let mut auth_refreshed_on_401 = false;
+    'ep: for (attempt, ep) in resolved.endpoints.iter().enumerate() {
         let provider_adapter = state
             .registry
             .provider(ep.protocol)
@@ -230,6 +252,9 @@ pub async fn handle_request(
                     e.into(),
                 )
             })?;
+
+        // 认证头并入出站请求（在 raw 出站钩子之前，钩子与审计看到最终头）
+        crate::oauth::merge_headers(&mut u.headers, &auth_headers);
 
         // ── [RAW] 出站请求钩子（每端点一次）──
         let mut outbound = RawMessage {
@@ -298,67 +323,84 @@ pub async fn handle_request(
             return Err(fail_audit(&state, &ctx, start, t, e));
         }
 
-        // 非流式请求施加 request_timeout_secs 总超时（流式刻意不设——长生成
-        // 不应被网关截断）。send 只覆盖到响应头；body 读取在 non_stream 里
-        // 以剩余预算再套一次超时 + read_body_capped 的大小上限作回退。
-        let send_res = if core_req.stream {
-            upstream::send(&state.client, &u).await
-        } else {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(state.config.request_timeout_secs),
-                upstream::send(&state.client, &u),
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(_) => Err(GatewayError::Upstream {
-                    status: 504,
-                    message: format!("上游请求超时（{}s）", state.config.request_timeout_secs),
-                }),
-            }
-        };
-        match send_res {
-            Ok(r) => {
-                let status = r.status();
-                let retryable = status.as_u16() == 429 || status.is_server_error();
-                if retryable && attempt + 1 < total {
-                    // 排空响应体（有界）：连接可复用且异常上游的大 body 不会耗尽内存
-                    let _ = read_body_capped(r, state.config.max_body_bytes).await;
-                    tracing::warn!(
-                        provider = %resolved.provider_key,
-                        endpoint = %ep.base_url,
-                        status = status.as_u16(),
-                        "端点失败，故障转移到下一端点"
-                    );
-                    continue;
+        'send: loop {
+            let send_res = send_with_timeout(&state, &u, core_req.stream).await;
+            match send_res {
+                Ok(r) => {
+                    let status = r.status();
+                    // 401 且绑定 auth 插件：强制刷新认证头并重发本端点（每请求至多
+                    // 一次，不消耗故障转移名额）；刷新失败则保留原 401 走常规路径
+                    if status.as_u16() == 401 && !auth_refreshed_on_401 {
+                        if let Some(rt) = &auth_rt {
+                            auth_refreshed_on_401 = true;
+                            match crate::oauth::force_refresh_headers(
+                                &state,
+                                rt,
+                                &resolved.provider_key,
+                            )
+                            .await
+                            {
+                                Ok(fresh) => {
+                                    let _ = read_body_capped(r, state.config.max_body_bytes).await;
+                                    crate::oauth::merge_headers(&mut u.headers, &fresh);
+                                    tracing::info!(
+                                        provider = %resolved.provider_key,
+                                        "上游 401，认证已强制刷新并重发本端点"
+                                    );
+                                    continue 'send;
+                                }
+                                Err(e2) => {
+                                    tracing::warn!(
+                                        provider = %resolved.provider_key,
+                                        error = %e2,
+                                        "401 后强制刷新认证失败，按原 401 失败处理"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    let retryable = status.as_u16() == 429 || status.is_server_error();
+                    if retryable && attempt + 1 < total {
+                        // 排空响应体（有界）：连接可复用且异常上游的大 body 不会耗尽内存
+                        let _ = read_body_capped(r, state.config.max_body_bytes).await;
+                        tracing::warn!(
+                            provider = %resolved.provider_key,
+                            endpoint = %ep.base_url,
+                            status = status.as_u16(),
+                            "端点失败，故障转移到下一端点"
+                        );
+                        continue 'ep;
+                    }
+                    up = Some(u);
+                    resp = Some(r);
+                    used_protocol = ep.protocol;
+                    // 必须跳出外层端点循环：只出内层重发循环会继续下一端点
+                    // （隐性故障转移，401 语义被吃）
+                    break 'ep;
                 }
-                up = Some(u);
-                resp = Some(r);
-                used_protocol = ep.protocol;
-                break;
-            }
-            Err(e) => {
-                if attempt + 1 < total {
-                    tracing::warn!(
-                        provider = %resolved.provider_key,
-                        endpoint = %ep.base_url,
-                        error = %e,
-                        "端点请求失败，故障转移到下一端点"
+                Err(e) => {
+                    if attempt + 1 < total {
+                        tracing::warn!(
+                            provider = %resolved.provider_key,
+                            endpoint = %ep.base_url,
+                            error = %e,
+                            "端点请求失败，故障转移到下一端点"
+                        );
+                        continue 'ep;
+                    }
+                    // 末位端点传输失败：整条链在没有任何上游响应的情况下终结——
+                    // 仍须落 usage + trace，否则失败请求对用量/Traces 完全不可见。
+                    let t = new_trace(
+                        &ctx,
+                        client_request_snapshot.clone(),
+                        core_req.stream,
+                        resolved.upstream_model.clone(),
+                        resolved.provider_key.clone(),
+                        Some(ep.protocol),
+                        upstream_request_snapshot(&u),
                     );
-                    continue;
+                    return Err(fail_audit(&state, &ctx, start, t, e));
                 }
-                // 末位端点传输失败：整条链在没有任何上游响应的情况下终结——
-                // 仍须落 usage + trace，否则失败请求对用量/Traces 完全不可见。
-                let t = new_trace(
-                    &ctx,
-                    client_request_snapshot.clone(),
-                    core_req.stream,
-                    resolved.upstream_model.clone(),
-                    resolved.provider_key.clone(),
-                    Some(ep.protocol),
-                    upstream_request_snapshot(&u),
-                );
-                return Err(fail_audit(&state, &ctx, start, t, e));
             }
         }
     }
@@ -419,6 +461,32 @@ pub async fn handle_request(
         ))
     } else {
         non_stream(state, ctx, resp, used_protocol, start, trace, session_tag).await
+    }
+}
+
+/// 发送上游请求：非流式施加 request_timeout_secs 总超时（流式刻意不设——长生成
+/// 不应被网关截断）。send 只覆盖到响应头；body 读取在 non_stream 里
+/// 以剩余预算再套一次超时 + read_body_capped 的大小上限兜底。
+async fn send_with_timeout(
+    state: &AppState,
+    u: &UpstreamRequest,
+    stream: bool,
+) -> Result<reqwest::Response> {
+    if stream {
+        upstream::send(&state.client, u).await
+    } else {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(state.config.request_timeout_secs),
+            upstream::send(&state.client, u),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => Err(GatewayError::Upstream {
+                status: 504,
+                message: format!("上游请求超时（{}s）", state.config.request_timeout_secs),
+            }),
+        }
     }
 }
 

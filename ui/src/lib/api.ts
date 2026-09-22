@@ -1,6 +1,7 @@
 // 前后端接口层：Tauri command 的类型安全封装 + DTO 类型定义。
 
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 import { mockInvoke } from "./mock";
 import { webInvoke } from "./web";
@@ -259,6 +260,82 @@ export const providerApi = {
   get: (key: string) => call<Provider | null>("provider_get", { key }),
   save: (provider: Provider) => call<void>("provider_save", { provider }),
   remove: (key: string) => call<void>("provider_delete", { key }),
+  /** 上游预设静态表（含账户组，走 OAuth 登录编排）。 */
+  presets: () => call<ProviderPreset[]>("preset_list"),
+  /** 模型检测：实时探测首端点模型列表并用 models.dev enrich，失败回退目录。 */
+  detectModels: (key: string) =>
+    call<DetectResult>("provider_detect_models", { providerKey: key }),
+};
+
+/** 上游预设（后端静态表；account 分组走 OAuth 登录编排）。 */
+export interface ProviderPreset {
+  id: string;
+  label: string;
+  /** api / account */
+  category: string;
+  /** MBN 协议串 */
+  protocol: string;
+  baseUrl: string;
+  dashboardUrl?: string | null;
+  keyOptional: boolean;
+  note?: string | null;
+  modelsDevId?: string | null;
+  /** 账户预设绑定的 CAP_AUTH 插件名；API 预设为 null */
+  authPlugin?: string | null;
+  enabled: boolean;
+}
+
+/** 模型检测到的候选：目录字段 + 是否已导入。 */
+export interface DetectedModel extends CatalogModel {
+  exists: boolean;
+}
+
+/** 模型检测结果：live=实时探测 / catalog=models.dev 目录回退。 */
+export interface DetectResult {
+  source: "live" | "catalog";
+  warning?: string | null;
+  models: DetectedModel[];
+}
+
+/** OAuth 插件自述（平台元数据全部来自 CAP_AUTH 插件，UI 无平台分支）。 */
+export interface OAuthDescribe {
+  preset: string;
+  describe: {
+    kind?: "device_code" | "callback";
+    label?: string;
+    instructions?: string;
+    supports_paste?: boolean;
+    sources?: { id: string; label: string }[];
+  };
+}
+
+/** oauth_begin 的返回。 */
+export interface OAuthBegin {
+  flowId: string;
+  kind: string;
+  alreadyDone: boolean;
+  verificationUrl?: string | null;
+  userCode?: string | null;
+  instructions?: string | null;
+  notice?: string | null;
+  supportsPaste: boolean;
+  providerKey?: string | null;
+}
+
+/** 登录流程状态（pending / done / error / cancelled）。 */
+export interface OAuthFlowStatus {
+  state: string;
+  message?: string | null;
+  providerKey?: string | null;
+}
+
+export const oauthApi = {
+  describe: (preset: string) => call<OAuthDescribe>("oauth_describe", { preset }),
+  begin: (preset: string, source?: string | null) =>
+    call<OAuthBegin>("oauth_begin", { preset, source: source ?? null }),
+  status: (flowId: string) => call<OAuthFlowStatus>("oauth_status", { flowId }),
+  cancel: (flowId: string) => call<void>("oauth_cancel", { flowId }),
+  paste: (flowId: string, text: string) => call<void>("oauth_paste", { flowId, text }),
 };
 
 export const modelApi = {
@@ -273,10 +350,12 @@ export const modelApi = {
 };
 
 export const catalogApi = {
-  /** 从 models.dev 拉取全部候选模型（后端解析精简）。 */
-  fetch: () => call<CatalogModel[]>("catalog_fetch"),
-  /** 把勾选的候选批量导入本地 models 表（含定价），返回导入数量。 */
-  import: (models: CatalogModel[]) => call<number>("catalog_import", { models }),
+  /** 从 models.dev 拉取全部候选模型（后端解析精简）；refresh=true 强制重拉。 */
+  fetch: (refresh?: boolean) =>
+    call<{ models: CatalogModel[]; cached: boolean }>("catalog_fetch", { refresh: refresh ?? null }),
+  /** 把勾选的候选批量导入本地 models 表（含定价），返回实际写入/跳过数量。 */
+  import: (models: CatalogModel[]) =>
+    call<{ imported: number; skipped: number }>("catalog_import", { models }),
 };
 
 export const routeApi = {
@@ -427,4 +506,10 @@ export function errMsg(e: unknown): string {
   if (typeof e === "string") return e;
   if (e && typeof e === "object" && "message" in e) return String((e as { message: unknown }).message);
   return String(e);
+}
+
+/** 打开外部链接：Tauri 壳内走系统浏览器（opener 插件），浏览器 mock 走 window.open。 */
+export function openExternal(url: string) {
+  if (isTauriRuntime) void openUrl(url);
+  else window.open(url, "_blank", "noopener");
 }

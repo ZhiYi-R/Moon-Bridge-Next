@@ -260,7 +260,8 @@ async function openImport() {
   if (catalogLoaded.value) return;
   importLoading.value = true;
   try {
-    catalog.value = await catalogApi.fetch();
+    const r = await catalogApi.fetch();
+    catalog.value = r.models;
     catalogLoaded.value = true;
   } catch (e) {
     importError.value = errMsg(e);
@@ -273,8 +274,11 @@ async function refreshCatalog() {
   importError.value = null;
   importLoading.value = true;
   try {
-    catalog.value = await catalogApi.fetch();
+    // 手动刷新强制重拉（后端绕过 TTL）；完成即提示，不再静默无反应
+    const r = await catalogApi.fetch(true);
+    catalog.value = r.models;
     catalogLoaded.value = true;
+    toast.success("模型目录已刷新");
   } catch (e) {
     importError.value = errMsg(e);
   } finally {
@@ -320,9 +324,13 @@ async function confirmImport() {
   importError.value = null;
   importBusy.value = true;
   try {
-    const n = await catalogApi.import(chosen);
+    const r = await catalogApi.import(chosen);
     importModal.value = false;
-    toast.success(`已导入 ${n} 个模型`);
+    toast.success(
+      r.skipped > 0
+        ? "已导入 " + r.imported + " 个模型，跳过 " + r.skipped + " 个（无变化）"
+        : "已导入 " + r.imported + " 个模型",
+    );
     // 导入同时更新模型定义与各 provider 报价，服务端改动面超出行级：回退整表重拉
     await loadModels();
   } catch (e) {

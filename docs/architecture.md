@@ -223,10 +223,16 @@ function MB.on_request(ctx, req) ... end -- 就地修改 req 即生效，亦可 
 | `mb.log.{debug,info,warn,error}(msg)` | 结构化日志（tracing，target=plugin） |
 | `mb.config` | 该插件的 typed config（来自 store） |
 | `mb.session.get(k) / set(k,v)` | 会话状态，按「插件名 + session_id」隔离 |
-| `mb.http.request{method,url,headers,body,timeout}` | async，经 `HostBridge` 走宿主 reqwest（受 egress proxy/超时管控） |
+| `mb.http.request{method,url,headers,body,form,timeout}` | async，经 `HostBridge` 走宿主 reqwest（受 egress proxy/超时管控；**不跟随重定向**——凭据体不得被重放） |
 | `mb.provider.invoke(provider, model, core_request)` | async，跨 provider 编排 |
 | `mb.headers.{get,set,remove}(headers, name)` | 大小写不敏感、保序，操作 `{{k,v},...}` |
-| `mb.crypto.{sha256,hmac_sha256,base64_encode,base64_decode}` | 上游签名/编码 |
+| `mb.crypto.{sha256,hmac_sha256,base64_encode,base64_decode,base64url_encode,base64url_decode}` | 上游签名/编码/JWT payload 解码 |
+| `mb.secret.{get,set,delete}(scope,key)` | async，加密小值；effective scope 强制冠以插件名（插件间秘密互不可见） |
+| `mb.random.state() / bytes(n)` | CSPRNG（沙箱无安全随机源；OAuth state 等必须从这里取） |
+| `mb.oauth.listen_callback(spec) / callback_await(id,ms) / callback_close(id)` | async，回环回调监听：宿主托管（一次性、超时、完成即清理），插件不能自己 bind 端口 |
+| `mb.open_external(url)` | async，外部浏览器打开（仅 http/https） |
+| `mb.fs.read(path)` | async，受限文件读：白名单制（`MB.fs_read_allow` 声明 home 相对路径，精确匹配，≤256KiB） |
+| `mb.time.now_ms()` | 墙钟毫秒（沙箱无 os 库） |
 
 - **沙箱与配额**（`crates/plugin/src/quota.rs` + `host::sandbox`）：把 `os / io / loadfile / dofile / require / package` 六个全局**整体置 nil**（`require` 与 `package` 必须一起移除——留着它们等于留着 `require("io")` / `package.loadlib` 的重取通道），并施加四项硬性配额：
   - **指令计数**：每插件一个 `ExecutionBudget`，经 Lua debug hook（`every_nth_instruction`，默认 step 2000）累加，超过 `max_instructions`（默认 2 亿）即中止，中止死循环。因 Lua debug hook **按 `lua_State`（线程）生效且不被新建线程继承**，需两处补挂载：宿主侧 `call_async` 以 `create_thread + Thread::set_hook + into_async` 绑定本次调用的协程；插件侧则注入 `COROUTINE_PATCH` 覆写 `coroutine.create`/`wrap`，线程一诞生即经宿主回调 `__mb_bind_thread` 补挂载**同一颗**预算钩子。否则插件内 `coroutine.wrap(function() while true do end end)()` 会在全新无钩线程里死循环，绕过指令配额与超时，并因 `Mutex<Lua>` 的 `MutexGuard` 跨 await 持有而永久阻塞该插件的请求链路。补丁内 `bind` 与 `new_thread` 均为 upvalue，插件覆写 `coroutine.create` 或置空 `__mb_bind_thread` 都无法造出无钩线程。
@@ -244,13 +250,51 @@ function MB.on_request(ctx, req) ... end -- 就地修改 req 即生效，亦可 
   - 归一化用 `canonicalize_pending`：对尚未创建的嵌套路径（`a/b/c.lua`）先回溯到最近的已存在祖先再 canonicalize，从而允许写插件时新建子目录；同时 `..` 穿越与逃逸符号链接仍被拒。
   - `plugins_dir` 以 `AppPaths` 为权威，`start_gateway` 每次启动回写覆盖——防止设置页保存整体 `AppConfig` 时把它清空而静默解除目录约束。
 
+### 认证能力框架（CAP_AUTH，plugins/auth/*.lua）
+
+平台 OAuth（Kimi 设备码 / Command Code 回调·导入·粘贴）**不进入 core**：core 只提供通用
+能力与宿主原语，平台细节（端点、请求头、刷新授予、身份解析）全部在 Lua 插件内。与
+balance 的「旁路一次性脚本 + MB.query」同一范式——新增一家平台 = 加一个 `.lua`（或在
+Plugins 页新建 capabilities 含 `auth` 的插件）+ 一条账户预设，不改 core、不重编译网关。
+
+**能力声明与门控**：`capabilities = { "auth" }`、`scopes = { "provider" }`。插件记录以
+`enabled = false` 全局停用；登录成功时宿主写 provider 维度 binding，注册表
+`auth_plugin_for(provider)` **只看 provider 显式绑定**（全局开关对 auth 刻意无效——
+全局启用会让它对每个 provider 的出站都注入，读不到令牌包即全部请求失败）。
+
+**钩子契约**（`MB.auth_*`，经 `LuaRuntime.call_mb_once/call_mb` 旁路调用）：
+`auth_describe`（流程元数据，UI 据此渲染，含可选 `sources` 来源选择）→ `auth_begin`
+（可直出 `done`/`error` 终态，如本地 CLI 导入命中/显式失败）→ `auth_poll`（单步推进，
+状态机 `pending/slow_down/done/error/expired`，编排器掌握循环/总超时/取消）→ 运行时
+`auth_refresh` / `auth_headers`。
+
+**令牌包（bundle）**：插件自有 JSON，core 只认 `access`（非空）与 `expires_at`（unix
+毫秒，服务端原始值；缺省=永不过期）。**skew 只在 core 扣一次**（提前 5 分钟视为临期），
+插件不得预先扣减。令牌包持久化在 store 的 `secrets` 表（scope `provider:{key}`，经
+`EncKey` 加密），**不进 `provider.extra`、不回传前端、不落日志**；provider 行只记非
+敏感 `extra.auth`（plugin/account/email/source），端点 `api_key` 置空。
+
+**出站集成**（dispatch）：路由解析后若 provider 绑定 CAP_AUTH 插件，出站前调
+`MB.auth_headers` 把返回头并入 `UpstreamRequest`（raw 出站钩子之前，钩子与审计看到
+最终头）。临期令牌由 host 按 provider 键**单飞刷新**（并发请求不双刷同一 refresh token；
+刷新 HTTP 在 Lua 内经 `mb.http` 发出，30s 兜底超时，host 持锁期间不做无超时网络等待）；
+刷新失败回退窗口内仍有效的旧令牌并记 60s 退避；上游 401 触发一次强制刷新并重发本端点
+（不消耗故障转移名额）。未登录/刷新失败均为显式错误，不静默降级为无认证请求。
+
+**登录编排**（src-tauri `commands/oauth.rs`，平台无关）：`oauth_describe`（插件自述）
+→ `oauth_begin`（`ctx.source` 透传 UI 的来源选择）→ 后台轮询 `auth_poll`（粘贴经
+`oauth_paste` 透传下一轮 poll）→ done 落库。回调监听经 `mb.oauth.listen_callback` 由
+宿主托管（state 校验、超时、完成/取消/注册表销毁均清理）。内置两家插件随二进制
+`include_str!` 分发、首次启动种子进 db（幂等，不覆盖用户修改）。web/headless 运行时
+的 OAuth 端点不在本 PR 范围（管理 API 后续补齐，web.ts 对未实现 command 已显式报错）。
+
 ---
 
 ## 7. 存储层（crates/store）
 
 SQLite（rusqlite, bundled + WAL），手写版本化 migration，每表一个 DAO 模块，统一由 `Database` 暴露。并发模型：单连接 + `parking_lot::Mutex` 串行化（本地网关低并发足够）。
 
-当前 schema 版本 **V13**（`schema.rs` 的 `MIGRATIONS` 按版本升序手写，`schema_version` 表记录已应用版本；V13 在事务中迁移旧数据并写入加密元数据）。
+当前 schema 版本 **V14**（`schema.rs` 的 `MIGRATIONS` 按版本升序手写，`schema_version` 表记录已应用版本；V13 在事务中迁移旧数据并写入加密元数据）。
 
 | 表 | 关键列 |
 |----|--------|
@@ -264,6 +308,7 @@ SQLite（rusqlite, bundled + WAL），手写版本化 migration，每表一个 D
 | `usage_records` | id PK, session_id, model, upstream_model, **provider_key（V9，可空）**, input/output/cache_read/cache_write/**reasoning**_tokens, cost, status, error, latency_ms, **ttft_ms**, created_at |
 | `settings` | key PK, value_json |
 | `quota_results`（V14） | (provider_key, key_index) 联合 PK, key_label（掩码 key 标签，原文不落此表）, status(ok/error), payload_json（该 key 最近一次返回，引擎级失败时保留旧值）, error, queried_at —— Provider 逐端点拆行，删 Provider 同事务级联 |
+| `secrets`（V15） | (scope, key) PK, value_enc, updated_at —— 按 scope 隔离的加密小值（OAuth 令牌包等）；scope 语义由调用方约定（`provider:{key}` / `{plugin}/{scope}`），表不解释；值经与 provider api_key 相同的 `EncKey` 链路加密 |
 
 - V14 起 `balance_cards`/`balance_results` 删除（旧数据废弃，无迁移），配额绑定直接长在 Provider 上：`quota_plugin_ref`（绑定的 `category="quota"` 插件名，空串=未绑定）、`quota_interval_secs`（0=禁用定时，保存时 1..59 限制为 60）、`quota_enabled`、`quota_config_enc`（配额插件实例配置，**整体 AES-GCM 加密**，密钥类字段与凭据同口径）。
 - 凭据加密：默认文件数据库通过 `EncKey` 对 Provider 凭据与配额配置统一使用 AES-GCM，V13 在事务中迁移旧数据与加密元数据；不再以明文实现作为默认文件存储。字段加密不等于整库、配置、脚本或 trace 加密，前端编辑/查询仍可能处理凭据。
@@ -299,6 +344,8 @@ Client → axum: POST /v1/responses | /v1/messages | /v1/chat/completions
   → 会话水印：就地剥除请求内全部 marker → 解析/分配 ctx.session_id（见下）
   → 路由解析: alias → (provider, 上游 model) → Provider + 上游 Protocol
   → [CORE] on_request / inject_tools
+  → [AUTH] provider 绑定 CAP_AUTH 插件 → MB.auth_headers 注入（令牌临期则单飞刷新；
+            上游 401 强制刷新并重发本端点一次）
   → 选 ProviderAdapter → from_core_request → UpstreamRequest(headers+body)
   → [RAW] on_upstream_request_raw          改上游 method/url/headers/body（全部回读，见下）
   → reqwest 发送(受 egress proxy)
@@ -406,12 +453,14 @@ Client → axum: POST /v1/responses | /v1/messages | /v1/chat/completions
 ## 9. Tauri 应用层（src-tauri）
 
 - **引导配置**：`app_config_dir/config.toml` → `AppConfig { gateway: GatewayConfig, logLevel, autoStart }`。其余业务配置全部入 SQLite。
-- **状态**：`ManagedState { db, paths, config, gateway }`，网关以 tokio task + oneshot 平滑关闭信号驱动启停。
+- **状态**：`ManagedState { db, paths, config, gateway, oauth_flows, catalog_cache, catalog_lock }`，网关以 tokio task + oneshot 平滑关闭信号驱动启停；启动时种子内置认证插件（幂等，见 §6 认证能力框架）。
 - **`gateway` 句柄锁的并发约束**：`start_gateway` / `stop_gateway` 等命令必须**避免在持有 `gateway` 互斥锁的同时 `.await`**，也不能在已持锁的路径上再取一次同把锁——`gateway_start` 被重复调用时会自锁死（前端连点即触发）。现在由 `has_live_gateway()`（短临界区，仅判断句柄存在且 `task` 未结束）先行幂等返回，`status()` 也在**一次**加锁内同时读出 running 与 addr。回归测试 `start_gateway_while_running_does_not_deadlock` 把风险调用放进**独立 OS 线程 + 独立 current-thread runtime**、用 `mpsc::recv_timeout` 断言，因为 `tokio::time::timeout` 与被阻塞的 future 同属一个任务、计时器永远得不到轮询，无法用来证死锁。
 - **commands**（前端 `invoke`）：
   - 网关：`gateway_start / stop / restart / status`
   - CRUD：`provider_* / model_* / offer_* / route_* / plugin_*（含 `plugin_read_script` / `plugin_write_script` 在线编辑）/ binding_* / usage_* / settings_*`
-  - 模型目录：`catalog_fetch`（后端 reqwest 拉取 `models.dev/api.json`，解析精简为扁平候选列表）/ `catalog_import`（勾选批量导入：模型**元数据** upsert 到 `models`，**定价**经 `insert_offer_if_absent` 写入对应 provider 的 offer，并对同 slug 已有空定价的行回填 `backfill_offer_pricing`；刻意不触碰 provider 端点配置）
+  - 预设与模型检测：`preset_list`（`presets.rs` 内嵌静态预设表：API Key 直连组开箱即用；账户组 Kimi/Command Code 经 OAuth 登录编排，预设以 `auth_plugin` 绑定 CAP_AUTH 插件）/ `provider_detect_models`（实时探测首端点的模型列表——OpenAI 系 `GET {base}/models`、Anthropic `GET {base}/v1/models`——再用 models.dev 目录按预设的 `models_dev_id` 分区 enrich 元数据；探测失败或空列表时回退目录分区；无目录映射时返回裸列表并以 warning 告知。预设解析先按 provider key 精确匹配，再按端点 Base URL 归一化匹配，用户改名后仍能找回目录映射）
+  - 模型目录：`catalog_fetch`（后端 reqwest 拉取 `models.dev/api.json`，解析精简为扁平候选列表；顶层 JSON 在 `ManagedState` 有 5 分钟 TTL 缓存 + 拉取单飞锁，`refresh=true` 强制重拉并返回缓存命中标记）/ `catalog_import`（勾选批量导入：模型元数据按 slug upsert——已存在的按「有值者胜」合并不覆盖本地字段，返回实际写入/跳过数；**定价**经 `insert_offer_if_absent` 写入对应 provider 的 offer，并对同 slug 已有空定价的行回填 `backfill_offer_pricing`；刻意不触碰 provider 端点配置）
+  - OAuth 账户：`oauth_describe / oauth_begin / oauth_status / oauth_cancel / oauth_paste`——通用登录编排（平台细节在 CAP_AUTH 插件，见 §6 认证能力框架）：describe 拿插件自述决定渲染与来源选择，begin 启动后台登录任务并返回流程描述，前端轮询 status，cancel 经移除流程条目中止后台任务，paste 透传给下一轮 auth_poll。登录成功：令牌包加密存 `secrets` 表，provider 行只记非敏感 `extra.auth`，写 provider 维度插件绑定
   - Trace：`trace_list / trace_read / trace_delete`（只读浏览 `trace_dir`，含路径穿越校验）
   - 应用：`app_info / config_get / config_set`
 - **托盘**：显示主窗口 / 一键启停网关 / 退出；左键单击显示窗口。
@@ -631,6 +680,11 @@ docker run -d -p 38440:38440 \
 M5 Lua 插件系统（Core 层 + 报文层 raw 钩子、宿主 API、沙箱配额硬化、启用条件 `MB.requires`、示例插件、Plugins 管理页）·
 M6 四协议全矩阵 + Usage/Traces 可视化 · M7 无头服务端与 web 前端（crates/server + ui web 运行时 + Docker 部署）·
 M8 余额&健康看板（一次性 Lua 查询脚本 + 定时调度 + 多 key 在同一卡片内逐行展示 + 卡片式看板）与 web 点击响应优化。
+M9 上游预设与模型检测（预设选择器 API/账户顶层标签、实时探测 + models.dev enrich/目录回退、
+勾选导入、目录 TTL 缓存单飞与手动强制刷新、导入「有值者胜」合并与如实计数）· M10 认证能力框架
+（CAP_AUTH：宿主原语 mb.secret/mb.random/mb.oauth/mb.fs/mb.open_external/mb.time + 通用编排器与
+登录 UI；Kimi 设备码、Command Code 回调/导入/粘贴全量进 Lua 插件；令牌包加密存 V14 secrets 表、
+单飞刷新/退避/401 重发）与 CI 门禁（fmt/clippy/workspace test + 前端 type-check/build）。
 
 - 验证命令：`cargo check --locked --workspace --all-targets`、`cargo clippy --locked --workspace --all-targets`、`cargo test --locked --workspace`、`pnpm --dir ui type-check`、`pnpm --dir ui build`。无桌面系统库时可用 `cargo test --locked --workspace --exclude moonbridge-app`，但该结果不覆盖桌面端。`crates/server/tests/lifecycle.rs` 以真实 HTTP 验证双 token 鉴权、配置不泄漏凭据、加密状态重开和进程内重启排空；存储加密与余额 HTTP 安全边界由对应 crate 的回归测试覆盖。Windows DPAPI 仍需 Windows 环境验证；构建测试不等于线上部署或浏览器可视化验收。
 - **推理强度传导**：`CoreRequest.reasoning.effort` 由四个上游 adapter 各自落地——Chat 用

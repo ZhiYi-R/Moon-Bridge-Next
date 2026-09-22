@@ -24,9 +24,11 @@ pub mod registry;
 pub mod runtime;
 pub mod session;
 
-pub use bridge::{HostBridge, HttpRequest, HttpResponse};
+pub use bridge::{CallbackHandle, CallbackSpec, HostBridge, HttpRequest, HttpResponse};
 pub use error::{PluginError, Result};
-pub use manifest::{Manifest, CAP_CORE, CAP_RAW_REQUEST, CAP_RAW_RESPONSE, CAP_RAW_STREAM};
+pub use manifest::{
+    Manifest, CAP_AUTH, CAP_CORE, CAP_RAW_REQUEST, CAP_RAW_RESPONSE, CAP_RAW_STREAM,
+};
 pub use quota::{ExecutionBudget, SandboxLimits};
 pub use registry::{LuaPluginRegistry, ScopeOverrides};
 pub use runtime::LuaRuntime;
@@ -797,5 +799,236 @@ mod tests {
         assert_eq!(ret["quotas"][1]["left_percent"].as_f64(), Some(57.5));
         assert_eq!(ret["summary"], json!("余额正常，剩余：sk-中文"));
         assert_eq!(ret["nested"]["deep"][2]["ok"], json!(true));
+    }
+
+    // ── 旁路能力：call_mb 多参 / 新宿主 API ──
+
+    /// 带加密小值与随机源的测试桥。
+    struct RichBridge {
+        secrets: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    }
+
+    #[async_trait]
+    impl HostBridge for RichBridge {
+        async fn http_request(
+            &self,
+            _req: HttpRequest,
+        ) -> std::result::Result<HttpResponse, String> {
+            Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: json!({"ok": true}),
+            })
+        }
+        async fn provider_invoke(
+            &self,
+            _provider: &str,
+            _model: &str,
+            _req: CoreRequest,
+        ) -> std::result::Result<moonbridge_core::CoreResponse, String> {
+            Err("未实现".to_string())
+        }
+        async fn secret_get(
+            &self,
+            scope: &str,
+            key: &str,
+        ) -> std::result::Result<Option<String>, String> {
+            Ok(self
+                .secrets
+                .lock()
+                .unwrap()
+                .get(&format!("{scope}␟{key}"))
+                .cloned())
+        }
+        async fn secret_set(
+            &self,
+            scope: &str,
+            key: &str,
+            value: &str,
+        ) -> std::result::Result<(), String> {
+            self.secrets
+                .lock()
+                .unwrap()
+                .insert(format!("{scope}␟{key}"), value.to_string());
+            Ok(())
+        }
+        async fn secret_delete(&self, scope: &str, key: &str) -> std::result::Result<(), String> {
+            self.secrets
+                .lock()
+                .unwrap()
+                .remove(&format!("{scope}␟{key}"));
+            Ok(())
+        }
+        fn random_bytes(&self, n: usize) -> std::result::Result<Vec<u8>, String> {
+            Ok(vec![0xAB; n])
+        }
+    }
+
+    #[tokio::test]
+    async fn call_mb_multi_arg() {
+        let rt = load(
+            "authy",
+            r#"
+            MB = { name = "authy", capabilities = { "auth" } }
+            function MB.auth_describe(ctx)
+              return { kind = "device_code", provider = ctx.provider }
+            end
+            function MB.auth_refresh(ctx, bundle)
+              bundle.access = bundle.access .. "+refreshed"
+              return bundle
+            end
+            function MB.auth_nil() return nil end
+            "#,
+        );
+        let v = rt
+            .call_mb_once("auth_describe", &json!({"provider": "k"}))
+            .await
+            .unwrap();
+        assert_eq!(v["kind"], "device_code");
+        assert_eq!(v["provider"], "k", "ctx 应原样透传");
+        let b = rt
+            .call_mb(
+                "auth_refresh",
+                &[json!({}), json!({"access": "tok", "expires_at": 1})],
+            )
+            .await
+            .unwrap();
+        assert_eq!(b["access"], "tok+refreshed");
+        assert_eq!(
+            rt.call_mb_once("auth_nil", &json!({})).await.unwrap(),
+            json!(null)
+        );
+        assert!(rt.call_mb_once("auth_missing", &json!({})).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn random_state_and_secret_namespacing() {
+        let br = Arc::new(RichBridge {
+            secrets: std::sync::Mutex::new(std::collections::HashMap::new()),
+        });
+        let rt = LuaRuntime::new(
+            "kimi-auth",
+            r#"
+            MB = { name = "kimi-auth", capabilities = { "auth" } }
+            function MB.probe()
+              local st = mb.random.state()
+              mb.secret.set("meta", "device_id", st)
+              return { state = st, back = mb.secret.get("meta", "device_id") }
+            end
+            "#,
+            &json!({}),
+            br.clone(),
+            SessionStore::new(),
+        )
+        .unwrap();
+        let v = rt.call_mb_once("probe", &json!({})).await.unwrap();
+        assert_eq!(
+            v["state"].as_str().unwrap().len(),
+            32,
+            "state 为 16 字节 hex"
+        );
+        assert_eq!(v["state"], "abababababababababababababababab");
+        assert_eq!(v["back"], v["state"]);
+        // scope 强制冠以插件名：宿主侧看到的是 kimi-auth/meta
+        assert!(
+            br.secrets
+                .lock()
+                .unwrap()
+                .contains_key("kimi-auth/meta␟device_id"),
+            "secret scope 必须按插件名隔离"
+        );
+    }
+
+    #[tokio::test]
+    async fn fs_read_whitelist_enforced() {
+        // 在 home 下造一份白名单文件
+        let dir = dirs::home_dir()
+            .unwrap()
+            .join(format!(".mb-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("auth.json"), r#"{"apiKey":"k1"}"#).unwrap();
+        let allow = format!("~/{}/auth.json", dir.file_name().unwrap().to_string_lossy());
+        let script = format!(
+            r#"
+            MB = {{ name = "cc-auth", capabilities = {{ "auth" }}, fs_read_allow = {{ "{allow}" }} }}
+            function MB.read_ok() return mb.fs.read("{allow}") end
+            function MB.read_evil() return mb.fs.read("~/.commandcode/auth.json") end
+            function MB.read_escape() return mb.fs.read("{allow}/../../x") end
+            "#
+        );
+        let br = Arc::new(RichBridge {
+            secrets: std::sync::Mutex::new(std::collections::HashMap::new()),
+        });
+        let rt = LuaRuntime::new("cc-auth", &script, &json!({}), br, SessionStore::new()).unwrap();
+        assert_eq!(rt.manifest.fs_read_allow, vec![allow.clone()]);
+        // 白名单内：fs_read 未被桥实现 → 报「宿主不支持」，说明校验已通过
+        let err = rt.call_mb_once("read_ok", &json!({})).await.unwrap_err();
+        assert!(
+            err.to_string().contains("宿主不支持"),
+            "白名单内应进到桥调用: {err}"
+        );
+        // 白名单外 / 越界：在校验层拒绝，到不了桥
+        let err = rt.call_mb_once("read_evil", &json!({})).await.unwrap_err();
+        assert!(err.to_string().contains("白名单"), "{err}");
+        let err = rt
+            .call_mb_once("read_escape", &json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("home 相对") || err.to_string().contains("白名单"),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// auth_plugin_for：CAP_AUTH + provider 维度**显式绑定**的命中语义。
+    /// 全局开关对 auth 刻意无效（全局启用会让它对每个 provider 的出站都注入）。
+    #[test]
+    fn auth_plugin_for_respects_provider_binding() {
+        let mk_disabled = |name: &str| {
+            let mut rt = load(
+                name,
+                &format!(
+                    r#"MB = {{ name = "{name}", capabilities = {{ "auth" }} }}
+                    function MB.auth_headers(ctx, b) return {{}} end"#,
+                ),
+            );
+            rt.enabled = false;
+            Arc::new(rt)
+        };
+        let mut overrides = std::collections::HashMap::new();
+        let mut kimi_ov = ScopeOverrides::default();
+        kimi_ov.insert("provider", "kimi-oauth".to_string(), true);
+        overrides.insert("auth-kimi".to_string(), kimi_ov);
+        let mut cc_ov = ScopeOverrides::default();
+        cc_ov.insert("provider", "command-code-auth".to_string(), true);
+        overrides.insert("auth-commandcode".to_string(), cc_ov);
+        let reg = LuaPluginRegistry::new(
+            vec![mk_disabled("auth-kimi"), mk_disabled("auth-commandcode")],
+            overrides,
+            SessionStore::new(),
+        );
+        let name_of = |p: Option<Arc<LuaRuntime>>| p.map(|rt| rt.name.clone());
+        assert_eq!(
+            name_of(reg.auth_plugin_for("kimi-oauth")).as_deref(),
+            Some("auth-kimi")
+        );
+        assert_eq!(
+            name_of(reg.auth_plugin_for("command-code-auth")).as_deref(),
+            Some("auth-commandcode")
+        );
+        assert_eq!(name_of(reg.auth_plugin_for("deepseek")), None);
+        // 全局启用但无 provider 绑定：同样不命中（全局开关对 auth 无效）
+        let global_on = Arc::new(load(
+            "auth-global",
+            r#"MB = { name = "auth-global", capabilities = { "auth" } }
+            function MB.auth_headers(ctx, b) return {} end"#,
+        ));
+        let reg3 = LuaPluginRegistry::new(vec![global_on], Default::default(), SessionStore::new());
+        assert_eq!(
+            name_of(reg3.auth_plugin_for("kimi-oauth")),
+            None,
+            "全局启用的 auth 插件无绑定不得命中"
+        );
     }
 }

@@ -70,6 +70,9 @@ impl Process {
         let log = std::fs::File::create(&output)?;
         let child = Command::new(env!("CARGO_BIN_EXE_moonbridge-server"))
             .env_clear()
+            // Windows：Winsock 初始化依赖 SystemRoot，env_clear 清掉后 bind 报
+            // os error 10106（WSAEPROVIDERFAILEDINIT）；按需补回。
+            .envs(std::env::var("SystemRoot").map(|v| ("SystemRoot".to_string(), v)))
             .env("HOME", dir)
             .env("USERPROFILE", dir)
             .env("MOONBRIDGE_ADMIN_TOKEN", ADMIN)
