@@ -10,6 +10,7 @@ import EmptyState from "@/components/ui/EmptyState.vue";
 import Pagination from "@/components/ui/Pagination.vue";
 import DateRangeFilter, { type DateRange } from "@/components/ui/DateRangeFilter.vue";
 import { useAutoPageSize } from "@/composables/useAutoPageSize";
+import { useWheelPaging } from "@/composables/useWheelPaging";
 import { errMsg, modelApi, usageApi, type UsageRecord, type UsageSummary } from "@/lib/api";
 import { formatCost, formatLatency, formatTime, formatTokens } from "@/lib/utils";
 
@@ -209,6 +210,12 @@ const pagedRecords = computed(() =>
 );
 watch(pageCount, (n) => {
   if (page.value > n) page.value = n;
+});
+useWheelPaging(detailScroll, {
+  canPrev: () => page.value > 1,
+  canNext: () => page.value < pageCount.value,
+  prev: () => page.value--,
+  next: () => page.value++,
 });
 watch(range, () => {
   page.value = 1;

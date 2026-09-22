@@ -7,8 +7,13 @@ import { onBeforeUnmount, ref, watch, type Ref } from "vue";
  * 通过 ResizeObserver 监听容器尺寸变化、MutationObserver 监听行增删后自动重测，rAF 合帧防抖。
  * 要求容器高度由布局决定（flex 填充 / max-h），不随行数增长，否则分页与渲染会互相触发形成反馈循环。
  * 传入 page 时，行数变化会把页号换算到「当前页首行」仍可见的位置，避免正在浏览的内容漂走。
+ * rowSelector 默认 `tbody tr`；非表格列表（如 ul > li）传入对应选择器。
  */
-export function useAutoPageSize(container: Ref<HTMLElement | null>, page?: Ref<number>) {
+export function useAutoPageSize(
+  container: Ref<HTMLElement | null>,
+  page?: Ref<number>,
+  rowSelector = "tbody tr",
+) {
   const pageSize = ref(20);
   /** 容器内表格区域的实测可用高度（px），供按块估算高度的分页场景使用。 */
   const availHeight = ref(0);
@@ -20,10 +25,16 @@ export function useAutoPageSize(container: Ref<HTMLElement | null>, page?: Ref<n
   function measure() {
     const el = container.value;
     if (!el) return;
-    const table = el.querySelector<HTMLElement>("table");
     const head = el.querySelector<HTMLElement>("thead");
-    const row = el.querySelector<HTMLElement>("tbody tr");
-    if (row) rowHeight = row.offsetHeight;
+    const row = el.querySelector<HTMLElement>(rowSelector);
+    // 非表格列表时取行的父容器（ul 等），供前置兄弟元素扣高
+    const table = el.querySelector<HTMLElement>("table") ?? row?.parentElement ?? null;
+    if (row) {
+      rowHeight = row.offsetHeight;
+      // 间距（space-y/gap/margin）在行盒外：有两行时用行距作真实行高，否则会逐行累计溢出
+      const sib = row.nextElementSibling as HTMLElement | null;
+      if (sib) rowHeight = Math.max(rowHeight, sib.offsetTop - row.offsetTop);
+    }
     const cs = getComputedStyle(el);
     let avail =
       el.clientHeight -

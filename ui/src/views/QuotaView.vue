@@ -9,6 +9,7 @@ import EmptyState from "@/components/ui/EmptyState.vue";
 import Pagination from "@/components/ui/Pagination.vue";
 import Select from "@/components/ui/Select.vue";
 import { useToast } from "@/composables/useToast";
+import { useWheelPaging } from "@/composables/useWheelPaging";
 import { errMsg, usageApi, type ProviderCost, type ProviderQuotaView, type QuotaEntry, type QuotaPayload } from "@/lib/api";
 import { formatCost, formatTime } from "@/lib/utils";
 import { useQuotaStore } from "@/stores/quota";
@@ -224,6 +225,12 @@ const pageCount = computed(() => pages.value.length);
 const pagedCards = computed(() => pages.value[page.value - 1] ?? []);
 watch(pageCount, (n) => {
   if (page.value > n) page.value = n;
+});
+useWheelPaging(gridWrap, {
+  canPrev: () => page.value > 1,
+  canNext: () => page.value < pageCount.value,
+  prev: () => page.value--,
+  next: () => page.value++,
 });
 
 /** 选中 Provider 的绑定信息行（插件 · 间隔 · key 数）。 */

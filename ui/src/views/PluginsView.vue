@@ -13,6 +13,7 @@ import CodeEditor from "@/components/ui/CodeEditor.vue";
 import Modal from "@/components/ui/Modal.vue";
 import Select from "@/components/ui/Select.vue";
 import Switch from "@/components/ui/Switch.vue";
+import TabBar from "@/components/ui/TabBar.vue";
 import { useConfirm } from "@/composables/useConfirm";
 import { useToast } from "@/composables/useToast";
 import { errMsg, isTauriRuntime, isWebRuntime, pluginApi, type PluginImportOutcome, type PluginRecord } from "@/lib/api";
@@ -148,6 +149,29 @@ async function load() {
     error.value = errMsg(e);
   }
 }
+
+/** 类别 tab：core（请求链路）与 quota（配额查询）是两类运维对象；
+ *  「全部」为平铺视图。未知类别追加为额外 tab。 */
+const CATEGORY_LABELS: Record<string, string> = { core: "请求链路", quota: "配额查询" };
+const activeCategory = ref("");
+const categoryTabs = computed(() => {
+  const cats = [...new Set(plugins.value.map((p) => p.category ?? "core"))].sort(
+    (a, b) => (a === "core" ? 0 : a === "quota" ? 1 : 2) - (b === "core" ? 0 : b === "quota" ? 1 : 2) || a.localeCompare(b),
+  );
+  return [
+    { key: "", label: "全部", count: plugins.value.length },
+    ...cats.map((c) => ({
+      key: c,
+      label: CATEGORY_LABELS[c] ?? c,
+      count: plugins.value.filter((p) => (p.category ?? "core") === c).length,
+    })),
+  ];
+});
+const tabbedPlugins = computed(() =>
+  activeCategory.value === ""
+    ? plugins.value
+    : plugins.value.filter((p) => (p.category ?? "core") === activeCategory.value),
+);
 
 function toggleArr(arr: string[], v: string) {
   const i = arr.indexOf(v);
@@ -522,6 +546,7 @@ onActivated(() => {
 
     <div v-else key="list" class="flex min-h-0 flex-1 flex-col overflow-hidden">
       <input ref="fileInput" type="file" accept=".lua" multiple class="hidden" @change="onFilesPicked" />
+      <TabBar v-if="plugins.length > 0" v-model="activeCategory" :tabs="categoryTabs" />
       <div class="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">
         <EmptyState v-if="plugins.length === 0" :icon="Puzzle">
           <p>
@@ -535,8 +560,11 @@ onActivated(() => {
             </Button>
           </template>
         </EmptyState>
+        <EmptyState v-else-if="tabbedPlugins.length === 0" class="p-6">
+          该类别下暂无插件。
+        </EmptyState>
         <ul v-else class="divide-y">
-          <li v-for="p in plugins" :key="p.name" class="py-3 first:pt-0 last:pb-0">
+          <li v-for="p in tabbedPlugins" :key="p.name" class="py-3 first:pt-0">
             <div class="flex items-center justify-between gap-2">
               <div class="flex min-w-0 items-center gap-2">
                 <span class="truncate font-medium">{{ p.name }}</span>

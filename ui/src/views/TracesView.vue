@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { RefreshCw, ScrollText, Trash2 } from "lucide-vue-next";
-import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
 
 import Alert from "@/components/ui/Alert.vue";
 import Badge from "@/components/ui/Badge.vue";
@@ -8,11 +8,14 @@ import Button from "@/components/ui/Button.vue";
 import CodeEditor from "@/components/ui/CodeEditor.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import Input from "@/components/ui/Input.vue";
+import Pagination from "@/components/ui/Pagination.vue";
 import { appApi, errMsg, traceApi, type TraceDetail, type TraceEntry } from "@/lib/api";
 import { formatBytes, formatLatency, formatTimeMs, formatTokens } from "@/lib/utils";
+import { useAutoPageSize } from "@/composables/useAutoPageSize";
 import { useConfirm } from "@/composables/useConfirm";
 import { usePointerDrag } from "@/composables/usePointerDrag";
 import { useToast } from "@/composables/useToast";
+import { useWheelPaging } from "@/composables/useWheelPaging";
 
 const { confirm } = useConfirm();
 const toast = useToast();
@@ -74,6 +77,27 @@ const filtered = computed(() => {
   );
 });
 
+// ── 列表分页（页大小随可视高度自适应）──
+const listScroll = ref<HTMLElement | null>(null);
+const page = ref(1);
+const { pageSize } = useAutoPageSize(listScroll, page, "li");
+const pageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / pageSize.value)));
+const paged = computed(() =>
+  filtered.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value),
+);
+watch(pageCount, (n) => {
+  if (page.value > n) page.value = n;
+});
+watch(filter, () => {
+  page.value = 1;
+});
+useWheelPaging(listScroll, {
+  canPrev: () => page.value > 1,
+  canNext: () => page.value < pageCount.value,
+  prev: () => page.value--,
+  next: () => page.value++,
+});
+
 /** silent=true 用于 keep-alive 切回时的后台重拉：不点亮 refresh 图标，避免每次进页面都闪一次 loading。 */
 async function load(silent = false) {
   loading.value = !silent;
@@ -98,8 +122,11 @@ async function open(entry: TraceEntry, scroll = false) {
   detail.value = null;
   detailLoading.value = true;
   if (scroll) {
+    // 选中项不在当前页时先把页号跟过去，渲染后再 scrollIntoView
+    const i = filtered.value.findIndex((x) => x.relPath === entry.relPath);
+    if (i >= 0) page.value = Math.floor(i / pageSize.value) + 1;
     await nextTick();
-    listEl.value
+    listScroll.value
       ?.querySelector('[data-selected="true"]')
       ?.scrollIntoView({ block: "nearest" });
   }
@@ -205,7 +232,7 @@ onUnmounted(() => document.removeEventListener("keydown", onKey));
     <!-- 主从面板：左列表（可拖宽） / 右详情，高度填满视口 -->
     <div class="flex min-h-0 flex-1 overflow-hidden">
       <section ref="listEl" class="flex min-h-0 shrink-0 flex-col" :style="{ width: listWidth + 'px' }">
-        <div class="flex shrink-0 items-center gap-2 border-b p-3">
+        <div class="flex shrink-0 items-center gap-2 border-b p-3" :title="traceDir || undefined">
           <Input v-model="filter" placeholder="按会话 / 模型 / 文件名过滤…(↑↓ 切换)" class="flex-1" />
           <Button
             variant="ghost"
@@ -218,14 +245,14 @@ onUnmounted(() => document.removeEventListener("keydown", onKey));
             <RefreshCw class="size-4" :class="loading && 'animate-spin'" />
           </Button>
         </div>
-        <div class="scrollbar-thin min-h-0 flex-1 overflow-y-auto p-3">
+        <div ref="listScroll" class="scrollbar-thin min-h-0 flex-1 overflow-y-auto p-3">
           <EmptyState v-if="loading && filtered.length === 0" class="p-6">加载中…</EmptyState>
           <EmptyState v-else-if="filtered.length === 0" :icon="ScrollText" class="p-6">
             暂无 trace。启动网关并发起请求后将在此显示。
           </EmptyState>
           <ul v-else class="space-y-1.5">
             <li
-              v-for="e in filtered"
+              v-for="e in paged"
               :key="e.relPath"
               :data-selected="selected?.relPath === e.relPath"
               class="group cursor-pointer rounded-lg border p-2.5 transition-colors hover:bg-accent"
@@ -256,12 +283,8 @@ onUnmounted(() => document.removeEventListener("keydown", onKey));
             </li>
           </ul>
         </div>
-        <div
-          v-if="traceDir"
-          class="shrink-0 truncate border-t px-3 py-2 font-mono text-[10px] text-muted-foreground"
-          :title="traceDir"
-        >
-          {{ traceDir }}
+        <div v-if="pageCount > 1" class="shrink-0 border-t px-3 py-2">
+          <Pagination v-model:page="page" :page-count="pageCount" :total="filtered.length" />
         </div>
       </section>
 

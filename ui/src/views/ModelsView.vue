@@ -15,6 +15,7 @@ import StringListInput from "@/components/ui/StringListInput.vue";
 import { useConfirm } from "@/composables/useConfirm";
 import { useToast } from "@/composables/useToast";
 import { useAutoPageSize } from "@/composables/useAutoPageSize";
+import { useWheelPaging } from "@/composables/useWheelPaging";
 import {
   catalogApi,
   errMsg,
@@ -240,6 +241,12 @@ const importPage = ref(1);
 const { pageSize: importPageSize } = useAutoPageSize(importScroll, importPage);
 const importPageCount = computed(() => Math.max(1, Math.ceil(filteredCatalog.value.length / importPageSize.value)));
 const pagedCatalog = computed(() => paginate(filteredCatalog.value, importPage, importPageSize.value));
+useWheelPaging(importScroll, {
+  canPrev: () => importPage.value > 1,
+  canNext: () => importPage.value < importPageCount.value,
+  prev: () => importPage.value--,
+  next: () => importPage.value++,
+});
 watch(importQuery, () => {
   importPage.value = 1;
 });
@@ -292,10 +299,11 @@ function toggleSelectAllFiltered() {
   importSelected.value = next;
 }
 
-const allFilteredSelected = computed(() => {
-  const keys = filteredCatalog.value.map(catalogKey);
-  return keys.length > 0 && keys.every((k) => importSelected.value.has(k));
-});
+const allFilteredSelected = computed(
+  () =>
+    filteredCatalog.value.length > 0 &&
+    filteredCatalog.value.every((m) => importSelected.value.has(catalogKey(m))),
+);
 
 const someFilteredSelected = computed(
   () =>
@@ -602,6 +610,12 @@ const pagedRows = computed(() => paginate(rows.value, page, pageSize.value));
 watch(pageCount, (c) => {
   if (page.value > c) page.value = c;
 });
+useWheelPaging(scrollEl, {
+  canPrev: () => page.value > 1,
+  canNext: () => page.value < pageCount.value,
+  prev: () => page.value--,
+  next: () => page.value++,
+});
 
 const offerExists = computed(() =>
   offers.value.some((o) => o.providerKey === offerForm.providerKey && o.modelSlug === offerForm.modelSlug),
@@ -830,7 +844,7 @@ onActivated(() => {
       :guard="closeGuard"
       @close="editing = false"
     >
-      <div class="grid gap-4 grid-cols-[repeat(auto-fit,minmax(14rem,1fr))]">
+      <div class="grid grid-cols-2 gap-4">
         <div class="space-y-1.5">
           <Label for="m-slug">唯一标识</Label>
           <Input id="m-slug" v-model="form.slug" placeholder="如 claude-sonnet-4" :disabled="!isNew" />
@@ -847,9 +861,9 @@ onActivated(() => {
           <Label for="m-maxout">输出上限</Label>
           <Input id="m-maxout" v-model="form.maxOutputTokens" placeholder="64000" inputmode="numeric" />
         </div>
-        <div class="space-y-1.5">
+        <div class="space-y-1.5 col-span-2">
           <Label>模态</Label>
-          <div class="flex flex-wrap gap-x-4 gap-y-2 pt-1.5">
+          <div class="flex min-h-9 flex-wrap items-center gap-x-4 gap-y-1.5">
             <label
               v-for="m in modalityOptions"
               :key="m"
@@ -863,11 +877,11 @@ onActivated(() => {
             </label>
           </div>
         </div>
-        <div class="space-y-1.5">
+        <div class="space-y-1.5 col-span-2">
           <Label>推理档位</Label>
           <StringListInput v-model="form.reasoningLevels" placeholder="如 high 后回车添加" />
         </div>
-        <div class="space-y-1.5 col-span-full">
+        <div class="space-y-1.5 col-span-2">
           <Label for="m-extra">扩展字段</Label>
           <textarea id="m-extra" v-model="form.extraText" rows="3" spellcheck="false" :class="textareaClass"></textarea>
         </div>

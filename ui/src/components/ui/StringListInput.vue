@@ -58,7 +58,7 @@ function removeAt(i: number) {
         :class="inputCls"
         @keydown.enter.prevent="add"
       />
-      <Button type="button" variant="outline" size="sm" class="shrink-0" @click="add">
+      <Button type="button" variant="outline" size="sm" class="h-9 shrink-0" @click="add">
         <Plus class="size-3.5" /> {{ addLabel ?? "添加" }}
       </Button>
     </div>
