@@ -13,7 +13,8 @@ on:
       - master
       - develop
     tags:
-      - "Release*"
+      # 通配符 * 不跨 /，Release/0.1.0 需要 **（覆盖 Release/x.y.z 与 Release-x.y.z）
+      - "Release**"
   workflow_dispatch:
 
 permissions:
