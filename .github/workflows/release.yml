@@ -2,7 +2,10 @@ name: Release
 
 # 触发：
 #   * 每次推送到主干/开发分支 —— 全矩阵构建（CI 验证，不发布）
-#   * 推送 Release 前缀的 tag（如 Release/0.1.0、Release-0.1.0）—— 构建 + 发布
+#   * 推送 Release 前缀的 tag —— 构建 + 发布。
+#     版本约定 Major.minor.patch：patch 0 = alpha（开发版）、1 = beta
+#     （测试版）、>=2 = GA；patch 0/1 发布为 GitHub pre-release。
+#     如 Release/0.1.0（alpha）、Release/0.1.1（beta）、Release/0.1.2（GA）。
 on:
   push:
     branches:
@@ -104,6 +107,24 @@ jobs:
           "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
+      # 版本号即 tag 去掉 Release 前缀：Major.minor.patch（0=alpha、1=beta、2=GA）。
+      # 分支构建沿用仓库内版本。三处同步：workspace.package（二进制 --version
+      # 与管理 API）、tauri.conf.json（产物名与包元数据）、ui/package.json。
+      - name: Derive and apply app version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            APP_VERSION="${GITHUB_REF_NAME#Release}"; APP_VERSION="${APP_VERSION#[/-]}"
+            IFS=. read -r a b c <<< "$APP_VERSION"
+            APP_VERSION="${a}.${b:-0}.${c:-0}"
+            sed -i '/^\[workspace\.package\]/,/^\[/s/^version = ".*"/version = "'"$APP_VERSION"'"/' Cargo.toml
+            sed -i 's/"version": ".*"/"version": "'"$APP_VERSION"'"/' src-tauri/tauri.conf.json ui/package.json
+          else
+            APP_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          fi
+          echo "app version: $APP_VERSION"
+
       - name: Install frontend dependencies
         run: pnpm --dir ui install --frozen-lockfile
 
@@ -167,21 +188,40 @@ jobs:
       - name: List release assets
         run: ls -la release-assets
 
+      # tag 形如 Release/0.1.0：patch 0=alpha、1=beta 发 pre-release，其余为 GA；
+      # 展示名在预发布版本后补通道后缀（Moon Bridge Next 0.1.0-alpha）。
+      - name: Resolve release channel
+        id: channel
+        shell: bash
+        run: |
+          v="${GITHUB_REF_NAME#Release}"; v="${v#[/-]}"
+          case "${v##*.}" in
+            0) suffix="-alpha";;
+            1) suffix="-beta";;
+            *) suffix="";;
+          esac
+          pre=false; [ -n "$suffix" ] && pre=true
+          {
+            echo "version=$v"
+            echo "suffix=$suffix"
+            echo "prerelease=$pre"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: Moon Bridge Next ${{ github.ref_name }}
+          name: Moon Bridge Next ${{ steps.channel.outputs.version }}${{ steps.channel.outputs.suffix }}
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.channel.outputs.prerelease }}
           files: release-assets/*
           body: |
-            ## Moon Bridge Next ${{ github.ref_name }}
+            ## Moon Bridge Next ${{ steps.channel.outputs.version }}${{ steps.channel.outputs.suffix }}
 
             ### 下载
 
-            - **Linux x86_64**：`*_amd64.deb` / `*.x86_64.rpm` / `*_x86_64.pkg.tar.zst` / `*_amd64.AppImage`
-            - **Linux arm64**：`*_arm64.deb` / `*.aarch64.rpm` / `*_aarch64.pkg.tar.zst` / `*_aarch64.AppImage`
+            - **Linux x86_64**：`*_amd64.deb` / `*.x86_64.rpm` / `*_amd64.AppImage`
+            - **Linux arm64**：`*_arm64.deb` / `*.aarch64.rpm` / `*_aarch64.AppImage`
             - **macOS**：`*_aarch64.dmg`（Apple Silicon）/ `*_x64.dmg`（Intel）
             - **Windows**：`*_x64-setup.exe` / `*_arm64-setup.exe`（NSIS 安装包，简体中文）
 
