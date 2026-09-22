@@ -5,9 +5,9 @@ import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted,
 import Alert from "@/components/ui/Alert.vue";
 import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
-import CodeEditor from "@/components/ui/CodeEditor.vue";
 import EmptyState from "@/components/ui/EmptyState.vue";
 import Input from "@/components/ui/Input.vue";
+import LazyCodeEditor from "@/components/ui/LazyCodeEditor.vue";
 import Pagination from "@/components/ui/Pagination.vue";
 import { appApi, errMsg, traceApi, type TraceDetail, type TraceEntry } from "@/lib/api";
 import { formatBytes, formatLatency, formatTimeMs, formatTokens } from "@/lib/utils";
@@ -36,9 +36,9 @@ const tpsText = computed(() => {
   return `${(d.usage.outputTokens / genSec).toFixed(1)} tok/s`;
 });
 
-/** 超过该体积的报文不走 CodeMirror 高亮（大 JSON 语法解析成本高），回退纯文本 <pre>。 */
+/** 超过该体积的报文不走 CodeMirror 高亮（大 JSON 语法解析成本高），<pre> 也只渲染前 N 截断段——
+ *  MB 级全文塞 DOM 的布局成本远高于传输本身。 */
 const HIGHLIGHT_LIMIT = 256 * 1024;
-const encoder = new TextEncoder();
 
 /** 报文区数据：旧 trace 无响应快照且 error 存有响应体时，回退展示到「上游响应」。
  *  pretty 结果与行数在此一次性算好，避免模板里对 MB 级报文重复 stringify/split。 */
@@ -53,13 +53,21 @@ const sections = computed(() => {
     { title: "上游响应", body: upstreamResponse },
     { title: "客户端响应", body: d.clientResponse },
   ].map((s) => {
-    const text = pretty(s.body);
+    const full = pretty(s.body);
+    const big = full.length > HIGHLIGHT_LIMIT;
+    let text = full;
+    if (big) {
+      // 截断点优先落在阈值前的换行上（容忍窗口内无换行则硬切）
+      const cut = full.lastIndexOf("\n", HIGHLIGHT_LIMIT);
+      text = full.slice(0, cut > HIGHLIGHT_LIMIT - 4096 ? cut : HIGHLIGHT_LIMIT);
+    }
     return {
       ...s,
       text,
-      bytes: encoder.encode(text).length,
-      big: text.length > HIGHLIGHT_LIMIT,
-      lines: text.split("\n").length,
+      // Blob 持串引用不复制；行数仅小报文的 editorHeight 需要，大报文不 split
+      bytes: new Blob([full]).size,
+      big,
+      lines: big ? 0 : full.split("\n").length,
       /** null 报文：记录被关闭、旧版流式 trace 未聚合，或该段本无内容。 */
       empty: s.body === null || s.body === undefined,
     };
@@ -348,7 +356,7 @@ onUnmounted(() => document.removeEventListener("keydown", onKey));
                   {{ sec.title }}
                   <span v-if="!sec.empty" class="font-normal">
                     {{ formatBytes(sec.bytes) }}
-                    <template v-if="sec.big">· 过大，已关闭高亮</template>
+                    <template v-if="sec.big">· 过大，仅显示前 {{ formatBytes(HIGHLIGHT_LIMIT) }}</template>
                   </span>
                 </h4>
                 <div
@@ -362,7 +370,7 @@ onUnmounted(() => document.removeEventListener("keydown", onKey));
                   class="scrollbar-thin max-h-96 overflow-auto whitespace-pre rounded-md bg-muted p-3 font-mono text-[11px] leading-relaxed"
                   >{{ sec.text }}</pre
                 >
-                <CodeEditor
+                <LazyCodeEditor
                   v-else
                   :model-value="sec.text"
                   lang="json"
