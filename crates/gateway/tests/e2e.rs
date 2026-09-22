@@ -1817,15 +1817,9 @@ async fn e2e_plugin_session_id_overrides_watermark() {
         "messages": [{ "role": "user", "content": "Hi" }], "stream": false
     });
     let headers = vec![("x-opencode-session".to_string(), "oc-sess-123".to_string())];
-    let resp = dispatch::handle_request(
-        state.clone(),
-        Protocol::Anthropic,
-        body,
-        headers,
-        None,
-    )
-    .await
-    .expect("dispatch 应成功");
+    let resp = dispatch::handle_request(state.clone(), Protocol::Anthropic, body, headers, None)
+        .await
+        .expect("dispatch 应成功");
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();

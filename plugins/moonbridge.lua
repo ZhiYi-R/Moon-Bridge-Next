@@ -195,7 +195,7 @@ MB = {}
 
 ---@class MbAuthCtx
 ---认证钩子上下文（非报文钩子 ctx；由宿主按 provider 构造）。
----@field provider string 上游服务 key（= 账户预设 id）
+---@field provider string 上游服务 key（新建路径为 describe.provider.key，已有 provider 重登录为其 key）
 ---@field source string|nil 登录来源（用户在 UI 的选择；插件在 describe.sources 中广告可选值）
 ---@field host { os: string, arch: string, name: string }|nil 宿主平台信息（沙箱无 os 库；设备指纹类请求头用）
 
@@ -204,12 +204,25 @@ MB = {}
 ---@field access string 出站凭据（非空，core 校验）
 ---@field expires_at number|nil 过期时刻（unix 毫秒，**服务端原始值**；缺省=永不过期。skew 由 core 统一扣，插件不得预先扣减）
 
+---@class MbAuthProviderTpl
+---新建路径的 provider 模板：登录成功后宿主按此建 provider（端点 api_key 置空，
+---凭据由 auth_headers 注入）并写 provider 维度绑定。已存在 provider 的重登录
+---路径不消费本模板（provider 行字段保持原样，只刷新 extra.auth 元数据）。
+---@field key string 建议的 provider key（同名冲突只允许覆盖同插件创建的账户）
+---@field label string|nil 展示名
+---@field protocol string 协议串（"anthropic"|"openai-response"|"openai-chat"|"google-genai"）
+---@field base_url string 上游端点
+---@field dashboard_url string|nil 控制台/取号页面
+---@field note string|nil 说明（预设选择器账户组展示）
+---@field models_dev_id string|nil models.dev 目录 id（模型检测 enrich/回退用）
+
 ---@class MbAuthDescribe
 ---@field kind string "device_code"|"callback"|"paste"（本轮 UI 支持 device_code/callback）
 ---@field label string|nil 展示名
 ---@field instructions string|nil 指引文案
 ---@field supports_paste boolean|nil 是否展示手动粘贴输入框
 ---@field sources { id: string, label: string }[]|nil 可选凭据来源（多个时 UI 先让用户选，经 ctx.source 回传）
+---@field provider MbAuthProviderTpl|nil 新建路径的 provider 模板（插件路径登录必需；provider 路径可省略）
 
 ---@class MbAuthBeginResult
 ---@field status string|nil "done"（本地导入命中，bundle 直出）/"error"（显式失败，message 说明）；缺省=进入轮询流
@@ -256,7 +269,7 @@ MB = {}
 ---CSPRNG（沙箱无安全随机源；OAuth state 等必须从这里取）。
 ---@field random { state: fun(): string, bytes: fun(n: number): string }
 ---OAuth 回环回调监听（宿主托管：一次性、带超时、完成即清理；插件不能自己 bind 端口）。
----@field oauth { listen_callback: async fun(spec: MbCallbackSpec): MbCallbackHandle, callback_await: async fun(id: string, timeout_ms: number|nil): table|nil, callback_close: async fun(id: string) }
+---@field oauth { listen_callback: async fun(spec: MbCallbackSpec): MbCallbackHandle, callback_await: async fun(id: string, timeout_ms: number|nil): table|nil, callback_close: async fun(id: string) } 回调监听同时接受 POST JSON 与 GET query（标准 OAuth 浏览器重定向：?code=..&state=.. 并入对象，用户浏览器回完成页）
 ---在外部浏览器打开 URL（仅 http/https）。
 ---@field open_external async fun(url: string)
 ---受限文件读（白名单制：MB.fs_read_allow 声明的 home 相对路径，精确匹配；上限 256KiB）。

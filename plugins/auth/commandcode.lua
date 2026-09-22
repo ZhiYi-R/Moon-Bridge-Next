@@ -20,6 +20,7 @@ local CLI_AUTH_FILE = "~/.commandcode/auth.json"
 MB = {
   name = "auth-commandcode",
   version = "0.1.0",
+  category = "auth",
   scopes = { "provider" },
   capabilities = { "auth" },
   -- mb.fs.read 白名单（仅此一份文件，精确匹配）
@@ -102,6 +103,15 @@ function MB.auth_describe(ctx)
     sources = {
       { id = "local-cli", label = "导入本地 CLI 凭据" },
       { id = "browser", label = "浏览器授权登录" },
+    },
+    -- 登录成功后编排器据此建 provider（本插件的平台端点知识）
+    provider = {
+      key = "command-code-auth",
+      label = "Command Code - Auth",
+      protocol = "openai-chat",
+      base_url = "https://api.commandcode.ai/provider/v1",
+      dashboard_url = "https://commandcode.ai/studio/",
+      note = "Command Code 账户登录（浏览器授权 / 本地 CLI 凭据导入）",
     },
   }
 end

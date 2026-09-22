@@ -1,10 +1,9 @@
-//! 上游预设表：Providers 页「从预设添加」的静态数据源。
+//! 上游预设表：Providers 页「从预设添加」的静态数据源（**仅 API Key 直连预填**）。
 //!
 //! 预设是**代码内嵌**的精选清单（随代码版本演进，与 opencodex registry 的做法一致），
 //! 字段对齐其 registry 后裁剪到 MBN 口径：`protocol` 只取 MBN 四协议串。
-//! `category = "account"` 的预设走 OAuth 账户登录编排（`commands::oauth`）：登录成功
-//! 按预设的 protocol/base_url 建 provider，令牌包由 `auth_plugin` 指向的 CAP_AUTH
-//! 插件产出并加密存 secrets 表。
+//! OAuth 账户登录不在此表——认证能力由插件定义（`capabilities = ["auth"]`），
+//! 登录目标由 provider 绑定或插件 `describe.provider` 模板驱动（`commands::oauth`）。
 
 use serde::Serialize;
 
@@ -16,9 +15,7 @@ pub struct ProviderPreset {
     pub id: &'static str,
     /// 展示名。
     pub label: &'static str,
-    /// 分组：`api`（API Key 直连）/ `account`（OAuth 账户登录编排）。
-    pub category: &'static str,
-    /// MBN 协议串（`openai-chat` 等；登录成功后按此建 provider 端点）。
+    /// MBN 协议串（`openai-chat` 等）。
     pub protocol: &'static str,
     /// 预填 Base URL。
     pub base_url: &'static str,
@@ -31,8 +28,6 @@ pub struct ProviderPreset {
     /// models.dev 目录中的 provider key：实时探测失败时的回退数据源，也用于元数据
     /// enrich。`None` 表示 models.dev 无对应目录（如本地运行时）。
     pub models_dev_id: Option<&'static str>,
-    /// 账户预设对应的 CAP_AUTH 插件名（登录编排器按它找插件）；API 预设为 `None`。
-    pub auth_plugin: Option<&'static str>,
     /// 可用状态：`false` 时前端禁用展示（当前全部预设均为 `true`）。
     pub enabled: bool,
 }
@@ -43,145 +38,100 @@ pub const PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
         id: "ollama",
         label: "Ollama",
-        category: "api",
         protocol: "openai-chat",
         base_url: "http://localhost:11434/v1",
         dashboard_url: None,
         key_optional: true,
         note: Some("本地 Ollama 服务（OpenAI 兼容端点），通常无需 Key"),
         models_dev_id: None,
-        auth_plugin: None,
         enabled: true,
     },
     ProviderPreset {
         id: "vllm",
         label: "vLLM",
-        category: "api",
         protocol: "openai-chat",
         base_url: "http://localhost:8000/v1",
         dashboard_url: None,
         key_optional: true,
         note: Some("本地 vLLM 服务（OpenAI 兼容端点），通常无需 Key"),
         models_dev_id: None,
-        auth_plugin: None,
         enabled: true,
     },
     ProviderPreset {
         id: "deepseek",
         label: "DeepSeek",
-        category: "api",
         protocol: "openai-chat",
         base_url: "https://api.deepseek.com",
         dashboard_url: Some("https://platform.deepseek.com/api_keys"),
         key_optional: false,
         note: None,
         models_dev_id: Some("deepseek"),
-        auth_plugin: None,
         enabled: true,
     },
     ProviderPreset {
         id: "kimi",
         label: "Kimi",
-        category: "api",
         protocol: "openai-chat",
         base_url: "https://api.kimi.com/coding/v1",
         dashboard_url: Some("https://platform.moonshot.cn/console/api-keys"),
         key_optional: false,
         note: Some("Kimi Code Plan 的 API Key 形态"),
         models_dev_id: Some("kimi-for-coding"),
-        auth_plugin: None,
         enabled: true,
     },
     ProviderPreset {
         id: "alibaba-token-plan",
         label: "Alibaba Token Plan",
-        category: "api",
         protocol: "openai-chat",
         base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
         dashboard_url: Some("https://bailian.console.aliyun.com/cn-beijing?tab=plan"),
         key_optional: false,
         note: Some("Token Plan 个人版 · 北京"),
         models_dev_id: Some("alibaba-token-plan-cn"),
-        auth_plugin: None,
         enabled: true,
     },
     ProviderPreset {
         id: "commandcode",
         label: "Command Code",
-        category: "api",
         protocol: "openai-chat",
         base_url: "https://api.commandcode.ai/provider/v1",
         dashboard_url: Some("https://commandcode.ai/studio/"),
         key_optional: false,
         note: Some("Provider API（OpenAI 兼容）；需 Provider plan"),
         models_dev_id: None,
-        auth_plugin: None,
         enabled: true,
     },
     ProviderPreset {
         id: "opencode-go",
         label: "opencode go",
-        category: "api",
         protocol: "openai-chat",
         base_url: "https://opencode.ai/zen/go/v1",
         dashboard_url: Some("https://opencode.ai/auth"),
         key_optional: false,
         note: Some("GLM / DeepSeek / Kimi / Qwen / MiMo 聚合"),
         models_dev_id: Some("opencode-go"),
-        auth_plugin: None,
         enabled: true,
     },
     ProviderPreset {
         id: "zhipu-bigmodel-coding",
         label: "Zhipu BigModel Coding",
-        category: "api",
         protocol: "openai-chat",
         base_url: "https://open.bigmodel.cn/api/coding/paas/v4",
         dashboard_url: Some("https://bigmodel.cn/console/usercenter/apikeys"),
         key_optional: false,
         note: Some("智谱 BigModel Coding Plan 端点"),
         models_dev_id: Some("zhipuai-coding-plan"),
-        auth_plugin: None,
         enabled: true,
     },
     ProviderPreset {
         id: "openrouter",
         label: "OpenRouter",
-        category: "api",
         protocol: "openai-chat",
         base_url: "https://openrouter.ai/api/v1",
         dashboard_url: Some("https://openrouter.ai/keys"),
         key_optional: false,
         note: Some("聚合商：模型量大，导入时注意勾选"),
         models_dev_id: Some("openrouter"),
-        auth_plugin: None,
-        enabled: true,
-    },
-    // ---- OAuth 账户（登录编排；auth_plugin 指向 plugins/auth/*.lua 种子）----
-    ProviderPreset {
-        id: "command-code-auth",
-        label: "Command Code - Auth",
-        category: "account",
-        protocol: "openai-chat",
-        base_url: "https://api.commandcode.ai/provider/v1",
-        dashboard_url: Some("https://commandcode.ai/studio/"),
-        key_optional: false,
-        note: Some("Command Code 账户登录（浏览器授权 / 本地 CLI 凭据导入）"),
-        models_dev_id: None,
-        auth_plugin: Some("auth-commandcode"),
-        enabled: true,
-    },
-    ProviderPreset {
-        id: "kimi-oauth",
-        label: "Kimi",
-        category: "account",
-        protocol: "openai-chat",
-        base_url: "https://api.kimi.com/coding/v1",
-        dashboard_url: None,
-        key_optional: false,
-        note: Some("Kimi 账户设备码登录（浏览器验证码授权）"),
-        models_dev_id: None,
-        auth_plugin: Some("auth-kimi"),
         enabled: true,
     },
 ];
@@ -227,7 +177,7 @@ mod tests {
             "openai-chat",
             "google-genai",
         ];
-        for p in PRESETS.iter().filter(|p| p.category == "api") {
+        for p in PRESETS.iter() {
             assert!(p.enabled, "API 预设应可用: {}", p.id);
             assert!(
                 PROTOCOLS.contains(&p.protocol),
@@ -236,33 +186,9 @@ mod tests {
                 p.protocol
             );
             assert!(p.base_url.starts_with("http"), "{} base_url 非法", p.id);
-            assert!(p.auth_plugin.is_none(), "API 预设不带 auth 插件: {}", p.id);
             if let Some(mid) = p.models_dev_id {
                 assert!(!mid.is_empty(), "{} models_dev_id 为空串", p.id);
             }
-        }
-    }
-
-    #[test]
-    fn account_presets_gate_state() {
-        let accounts: Vec<_> = PRESETS.iter().filter(|p| p.category == "account").collect();
-        assert_eq!(
-            accounts.len(),
-            2,
-            "账户组应为 Command Code-Auth / Kimi 两个"
-        );
-        for p in accounts.iter() {
-            assert!(p.enabled, "账户预设应可用: {}", p.id);
-            assert!(
-                !p.protocol.is_empty() && p.base_url.starts_with("http"),
-                "{}",
-                p.id
-            );
-            assert!(
-                p.auth_plugin.is_some_and(|n| n.starts_with("auth-")),
-                "{} 须绑定 CAP_AUTH 插件",
-                p.id
-            );
         }
     }
 

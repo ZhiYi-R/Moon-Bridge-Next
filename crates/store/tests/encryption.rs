@@ -2,9 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use moonbridge_store::{
-    AesGcmKey, Database, EncKey, Endpoint, PlaintextKey, Provider, StoreError,
-};
+use moonbridge_store::{AesGcmKey, Database, EncKey, Endpoint, PlaintextKey, Provider, StoreError};
 use rusqlite::{params, Connection};
 use serde_json::json;
 
@@ -140,7 +138,10 @@ fn assert_encrypted(path: &Path, provider: &Provider) {
         assert!(stored.starts_with("mbk:v1:"));
     }
     if !provider.quota_config.is_null() {
-        assert!(quota_encs[0].starts_with("mbk:v1:"), "配额配置应加密写入数据库");
+        assert!(
+            quota_encs[0].starts_with("mbk:v1:"),
+            "配额配置应加密写入数据库"
+        );
     }
     let (scheme, verifier) = state(&conn);
     assert_eq!(scheme, "aes256-gcm-v1");
@@ -200,10 +201,7 @@ fn downgrade_to_v12(conn: &Connection) {
          DELETE FROM schema_version WHERE version >= 13;",
     )
     .unwrap();
-    assert_eq!(
-        moonbridge_store::schema::current_version(&conn).unwrap(),
-        12
-    );
+    assert_eq!(moonbridge_store::schema::current_version(conn).unwrap(), 12);
 }
 
 #[test]

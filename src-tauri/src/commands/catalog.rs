@@ -578,21 +578,31 @@ pub async fn provider_detect_models(
         .first()
         .ok_or_else(|| format!("上游服务 {provider_key} 未配置端点"))?;
 
-    // 预设映射（enrich 与目录回退的数据源）：key 命中优先，再按 baseUrl 找回
+    // models.dev 目录映射（enrich 与回退的数据源）：OAuth provider 用登录时插件
+    // 模板写入的 extra.auth.models_dev_id；否则按预设表 key 命中、再按 baseUrl 找回
     let base_urls: Vec<&str> = provider
         .endpoints
         .iter()
         .map(|e| e.base_url.as_str())
         .collect();
-    let models_dev_id =
-        crate::presets::find_preset(&provider.key, &base_urls).and_then(|p| p.models_dev_id);
+    let models_dev_id = provider
+        .extra
+        .get("auth")
+        .and_then(|a| a.get("models_dev_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            crate::presets::find_preset(&provider.key, &base_urls)
+                .and_then(|p| p.models_dev_id)
+                .map(str::to_string)
+        });
 
     let live = probe_live(ep, provider.version.as_deref()).await;
 
     // 目录只在需要时拉取：live 成功时用于 enrich，失败时用于回退
     let mut catalog: Option<Vec<CatalogModel>> = None;
     let mut catalog_err: Option<String> = None;
-    if let Some(mid) = models_dev_id {
+    if let Some(ref mid) = models_dev_id {
         match fetch_models_dev_root(&state, false).await {
             Ok((root, _)) => catalog = Some(catalog_section(&root, mid, &provider.key)),
             Err(e) => catalog_err = Some(e),

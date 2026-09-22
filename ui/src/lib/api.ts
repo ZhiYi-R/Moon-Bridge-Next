@@ -267,12 +267,10 @@ export const providerApi = {
     call<DetectResult>("provider_detect_models", { providerKey: key }),
 };
 
-/** 上游预设（后端静态表；account 分组走 OAuth 登录编排）。 */
+/** 上游预设（后端静态表，仅 API Key 直连预填；OAuth 账户由插件定义）。 */
 export interface ProviderPreset {
   id: string;
   label: string;
-  /** api / account */
-  category: string;
   /** MBN 协议串 */
   protocol: string;
   baseUrl: string;
@@ -280,8 +278,6 @@ export interface ProviderPreset {
   keyOptional: boolean;
   note?: string | null;
   modelsDevId?: string | null;
-  /** 账户预设绑定的 CAP_AUTH 插件名；API 预设为 null */
-  authPlugin?: string | null;
   enabled: boolean;
 }
 
@@ -297,16 +293,35 @@ export interface DetectResult {
   models: DetectedModel[];
 }
 
-/** OAuth 插件自述（平台元数据全部来自 CAP_AUTH 插件，UI 无平台分支）。 */
-export interface OAuthDescribe {
-  preset: string;
-  describe: {
-    kind?: "device_code" | "callback";
+/** CAP_AUTH 插件的自述（平台元数据全部来自插件，UI 无平台分支）。
+ * `provider` 为新建路径的 provider 模板（key/protocol/base_url/label 等）。 */
+export interface OAuthDescribeData {
+  kind?: "device_code" | "callback";
+  label?: string;
+  instructions?: string;
+  supports_paste?: boolean;
+  sources?: { id: string; label: string }[];
+  provider?: {
+    key?: string;
     label?: string;
-    instructions?: string;
-    supports_paste?: boolean;
-    sources?: { id: string; label: string }[];
+    protocol?: string;
+    base_url?: string;
+    dashboard_url?: string;
+    note?: string;
+    models_dev_id?: string;
   };
+}
+
+export interface OAuthDescribe {
+  plugin: string;
+  describe: OAuthDescribeData;
+}
+
+/** oauth_list 条目：声明 auth 能力的插件及其 describe（坏插件 describe 为空）。 */
+export interface OAuthPluginEntry {
+  plugin: string;
+  describe?: OAuthDescribeData | null;
+  error?: string | null;
 }
 
 /** oauth_begin 的返回。 */
@@ -330,9 +345,23 @@ export interface OAuthFlowStatus {
 }
 
 export const oauthApi = {
-  describe: (preset: string) => call<OAuthDescribe>("oauth_describe", { preset }),
-  begin: (preset: string, source?: string | null) =>
-    call<OAuthBegin>("oauth_begin", { preset, source: source ?? null }),
+  /** 声明 auth 能力的插件清单（预设选择器账户组的数据源）。 */
+  list: () => call<OAuthPluginEntry[]>("oauth_list"),
+  /** 二选一目标：provider = 已存在 provider（服务端解析其绑定插件）；
+   *  plugin = 插件名直连（新建路径）。 */
+  describe: (target: { plugin?: string; provider?: string }) =>
+    call<OAuthDescribe>("oauth_describe", {
+      plugin: target.plugin ?? null,
+      provider: target.provider ?? null,
+    }),
+  /** 同 describe 的目标语义：provider = 重登录；plugin = 新建（成功后按
+   *  describe.provider 模板建 provider）。 */
+  begin: (target: { plugin?: string; provider?: string }, source?: string | null) =>
+    call<OAuthBegin>("oauth_begin", {
+      plugin: target.plugin ?? null,
+      provider: target.provider ?? null,
+      source: source ?? null,
+    }),
   status: (flowId: string) => call<OAuthFlowStatus>("oauth_status", { flowId }),
   cancel: (flowId: string) => call<void>("oauth_cancel", { flowId }),
   paste: (flowId: string, text: string) => call<void>("oauth_paste", { flowId, text }),

@@ -208,12 +208,11 @@ impl Database {
         // quota_config_enc（V14+ 列）同理：plaintext scheme 下存的是明文 JSON，
         // 直接按明文重加密；非 legacy 时逐行解密校验（尽早暴露错误密钥）。
         let quota_rows = {
-            let mut stmt = conn
-                .prepare("SELECT key, quota_config_enc FROM providers WHERE quota_config_enc <> ''")?;
+            let mut stmt = conn.prepare(
+                "SELECT key, quota_config_enc FROM providers WHERE quota_config_enc <> ''",
+            )?;
             let rows = stmt
-                .query_map([], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                })?
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         };

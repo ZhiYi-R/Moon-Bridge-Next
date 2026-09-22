@@ -314,6 +314,85 @@ function fakeAmountQuotaResult(): QuotaResult {
 /** 走金额模式的演示 Provider key；其余仍用百分比模式。 */
 const AMOUNT_MODE_KEYS = new Set(["kimi-coding"]);
 
+/** CAP_AUTH 插件清单 mock（describe 元数据与真插件一致；provider 模板驱动建 provider）。 */
+const MOCK_AUTH_PLUGINS = [
+  {
+    plugin: "auth-claude",
+    describe: {
+      kind: "callback" as const,
+      label: "Claude 账户",
+      supports_paste: true,
+      instructions: "浏览器完成授权后自动回跳；也可粘贴回调 URL 或 code#state",
+      provider: { key: "claude-oauth", label: "Claude", protocol: "anthropic", base_url: "https://api.anthropic.com", note: "Claude Pro/Max 订阅账户（浏览器授权登录）" },
+    },
+    error: null,
+  },
+  {
+    plugin: "auth-codex",
+    describe: {
+      kind: "callback" as const,
+      label: "Codex 账户",
+      supports_paste: true,
+      instructions: "浏览器完成授权后自动回跳；也可粘贴回调 URL",
+      sources: [
+        { id: "local-cli", label: "导入 Codex CLI 凭据" },
+        { id: "browser", label: "浏览器授权登录" },
+      ],
+      provider: { key: "codex-oauth", label: "Codex", protocol: "openai-response", base_url: "https://chatgpt.com/backend-api/codex", note: "ChatGPT 订阅（Codex）账户登录 / Codex CLI 凭据导入" },
+    },
+    error: null,
+  },
+  {
+    plugin: "auth-commandcode",
+    describe: {
+      kind: "callback" as const,
+      label: "Command Code 账户",
+      supports_paste: true,
+      instructions: "浏览器完成授权后自动回跳；也可手动粘贴回调信息或 API Key",
+      sources: [
+        { id: "local-cli", label: "导入本地 CLI 凭据" },
+        { id: "browser", label: "浏览器授权登录" },
+      ],
+      provider: { key: "command-code-auth", label: "Command Code - Auth", protocol: "openai-chat", base_url: "https://api.commandcode.ai/provider/v1", note: "Command Code 账户登录（浏览器授权 / 本地 CLI 凭据导入）" },
+    },
+    error: null,
+  },
+  {
+    plugin: "auth-grok",
+    describe: {
+      kind: "device_code" as const,
+      label: "Grok 账户",
+      instructions: "打开验证页，输入验证码完成授权",
+      provider: { key: "grok-oauth", label: "Grok", protocol: "openai-chat", base_url: "https://api.x.ai/v1", note: "xAI Grok 账户设备码登录（浏览器验证码授权）" },
+    },
+    error: null,
+  },
+  {
+    plugin: "auth-kimi",
+    describe: {
+      kind: "device_code" as const,
+      label: "Kimi 账户",
+      instructions: "打开验证页，输入验证码完成授权",
+      provider: { key: "kimi-oauth", label: "Kimi", protocol: "openai-chat", base_url: "https://api.kimi.com/coding/v1", note: "Kimi 账户设备码登录（浏览器验证码授权）" },
+    },
+    error: null,
+  },
+  {
+    plugin: "auth-qwen",
+    describe: {
+      kind: "device_code" as const,
+      label: "Qwen 账户",
+      instructions: "打开验证页，输入验证码完成授权",
+      sources: [
+        { id: "local-cli", label: "导入 Qwen CLI 凭据" },
+        { id: "device", label: "设备码授权登录" },
+      ],
+      provider: { key: "qwen-oauth", label: "Qwen", protocol: "openai-chat", base_url: "https://portal.qwen.ai/v1", note: "Qwen 账户设备码登录 / Qwen Code CLI 凭据导入" },
+    },
+    error: null,
+  },
+];
+
 function fakeResultFor(providerKey: string): QuotaResult {
   return AMOUNT_MODE_KEYS.has(providerKey) ? fakeAmountQuotaResult() : fakeQuotaResult();
 }
@@ -651,11 +730,9 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
     // ── 上游预设与模型检测 ──
     case "preset_list":
       return [
-        { id: "ollama", label: "Ollama", category: "api", protocol: "openai-chat", baseUrl: "http://localhost:11434/v1", dashboardUrl: null, keyOptional: true, note: "本地 Ollama 服务（OpenAI 兼容端点），通常无需 Key", modelsDevId: null, authPlugin: null, enabled: true },
-        { id: "deepseek", label: "DeepSeek", category: "api", protocol: "openai-chat", baseUrl: "https://api.deepseek.com", dashboardUrl: "https://platform.deepseek.com/api_keys", keyOptional: false, note: null, modelsDevId: "deepseek", authPlugin: null, enabled: true },
-        { id: "openrouter", label: "OpenRouter", category: "api", protocol: "openai-chat", baseUrl: "https://openrouter.ai/api/v1", dashboardUrl: "https://openrouter.ai/keys", keyOptional: false, note: "聚合商：模型量大，导入时注意勾选", modelsDevId: "openrouter", authPlugin: null, enabled: true },
-        { id: "kimi-oauth", label: "Kimi", category: "account", protocol: "openai-chat", baseUrl: "https://api.kimi.com/coding/v1", dashboardUrl: null, keyOptional: false, note: "Kimi 账户设备码登录（浏览器验证码授权）", modelsDevId: null, authPlugin: "auth-kimi", enabled: true },
-        { id: "command-code-auth", label: "Command Code - Auth", category: "account", protocol: "openai-chat", baseUrl: "https://api.commandcode.ai/provider/v1", dashboardUrl: "https://commandcode.ai/studio/", keyOptional: false, note: "Command Code 账户登录（浏览器授权 / 本地 CLI 凭据导入）", modelsDevId: null, authPlugin: "auth-commandcode", enabled: true },
+        { id: "ollama", label: "Ollama", protocol: "openai-chat", baseUrl: "http://localhost:11434/v1", dashboardUrl: null, keyOptional: true, note: "本地 Ollama 服务（OpenAI 兼容端点），通常无需 Key", modelsDevId: null, enabled: true },
+        { id: "deepseek", label: "DeepSeek", protocol: "openai-chat", baseUrl: "https://api.deepseek.com", dashboardUrl: "https://platform.deepseek.com/api_keys", keyOptional: false, note: null, modelsDevId: "deepseek", enabled: true },
+        { id: "openrouter", label: "OpenRouter", protocol: "openai-chat", baseUrl: "https://openrouter.ai/api/v1", dashboardUrl: "https://openrouter.ai/keys", keyOptional: false, note: "聚合商：模型量大，导入时注意勾选", modelsDevId: "openrouter", enabled: true },
       ] as T;
     case "provider_detect_models": {
       const key = String((args as { providerKey?: string }).providerKey ?? "");
@@ -665,29 +742,20 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
       ];
       return { source: "live", warning: null, models: detected } as T;
     }
+    case "oauth_list":
+      return MOCK_AUTH_PLUGINS as T;
     case "oauth_describe": {
-      const preset = String((args as { preset?: string }).preset ?? "");
-      if (preset === "command-code-auth")
-        return {
-          preset,
-          describe: {
-            kind: "callback",
-            label: "Command Code 账户",
-            supports_paste: true,
-            instructions: "浏览器完成授权后自动回跳；也可手动粘贴回调信息或 API Key",
-            sources: [
-              { id: "local-cli", label: "导入本地 CLI 凭据" },
-              { id: "browser", label: "浏览器授权登录" },
-            ],
-          },
-        } as T;
-      return {
-        preset,
-        describe: { kind: "device_code", label: "Kimi 账户", instructions: "打开验证页，输入验证码完成授权" },
-      } as T;
+      const a = args as { plugin?: string; provider?: string };
+      const plugin = String(a.plugin ?? "");
+      const entry = MOCK_AUTH_PLUGINS.find((e) => e.plugin === plugin);
+      if (entry) return { plugin, describe: entry.describe } as T;
+      throw new Error(`认证插件不存在: ${plugin}`);
     }
-    case "oauth_begin":
+    case "oauth_begin": {
       // mock：直接视为已完成（浏览器 dev 不走真实 OAuth）
+      const a = args as { plugin?: string; provider?: string };
+      const tpl = MOCK_AUTH_PLUGINS.find((e) => e.plugin === a.plugin)?.describe?.provider;
+      const providerKey = a.provider ?? tpl?.key ?? String(a.plugin ?? "");
       return {
         flowId: "",
         kind: "callback",
@@ -697,8 +765,9 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
         instructions: null,
         notice: null,
         supportsPaste: false,
-        providerKey: String((args as { preset?: string }).preset ?? ""),
+        providerKey,
       } as T;
+    }
     case "oauth_status":
       return { state: "done", message: null, providerKey: "mock" } as T;
     case "oauth_cancel":

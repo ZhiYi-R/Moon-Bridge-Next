@@ -303,11 +303,13 @@ impl CallbackRegistry {
 
     /// 启动一次性监听：首选 `spec.preferred_port`，占用则随机端口。
     ///
-    /// 仅接受 `POST {spec.path}`（JSON body 原样交出，state 等校验由插件在
-    /// Lua 侧完成）；`spec.origins` 非空时 CORS 钉死这些源（浏览器页面内
-    /// fetch 回调的预检需要）。
+    /// 两种回调形态都收（state 等校验由插件在 Lua 侧完成）：
+    /// - `POST {spec.path}`：JSON body 原样交出（平台页面内 fetch 回调；
+    ///   `spec.origins` 非空时 CORS 钉死这些源）
+    /// - `GET {spec.path}?k=v…`：标准 OAuth 浏览器重定向，query 参数并入对象，
+    ///   回极简 HTML 完成页（重复到达同样回页，只有第一份会被插件看到）
     pub async fn listen(self: &Arc<Self>, spec: CallbackSpec) -> Result<CallbackHandle, String> {
-        use axum::{routing::post, Json, Router};
+        use axum::{extract::Query, response::Html, routing::get, Json, Router};
         use tower_http::cors::CorsLayer;
 
         let id = uuid::Uuid::new_v4().simple().to_string();
@@ -315,9 +317,11 @@ impl CallbackRegistry {
         let notify = Arc::new(Notify::new());
         let (sd_tx, sd_rx) = tokio::sync::oneshot::channel::<()>();
 
+        const DONE_PAGE: &str = "<!doctype html><meta charset=\"utf-8\"><title>授权完成</title>\
+            <body style=\"font-family:system-ui;padding:2em\"><p>授权完成，可以关闭此页面。</p>";
         let shared = result.clone();
         let notify2 = notify.clone();
-        let handler = move |Json(body): Json<Value>| {
+        let post_handler = move |Json(body): Json<Value>| {
             let shared = shared.clone();
             let notify = notify2.clone();
             async move {
@@ -333,7 +337,24 @@ impl CallbackRegistry {
                 }
             }
         };
-        let mut app = Router::new().route(&spec.path, post(handler));
+        let shared = result.clone();
+        let notify2 = notify.clone();
+        let get_handler = move |Query(params): Query<HashMap<String, String>>| {
+            let shared = shared.clone();
+            let notify = notify2.clone();
+            async move {
+                let mut slot = shared.lock().await;
+                if slot.is_none() {
+                    *slot = Some(
+                        serde_json::to_value(params)
+                            .unwrap_or_else(|_| Value::Object(Default::default())),
+                    );
+                    notify.notify_waiters();
+                }
+                Html(DONE_PAGE)
+            }
+        };
+        let mut app = Router::new().route(&spec.path, get(get_handler).post(post_handler));
         if !spec.origins.is_empty() {
             let origins: Vec<http::HeaderValue> = spec
                 .origins
@@ -742,6 +763,53 @@ end
             .unwrap();
         let got = waiter.await.unwrap().unwrap();
         assert_eq!(got.unwrap()["ok"], true);
+        reg.close(&h.id);
+    }
+
+    /// 标准 OAuth 浏览器重定向：GET query 参数并入对象，回 HTML 完成页；
+    /// 重复到达不覆盖已消费的回调。
+    #[tokio::test]
+    async fn callback_listener_get_redirect() {
+        let reg = CallbackRegistry::new();
+        let h = reg
+            .listen(CallbackSpec {
+                path: "/callback".to_string(),
+                origins: vec![],
+                preferred_port: None,
+            })
+            .await
+            .unwrap();
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(&h.url)
+            .query(&[("code", "authcode-1"), ("state", "st-1")])
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
+        let body = resp.text().await.unwrap();
+        assert!(body.contains("授权完成"), "应回 HTML 完成页: {body}");
+        let got = reg
+            .await_callback(&h.id, Duration::from_millis(500))
+            .await
+            .unwrap()
+            .expect("GET 回调应送达");
+        assert_eq!(got["code"], "authcode-1");
+        assert_eq!(got["state"], "st-1");
+        // 第二次 GET：已消费——回页但不覆盖
+        let resp2 = client
+            .get(&h.url)
+            .query(&[("code", "authcode-2")])
+            .send()
+            .await
+            .unwrap();
+        assert!(resp2.status().is_success());
+        let got2 = reg
+            .await_callback(&h.id, Duration::from_millis(50))
+            .await
+            .unwrap()
+            .expect("结果保持第一份");
+        assert_eq!(got2["code"], "authcode-1");
         reg.close(&h.id);
     }
 

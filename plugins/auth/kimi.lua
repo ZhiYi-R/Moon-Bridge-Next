@@ -14,6 +14,7 @@ local CLI_VERSION = "0.14.0"
 MB = {
   name = "auth-kimi",
   version = "0.1.0",
+  category = "auth",
   scopes = { "provider" },
   capabilities = { "auth" },
 }
@@ -98,6 +99,15 @@ function MB.auth_describe(ctx)
     kind = "device_code",
     label = "Kimi 账户",
     instructions = "打开验证页，输入验证码完成授权",
+    -- 登录成功后编排器据此建 provider（本插件的平台端点知识）
+    provider = {
+      key = "kimi-oauth",
+      label = "Kimi",
+      protocol = "openai-chat",
+      base_url = "https://api.kimi.com/coding/v1",
+      models_dev_id = "kimi-for-coding",
+      note = "Kimi 账户设备码登录（浏览器验证码授权）",
+    },
   }
 end
 

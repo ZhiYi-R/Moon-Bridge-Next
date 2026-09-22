@@ -18,7 +18,7 @@ async fn command_code_local_cli_import_real() {
     let paths = config::AppPaths::resolve(dir.join("config"), dir.join("data"));
     let st = state::ManagedState::new(paths).unwrap();
     // 内置插件已种子；走真实 local-cli 来源（whoami 打真实端点）
-    let out = run_begin_for_test(&st, "command-code-auth", Some("local-cli".into()))
+    let out = run_begin_for_test(&st, "auth-commandcode", Some("local-cli".into()))
         .await
         .expect("run_begin 应成功");
     assert!(out.already_done, "local-cli 命中应直出 done");
@@ -54,7 +54,7 @@ async fn kimi_device_begin_real() {
     let paths = config::AppPaths::resolve(dir.join("config"), dir.join("data"));
     let st = state::ManagedState::new(paths).unwrap();
     // 设备码授权打真实 auth.kimi.com；拿到验证码即取消流程（不完成浏览器授权）
-    let out = run_begin_for_test(&st, "kimi-oauth", None)
+    let out = run_begin_for_test(&st, "auth-kimi", None)
         .await
         .expect("Kimi 设备授权请求应成功（form 编码 + X-Msh 头被接受）");
     assert!(!out.already_done);
@@ -74,8 +74,8 @@ async fn kimi_device_begin_real() {
 /// 复用 commands::oauth 的 run_begin（测试通道，避免走 Tauri State）。
 async fn run_begin_for_test(
     st: &Arc<state::ManagedState>,
-    preset: &str,
+    plugin: &str,
     source: Option<String>,
 ) -> Result<commands::oauth::OAuthBegin, commands::CommandError> {
-    commands::oauth::run_begin(st, preset, source).await
+    commands::oauth::run_begin(st, Some(plugin), None, source).await
 }

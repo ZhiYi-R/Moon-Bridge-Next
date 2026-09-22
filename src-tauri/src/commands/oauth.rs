@@ -1,8 +1,13 @@
 //! OAuth 登录编排 commands（**通用**：平台细节全部在 CAP_AUTH 插件内）。
 //!
-//! 形态：`oauth_describe` 返回插件自述（流程类型/来源选项/是否支持粘贴，供 UI
-//! 决定渲染与来源选择）→ `oauth_begin` 启动后台登录任务并返回流程描述 → 前端以
-//! `oauth_status` 轮询、`oauth_cancel` 中止、`oauth_paste` 提交手动粘贴。
+//! 入口模型与 quota 同构：宿主只提供能力与原语，登录目标由**插件/绑定**驱动——
+//! `oauth_begin(provider)` 走 provider 已绑定的 auth 插件（重登录/手动绑定路径）；
+//! `oauth_begin(plugin)` 由插件 `describe.provider` 模板新建 provider。
+//! `oauth_list` 列出全部声明 `auth` 能力的插件（含 describe 元数据）供选择器渲染。
+//!
+//! 形态：`oauth_describe` 返回插件自述（流程类型/来源选项/是否支持粘贴/provider
+//! 模板，供 UI 决定渲染与来源选择）→ `oauth_begin` 启动后台登录任务并返回流程
+//! 描述 → 前端以 `oauth_status` 轮询、`oauth_cancel` 中止、`oauth_paste` 提交粘贴。
 //!
 //! 登录成功的令牌包：经 `oauth::write_bundle` 加密存 secrets 表（scope
 //! `provider:{key}`）；provider 行只记非敏感账户元数据（`extra.auth`），端点
@@ -16,22 +21,31 @@ use moonbridge_gateway::bridge::GatewayBridge;
 use moonbridge_gateway::oauth::{self, CallbackRegistry};
 use moonbridge_plugin::{LuaRuntime, SandboxLimits};
 use moonbridge_protocol::builtin_registry;
-use moonbridge_store::{Database, Endpoint, PluginBinding, Provider};
+use moonbridge_store::{Database, Endpoint, PluginBinding, PluginRecord, Provider};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::State;
 
 use crate::commands::CmdResult;
-use crate::presets::{self, ProviderPreset};
 use crate::state::{ManagedState, OAuthFlow, OAuthFlowStatus};
 
-/// `oauth_describe` 的返回：预设 id + 插件自述原样（kind/label/instructions/
-/// supports_paste/sources 等由插件定义，UI 按元数据渲染，不含任何平台分支）。
+/// `oauth_describe` 的返回：插件名 + 插件自述原样（kind/label/instructions/
+/// supports_paste/sources/provider 模板等由插件定义，UI 按元数据渲染）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OAuthDescribe {
-    pub preset: String,
+    pub plugin: String,
     pub describe: Value,
+}
+
+/// `oauth_list` 的条目：声明 `auth` 能力的插件 + 其 describe 元数据（失败时
+/// `describe` 为 None、`error` 记原因——坏插件不阻断列表）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OAuthPluginEntry {
+    pub plugin: String,
+    pub describe: Option<Value>,
+    pub error: Option<String>,
 }
 
 /// `oauth_begin` 的返回。
@@ -56,16 +70,45 @@ pub struct OAuthBegin {
     pub provider_key: Option<String>,
 }
 
-/// 账户预设解析：存在、启用、绑定了 CAP_AUTH 插件。
-fn account_preset(preset_id: &str) -> CmdResult<&'static ProviderPreset> {
-    let p = presets::PRESETS
-        .iter()
-        .find(|p| p.id == preset_id && p.category == "account" && p.enabled)
-        .ok_or_else(|| format!("预设不存在或未启用: {preset_id}"))?;
-    if p.auth_plugin.is_none() {
-        return Err(format!("预设 {preset_id} 未绑定认证插件").into());
+/// 认证插件解析：存在且声明 `auth` 能力（capability 是唯一门槛，插件名不特判）。
+fn auth_plugin_record(db: &Database, name: &str) -> CmdResult<PluginRecord> {
+    let p = db
+        .get_plugin(name)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("认证插件不存在: {name}"))?;
+    if !p.capabilities.iter().any(|c| c == "auth") {
+        return Err(format!("插件 {name} 未声明 auth 能力").into());
     }
     Ok(p)
+}
+
+/// provider 维度已绑定且启用的 auth 插件（provider 路径登录的插件来源——
+/// 与运行时 `auth_plugin_for` 同口径：只看显式 provider 绑定）。
+fn bound_auth_plugin(db: &Database, provider_key: &str) -> CmdResult<String> {
+    let bindings = db
+        .list_bindings_by_scope("provider")
+        .map_err(|e| e.to_string())?;
+    let mut bound = false;
+    for b in bindings
+        .iter()
+        .filter(|b| b.scope_key == provider_key && b.enabled)
+    {
+        bound = true;
+        if db
+            .get_plugin(&b.plugin_name)
+            .ok()
+            .flatten()
+            .is_some_and(|p| p.capabilities.iter().any(|c| c == "auth"))
+        {
+            return Ok(b.plugin_name.clone());
+        }
+    }
+    Err(if bound {
+        format!("上游 {provider_key} 绑定的插件均未声明 auth 能力")
+    } else {
+        format!("上游 {provider_key} 未绑定认证插件")
+    }
+    .into())
 }
 
 /// 登录流程的运行环境：一次性插件运行时 + 本流程私有的回调监听注册表
@@ -104,29 +147,45 @@ fn flow_runtime(
     Ok((rt, callbacks))
 }
 
-/// 登录成功落库：令牌包 → secrets 表；provider 行（api_key 置空，extra.auth 记
-/// 非敏感元数据）；provider 维度插件绑定。同名冲突只允许覆盖同类 OAuth 账户。
+/// 登录成功落库：令牌包 → secrets 表；provider 行只记非敏感 `extra.auth`。
+///
+/// - `existing_provider`（provider 路径）：provider 已存在，仅刷新 extra.auth
+///   元数据与令牌包——端点/表单字段保持原样（用户可改过 base_url 等）。
+/// - `None`（插件路径）：按插件 `describe.provider` 模板建 provider（端点
+///   `api_key` 置空，出站凭据由 `MB.auth_headers` 注入）并写 provider 维度绑定。
+///   同名冲突只允许覆盖同插件创建的 OAuth 账户（手建 provider 不被登录吞掉）。
 fn write_auth_provider(
     db: &Database,
-    preset: &ProviderPreset,
+    plugin: &str,
+    existing_provider: Option<&str>,
+    describe: &Value,
     bundle: &Value,
 ) -> Result<String, String> {
     oauth::validate_bundle(bundle)?;
-    let plugin = preset
-        .auth_plugin
-        .ok_or_else(|| format!("预设 {} 未绑定认证插件", preset.id))?;
-    let key = preset.id.to_string();
+    let template = describe.get("provider");
+    let key = existing_provider
+        .map(str::to_string)
+        .or_else(|| {
+            template
+                .and_then(|t| t.get("key"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .ok_or_else(|| format!("插件 {plugin} 的 describe.provider 未声明 key（新建路径必需）"))?;
     let mut created_at = 0;
     if let Some(old) = db.get_provider(&key).map_err(|e| e.to_string())? {
-        let old_plugin = old
-            .extra
-            .get("auth")
-            .and_then(|a| a.get("plugin"))
-            .and_then(Value::as_str);
-        if old_plugin != Some(plugin) {
-            return Err(format!(
-                "上游 “{key}” 已存在且不是同名 OAuth 账户，请先删除"
-            ));
+        // 同名冲突检查只作用于新建路径（provider 路径的绑定本身是显式授权）
+        if existing_provider.is_none() {
+            let old_plugin = old
+                .extra
+                .get("auth")
+                .and_then(|a| a.get("plugin"))
+                .and_then(Value::as_str);
+            if old_plugin != Some(plugin) {
+                return Err(format!(
+                    "上游 “{key}” 已存在且不是同名 OAuth 账户，请先删除"
+                ));
+            }
         }
         created_at = old.created_at;
     }
@@ -137,12 +196,36 @@ fn write_auth_provider(
         "account": bundle.get("account"),
         "email": bundle.get("email"),
         "source": bundle.get("source"),
+        // models.dev 目录 id 由插件模板声明（detect 的 enrich/回退数据源）
+        "models_dev_id": template.and_then(|t| t.get("models_dev_id")).cloned().unwrap_or(Value::Null),
     });
+    // provider 路径：只刷新元数据，provider 行其余字段（端点/配额/开关）保持原样
+    if existing_provider.is_some() {
+        let mut p = db
+            .get_provider(&key)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("上游 {key} 在登录期间被删除"))?;
+        p.extra["auth"] = meta;
+        db.upsert_provider(&p).map_err(|e| e.to_string())?;
+        return Ok(key);
+    }
+    let t = template
+        .ok_or_else(|| format!("插件 {plugin} 的 describe 未声明 provider 模板（新建路径必需）"))?;
+    let protocol = t
+        .get("protocol")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("插件 {plugin} 的 describe.provider 缺 protocol"))?;
+    let base_url = t
+        .get("base_url")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("插件 {plugin} 的 describe.provider 缺 base_url"))?;
     let p = Provider {
         key: key.clone(),
         endpoints: vec![Endpoint {
-            protocol: preset.protocol.to_string(),
-            base_url: preset.base_url.to_string(),
+            protocol: protocol.to_string(),
+            base_url: base_url.to_string(),
             api_key: String::new(),
         }],
         version: None,
@@ -192,46 +275,109 @@ fn set_pending_msg(status: &Mutex<OAuthFlowStatus>, msg: String) {
     g.message = Some(msg);
 }
 
+/// 列出全部声明 `auth` 能力的插件及其 describe 元数据（预设选择器账户组的数据源；
+/// 单个插件 describe 失败不阻断列表——error 字段带给前端）。
+#[tauri::command]
+pub async fn oauth_list(state: State<'_, Arc<ManagedState>>) -> CmdResult<Vec<OAuthPluginEntry>> {
+    let st = state.inner().clone();
+    let plugins = st.db.list_plugins().map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for p in plugins
+        .into_iter()
+        .filter(|p| p.capabilities.iter().any(|c| c == "auth"))
+    {
+        let (describe, error) = match flow_runtime(&st, &p.name) {
+            Ok((rt, _callbacks)) => match rt
+                .call_mb_once("auth_describe", &oauth::auth_ctx(&p.name))
+                .await
+            {
+                Ok(d) => (Some(d), None),
+                Err(e) => (None, Some(e.to_string())),
+            },
+            Err(e) => (None, Some(e)),
+        };
+        out.push(OAuthPluginEntry {
+            plugin: p.name,
+            describe,
+            error,
+        });
+    }
+    Ok(out)
+}
+
+/// 目标解析（describe/begin 共用）：provider 路径走其绑定的 auth 插件；
+/// plugin 路径校验能力声明。返回 `(插件名, 已有 provider key)`。
+fn resolve_target(
+    db: &Database,
+    plugin: Option<&str>,
+    provider: Option<&str>,
+) -> CmdResult<(String, Option<String>)> {
+    match provider {
+        Some(key) => {
+            if db.get_provider(key).map_err(|e| e.to_string())?.is_none() {
+                return Err(format!("上游不存在: {key}").into());
+            }
+            Ok((bound_auth_plugin(db, key)?, Some(key.to_string())))
+        }
+        None => {
+            let name = plugin.ok_or_else(|| "需要 plugin 或 provider 参数".to_string())?;
+            auth_plugin_record(db, name)?;
+            Ok((name.to_string(), None))
+        }
+    }
+}
+
 /// 插件自述（UI 先调它决定渲染与来源选择，再调 `oauth_begin`）。
+/// 目标同 `oauth_begin`：`provider` 重登录走绑定插件，`plugin` 走新建路径。
 #[tauri::command]
 pub async fn oauth_describe(
     state: State<'_, Arc<ManagedState>>,
-    preset: String,
+    plugin: Option<String>,
+    provider: Option<String>,
 ) -> CmdResult<OAuthDescribe> {
     let st = state.inner().clone();
-    let p = account_preset(&preset)?;
-    let (rt, _callbacks) = flow_runtime(&st, p.auth_plugin.unwrap())?;
+    let (plugin_name, key) = resolve_target(&st.db, plugin.as_deref(), provider.as_deref())?;
+    let (rt, _callbacks) = flow_runtime(&st, &plugin_name)?;
+    let ctx_provider = key.unwrap_or_else(|| plugin_name.clone());
     let describe = rt
-        .call_mb_once("auth_describe", &oauth::auth_ctx(p.id))
+        .call_mb_once("auth_describe", &oauth::auth_ctx(&ctx_provider))
         .await
         .map_err(|e| format!("auth_describe 调用失败: {e}"))?;
     Ok(OAuthDescribe {
-        preset: p.id.to_string(),
+        plugin: plugin_name,
         describe,
     })
 }
 
 /// 启动登录流程（`source` 为 UI 传来的来源选择；describe.sources 未提供时传 None）。
+///
+/// 二选一目标：`provider` = 已存在 provider 的重登录（插件取其 provider 维度绑定）；
+/// `plugin` = 新建路径（成功后按插件 describe.provider 模板建 provider）。
 #[tauri::command]
 pub async fn oauth_begin(
     state: State<'_, Arc<ManagedState>>,
-    preset: String,
+    plugin: Option<String>,
+    provider: Option<String>,
     source: Option<String>,
 ) -> CmdResult<OAuthBegin> {
     let st = state.inner().clone();
-    run_begin(&st, &preset, source).await
+    run_begin(&st, plugin.as_deref(), provider.as_deref(), source).await
 }
 
 pub async fn run_begin(
     st: &Arc<ManagedState>,
-    preset_id: &str,
+    plugin: Option<&str>,
+    provider: Option<&str>,
     source: Option<String>,
 ) -> CmdResult<OAuthBegin> {
-    let p = account_preset(preset_id)?;
-    let plugin = p.auth_plugin.unwrap();
-    let (rt, callbacks) = flow_runtime(st, plugin)?;
+    // 目标解析：provider 路径走其绑定的 auth 插件；plugin 路径走 describe 模板新建
+    let (plugin_name, existing_key) = resolve_target(&st.db, plugin, provider)?;
+    let (rt, callbacks) = flow_runtime(st, &plugin_name)?;
+    // ctx.provider：已有 provider 用其 key；新建路径用插件名（模板建议 key 是
+    // describe 的产出，调用前不可得；插件可拿它区分多账户等场景）
+    let ctx_provider = existing_key.clone().unwrap_or_else(|| plugin_name.clone());
     let describe = rt
-        .call_mb_once("auth_describe", &oauth::auth_ctx(p.id))
+        .call_mb_once("auth_describe", &oauth::auth_ctx(&ctx_provider))
         .await
         .map_err(|e| format!("auth_describe 调用失败: {e}"))?;
     let kind = describe
@@ -248,7 +394,7 @@ pub async fn run_begin(
         .and_then(Value::as_str)
         .map(str::to_string);
 
-    let ctx = oauth::auth_ctx_with(p.id, source.as_deref());
+    let ctx = oauth::auth_ctx_with(&ctx_provider, source.as_deref());
     let begin = rt
         .call_mb_once("auth_begin", &ctx)
         .await
@@ -256,7 +402,13 @@ pub async fn run_begin(
     // begin 直出终态：done（本地导入命中）/ error（显式失败，如 local-cli 验证失败）
     match begin.get("status").and_then(Value::as_str) {
         Some("done") => {
-            let key = write_auth_provider(&st.db, p, &begin["bundle"])?;
+            let key = write_auth_provider(
+                &st.db,
+                &plugin_name,
+                existing_key.as_deref(),
+                &describe,
+                &begin["bundle"],
+            )?;
             return Ok(OAuthBegin {
                 flow_id: String::new(),
                 kind,
@@ -309,7 +461,7 @@ pub async fn run_begin(
     let status = Arc::new(Mutex::new(OAuthFlowStatus::pending()));
     let status2 = status.clone();
     let db = st.db.clone();
-    let preset: &'static ProviderPreset = p;
+    let plugin_move = plugin_name.clone();
     tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(expires_in_secs);
         let mut interval = Duration::from_secs(interval_secs);
@@ -326,7 +478,13 @@ pub async fn run_begin(
                         Ok(v) => {
                             let st_str = v.get("status").and_then(Value::as_str).unwrap_or("");
                             match st_str {
-                                "done" => break write_auth_provider(&db, preset, &v["bundle"]),
+                                "done" => break write_auth_provider(
+                                    &db,
+                                    &plugin_move,
+                                    existing_key.as_deref(),
+                                    &describe,
+                                    &v["bundle"],
+                                ),
                                 "pending" => {
                                     if let Some(m) = v
                                         .get("message")
@@ -448,8 +606,17 @@ mod tests {
         (st, dir)
     }
 
-    fn preset_of(id: &str) -> &'static ProviderPreset {
-        presets::PRESETS.iter().find(|p| p.id == id).unwrap()
+    /// 插件 describe 的 provider 模板（等价于 Lua 侧 describe.provider 表）。
+    fn describe_tpl(key: &str, base_url: &str) -> Value {
+        json!({
+            "kind": "callback",
+            "provider": {
+                "key": key,
+                "label": key,
+                "protocol": "openai-chat",
+                "base_url": base_url,
+            }
+        })
     }
 
     #[test]
@@ -459,7 +626,11 @@ mod tests {
             "access": "tok-1", "refresh": "ref-1", "expires_at": 123,
             "account": "u1", "email": "a@b.com", "source": "oauth",
         });
-        let key = write_auth_provider(&db, preset_of("command-code-auth"), &bundle).unwrap();
+        let desc = describe_tpl(
+            "command-code-auth",
+            "https://api.commandcode.ai/provider/v1",
+        );
+        let key = write_auth_provider(&db, "auth-commandcode", None, &desc, &bundle).unwrap();
         assert_eq!(key, "command-code-auth");
         let p = db.get_provider(&key).unwrap().unwrap();
         // 端点按预设建立，api_key 置空（凭据由 auth 插件出站注入）
@@ -487,12 +658,16 @@ mod tests {
         assert!(db
             .plugin_enabled_in_scope("auth-commandcode", None, None, Some(&key))
             .unwrap());
-        // 同类账户重新登录：原位更新，created_at 保留
+        // 同类账户重新登录（provider 路径）：只刷元数据，created_at/端点保留
         let created = p.created_at;
         let bundle2 = json!({"access": "tok-2", "refresh": "ref-2", "source": "manual"});
-        write_auth_provider(&db, preset_of("command-code-auth"), &bundle2).unwrap();
+        write_auth_provider(&db, "auth-commandcode", Some(&key), &desc, &bundle2).unwrap();
         let p2 = db.get_provider(&key).unwrap().unwrap();
         assert_eq!(p2.created_at, created);
+        assert_eq!(
+            p2.endpoints[0].base_url,
+            "https://api.commandcode.ai/provider/v1"
+        );
         let raw2 = db
             .secret_get(&oauth::provider_scope(&key), oauth::BUNDLE_KEY)
             .unwrap()
@@ -501,8 +676,19 @@ mod tests {
         // 非法令牌包拒绝
         assert!(write_auth_provider(
             &db,
-            preset_of("command-code-auth"),
+            "auth-commandcode",
+            None,
+            &desc,
             &json!({"refresh": "x"})
+        )
+        .is_err());
+        // 插件路径缺 provider 模板拒绝（新建路径必需）
+        assert!(write_auth_provider(
+            &db,
+            "auth-commandcode",
+            None,
+            &json!({"kind": "callback"}),
+            &bundle
         )
         .is_err());
     }
@@ -532,7 +718,8 @@ mod tests {
         })
         .unwrap();
         let bundle = json!({"access": "tok"});
-        assert!(write_auth_provider(&db, preset_of("kimi-oauth"), &bundle).is_err());
+        let desc = describe_tpl("kimi-oauth", "https://api.kimi.com/coding/v1");
+        assert!(write_auth_provider(&db, "auth-kimi", None, &desc, &bundle).is_err());
         assert_eq!(
             db.get_provider("kimi-oauth").unwrap().unwrap().endpoints[0].api_key,
             "manual"
@@ -551,7 +738,13 @@ mod tests {
                 script_ref: r#"
                     MB = { name = "auth-commandcode", capabilities = { "auth" } }
                     function MB.auth_describe(ctx)
-                      return { kind = "callback", supports_paste = true, instructions = "测试" }
+                      return {
+                        kind = "callback", supports_paste = true, instructions = "测试",
+                        provider = {
+                          key = "command-code-auth", label = "CC",
+                          protocol = "openai-chat", base_url = "https://api.commandcode.ai/provider/v1",
+                        },
+                      }
                     end
                     function MB.auth_begin(ctx)
                       return { status = "done", bundle = { access = "tok-done", source = "local-cli" } }
@@ -566,7 +759,9 @@ mod tests {
                 config_schema: Value::Null,
             })
             .unwrap();
-        let out = run_begin(&st, "command-code-auth", None).await.unwrap();
+        let out = run_begin(&st, Some("auth-commandcode"), None, None)
+            .await
+            .unwrap();
         assert!(out.already_done);
         assert_eq!(out.provider_key.as_deref(), Some("command-code-auth"));
         assert!(out.supports_paste);
@@ -584,6 +779,90 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(raw.contains("tok-done"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// provider 路径：手建 provider + provider 维度绑定插件，登录只刷
+    /// extra.auth 与令牌包，端点保持原样——第三方插件不依赖任何静态表。
+    #[tokio::test]
+    async fn begin_provider_path_updates_metadata_only() {
+        let (st, dir) = temp_state("provpath");
+        st.db
+            .upsert_plugin(&moonbridge_store::PluginRecord {
+                name: "auth-thirdparty".into(),
+                source: "lua".into(),
+                script_ref: r#"
+                    MB = { name = "auth-thirdparty", capabilities = { "auth" } }
+                    function MB.auth_describe(ctx)
+                      return { kind = "callback" }
+                    end
+                    function MB.auth_begin(ctx)
+                      return { status = "done", bundle = { access = "tok-x", account = "u9" } }
+                    end
+                    function MB.auth_headers(ctx, b) return { { "authorization", "Bearer " .. b.access } } end
+                "#.to_string(),
+                enabled: false,
+                config: json!({}),
+                scopes: vec!["provider".into()],
+                capabilities: vec!["auth".into()],
+                category: "auth".into(),
+                config_schema: Value::Null,
+            })
+            .unwrap();
+        // 手建 provider（用户自定义端点）+ 绑定 auth 插件
+        st.db
+            .upsert_provider(&Provider {
+                key: "my-provider".into(),
+                endpoints: vec![Endpoint {
+                    protocol: "anthropic".into(),
+                    base_url: "https://custom.example.com".into(),
+                    api_key: String::new(),
+                }],
+                version: None,
+                user_agent: None,
+                web_search: None,
+                extra: json!({}),
+                enabled: true,
+                quota_plugin_ref: String::new(),
+                quota_interval_secs: 0,
+                quota_enabled: false,
+                quota_config: Value::Null,
+                created_at: 0,
+                updated_at: 0,
+            })
+            .unwrap();
+        st.db
+            .upsert_binding(&PluginBinding {
+                plugin_name: "auth-thirdparty".into(),
+                scope: "provider".into(),
+                scope_key: "my-provider".into(),
+                enabled: true,
+                config: Value::Null,
+            })
+            .unwrap();
+        let out = run_begin(&st, None, Some("my-provider"), None)
+            .await
+            .unwrap();
+        assert!(out.already_done);
+        assert_eq!(out.provider_key.as_deref(), Some("my-provider"));
+        let p = st.db.get_provider("my-provider").unwrap().unwrap();
+        // 端点/协议保持原样，extra.auth 更新，令牌包落 secrets
+        assert_eq!(p.endpoints[0].protocol, "anthropic");
+        assert_eq!(p.endpoints[0].base_url, "https://custom.example.com");
+        assert_eq!(p.extra["auth"]["plugin"], "auth-thirdparty");
+        assert_eq!(p.extra["auth"]["account"], "u9");
+        let raw = st
+            .db
+            .secret_get(&oauth::provider_scope("my-provider"), oauth::BUNDLE_KEY)
+            .unwrap()
+            .unwrap();
+        assert!(raw.contains("tok-x"));
+        // 未绑定 auth 插件的 provider 拒绝进入流程
+        let mut unbound = st.db.get_provider("my-provider").unwrap().unwrap();
+        unbound.key = "unbound".into();
+        unbound.created_at = 0;
+        st.db.upsert_provider(&unbound).unwrap();
+        assert!(run_begin(&st, None, Some("unbound"), None).await.is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

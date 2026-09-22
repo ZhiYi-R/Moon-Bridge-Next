@@ -954,7 +954,10 @@ async fn plugin_import_writes_file_and_reports_per_file_status() {
     assert_eq!(outcomes[2]["status"], json!("skipped"), "同名不覆盖");
 
     // 写入数据库 + 写入磁盘
-    let rec = h.db.get_plugin("imported").unwrap().expect("应已写入数据库");
+    let rec =
+        h.db.get_plugin("imported")
+            .unwrap()
+            .expect("应已写入数据库");
     assert!(rec.enabled, "无 requires 时导入即启用");
     assert_eq!(rec.scopes, vec!["global", "provider"]);
     assert_eq!(rec.capabilities, vec!["core"]);
@@ -1497,7 +1500,11 @@ async fn quota_views_and_refresh_roundtrip() {
     assert_eq!(views.len(), 1, "{body}");
     assert_eq!(views[0]["providerKey"], json!("main"));
     assert_eq!(views[0]["quotaPluginRef"], json!("quota-demo"));
-    assert_eq!(views[0]["quotaIntervalSecs"], json!(60), "保存时 1..=59 限制为 60");
+    assert_eq!(
+        views[0]["quotaIntervalSecs"],
+        json!(60),
+        "保存时 1..=59 限制为 60"
+    );
     assert_eq!(
         views[0]["results"],
         json!([]),

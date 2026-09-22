@@ -126,10 +126,14 @@ impl LuaRuntime {
                 Err("manifest 读取不提供宿主能力".to_string())
             }
         }
-        Ok(
-            Self::new(name, script, &serde_json::Value::Null, Arc::new(NullBridge), SessionStore::new())?
-                .manifest,
-        )
+        Ok(Self::new(
+            name,
+            script,
+            &serde_json::Value::Null,
+            Arc::new(NullBridge),
+            SessionStore::new(),
+        )?
+        .manifest)
     }
 
     async fn enter(&self, ctx: &ReqCtx) -> Result<tokio::sync::MutexGuard<'_, Lua>> {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowLeft, ChevronDown, ChevronRight, Pencil, Plus, RefreshCw, ScanSearch, Search, Server, Trash2, X } from "lucide-vue-next";
+import { ArrowLeft, ChevronDown, ChevronRight, KeyRound, Pencil, Plus, RefreshCw, ScanSearch, Search, Server, Trash2, X } from "lucide-vue-next";
 import {
   computed,
   onActivated,
@@ -36,6 +36,7 @@ import {
   type ModelDef,
   type OAuthBegin,
   type OAuthFlowStatus,
+  type OAuthPluginEntry,
   type Offer,
   type PluginBinding,
   type PluginRecord,
@@ -89,9 +90,12 @@ function emptyEndpoint(): ProviderEndpoint {
 }
 
 // ── 预设选择器：新建先选预设（API/账户顶层标签）或走自定义 ──
+// 账户组数据源是 CAP_AUTH 插件清单（oauthApi.list），不是预设表——
+// 登录目标由插件/provider 绑定驱动，预设只做 API 直连的表单预填。
 const picking = ref(false);
 const presetQuery = ref("");
 const presets = ref<ProviderPreset[]>([]);
+const authPlugins = ref<OAuthPluginEntry[]>([]);
 /** 顶层标签：API 直连 / 账户登录（对齐 ocx 的弹窗标签形态） */
 const PRESET_TABS = [
   { id: "api", label: "API Key 直连" },
@@ -105,20 +109,32 @@ async function loadPresets() {
   } catch {
     presets.value = [];
   }
+  try {
+    authPlugins.value = await oauthApi.list();
+  } catch {
+    authPlugins.value = [];
+  }
 }
 
-/** 预设按 label/id 过滤（分组保持原顺序）。 */
-function presetFilter(list: ProviderPreset[]): ProviderPreset[] {
+/** 当前标签下的预设列表（API 组搜索过滤） */
+const activePresets = computed(() => {
   const q = presetQuery.value.trim().toLowerCase();
-  if (!q) return list;
-  return list.filter(
+  if (!q) return presets.value;
+  return presets.value.filter(
     (p) => p.label.toLowerCase().includes(q) || p.id.toLowerCase().includes(q),
   );
-}
-/** 当前标签下的预设列表（搜索过滤在标签内生效） */
-const activePresets = computed(() =>
-  presetFilter(presets.value.filter((p) => p.category === presetTab.value)),
-);
+});
+/** 账户标签下的认证插件（按 describe.label / 插件名过滤） */
+const activeAuthPlugins = computed(() => {
+  const q = presetQuery.value.trim().toLowerCase();
+  if (!q) return authPlugins.value;
+  return authPlugins.value.filter(
+    (e) =>
+      e.plugin.toLowerCase().includes(q) ||
+      (e.describe?.label ?? "").toLowerCase().includes(q) ||
+      (e.describe?.provider?.label ?? "").toLowerCase().includes(q),
+  );
+});
 
 function openPicker() {
   presetQuery.value = "";
@@ -132,13 +148,13 @@ function openDashboard(url?: string | null) {
 }
 
 function choosePreset(p: ProviderPreset) {
-  // 账户组：走 OAuth 登录编排（describe 元数据驱动的通用弹窗）
-  if (p.category === "account") {
-    void startLogin(p);
-    return;
-  }
   picking.value = false;
   void newProvider(p);
+}
+
+/** 账户标签选中认证插件：走 OAuth 登录编排（describe 元数据驱动的通用弹窗） */
+function chooseAuthPlugin(e: OAuthPluginEntry) {
+  void startLogin({ plugin: e.plugin, label: e.describe?.label ?? e.plugin });
 }
 
 function chooseCustom() {
@@ -227,8 +243,10 @@ async function importDetected() {
 }
 
 // ── OAuth 登录：describe 元数据驱动的通用登录弹窗（无平台分支） ──
+// 目标二选一：plugin=新建路径（按插件 describe.provider 建 provider）；
+// provider=已有 provider 重登录（走其绑定的 auth 插件）。
 const loginOpen = ref(false);
-const loginPreset = ref<ProviderPreset | null>(null);
+const loginTarget = ref<{ plugin?: string; provider?: string; label?: string } | null>(null);
 const loginDescribe = ref<Awaited<ReturnType<typeof oauthApi.describe>>["describe"] | null>(null);
 const loginSource = ref<string | null>(null);
 const loginBegin = ref<OAuthBegin | null>(null);
@@ -256,14 +274,14 @@ function resetLogin() {
   loginBusy.value = false;
 }
 
-async function startLogin(p: ProviderPreset) {
+async function startLogin(target: { plugin?: string; provider?: string; label?: string }) {
   picking.value = false;
-  loginPreset.value = p;
+  loginTarget.value = target;
   resetLogin();
   loginOpen.value = true;
   loginBusy.value = true;
   try {
-    const d = await oauthApi.describe(p.id);
+    const d = await oauthApi.describe({ plugin: target.plugin, provider: target.provider });
     loginDescribe.value = d.describe;
     // 单来源或未提供来源：直接 begin；多来源则停在来源选择步
     if (!d.describe.sources || d.describe.sources.length <= 1) {
@@ -276,18 +294,23 @@ async function startLogin(p: ProviderPreset) {
   }
 }
 
+/** 已有 OAuth provider 的重登录入口（凭据过期/换账户） */
+function reloginProvider(p: Provider) {
+  void startLogin({ provider: p.key, label: p.key });
+}
+
 async function beginLogin(source: string | null) {
-  const p = loginPreset.value;
-  if (!p) return;
+  const t = loginTarget.value;
+  if (!t) return;
   loginSource.value = source;
   loginError.value = null;
   loginBusy.value = true;
   try {
-    const b = await oauthApi.begin(p.id, source);
+    const b = await oauthApi.begin({ plugin: t.plugin, provider: t.provider }, source);
     if (b.alreadyDone) {
       loginOpen.value = false;
       await store.load();
-      toast.success("上游服务 “" + (b.providerKey ?? p.id) + "” 已登录");
+      toast.success("上游服务 “" + (b.providerKey ?? t.provider ?? t.plugin ?? "") + "” 已登录");
       resetLogin();
       return;
     }
@@ -1096,8 +1119,12 @@ function loadPluginList() {
               </td>
               <td class="py-2">
                 <div class="flex justify-center gap-0.5">
-                  <Button variant="ghost" size="icon" class="size-7" title="模型检测" @click="openDetect(p)">
-                    <ScanSearch class="size-3.5" />
+                  <Button
+                    v-if="(p.extra as Record<string, any>)?.auth?.plugin"
+                    variant="ghost" size="icon" class="size-7" title="重新登录"
+                    @click="reloginProvider(p)"
+                  >
+                    <KeyRound class="size-3.5" />
                   </Button>
                   <Button variant="ghost" size="icon" class="size-7" title="模型检测" @click="openDetect(p)">
                     <ScanSearch class="size-3.5" />
@@ -1154,7 +1181,8 @@ function loadPluginList() {
         </button>
       </div>
 
-      <div class="space-y-2">
+      <!-- API 直连：预设表预填表单 -->
+      <div v-if="presetTab === 'api'" class="space-y-2">
         <button
           v-for="p in activePresets"
           :key="p.id"
@@ -1195,6 +1223,46 @@ function loadPluginList() {
         </div>
       </div>
 
+      <!-- 账户登录：CAP_AUTH 插件清单（元数据全部来自插件 describe） -->
+      <div v-else class="space-y-2">
+        <button
+          v-for="e in activeAuthPlugins"
+          :key="e.plugin"
+          type="button"
+          :disabled="!!e.error"
+          class="w-full rounded-md border p-3 text-left transition-colors"
+          :class="
+            !e.error ? 'hover:border-primary/60 hover:bg-accent/40' : 'cursor-not-allowed opacity-60'
+          "
+          @click="chooseAuthPlugin(e)"
+        >
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-sm font-medium">{{ e.describe?.label ?? e.plugin }}</span>
+            <span class="flex items-center gap-1">
+              <Badge v-if="e.error" variant="warning">插件异常</Badge>
+              <Badge v-else-if="e.describe?.kind === 'device_code'" variant="secondary">设备码</Badge>
+              <Badge v-else variant="secondary">授权登录</Badge>
+            </span>
+          </div>
+          <div v-if="e.describe?.provider?.note" class="mt-1 text-xs text-muted-foreground">
+            {{ e.describe.provider.note }}
+          </div>
+          <div v-else-if="e.describe?.instructions" class="mt-1 text-xs text-muted-foreground">
+            {{ e.describe.instructions }}
+          </div>
+          <div v-if="e.describe?.provider?.base_url" class="mt-0.5 font-mono text-xs text-muted-foreground/70">
+            {{ e.describe.provider.base_url }}
+          </div>
+          <div v-if="e.error" class="mt-1 text-xs text-destructive">{{ e.error }}</div>
+        </button>
+        <div
+          v-if="activeAuthPlugins.length === 0"
+          class="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground"
+        >
+          无可用认证插件（在插件页安装声明 auth 能力的插件）
+        </div>
+      </div>
+
       <template #footer>
         <Button variant="ghost" size="sm" @click="picking = false">取消</Button>
         <Button variant="outline" size="sm" @click="chooseCustom">自定义上游</Button>
@@ -1204,7 +1272,7 @@ function loadPluginList() {
     <!-- OAuth 登录：describe 元数据驱动的通用流程（来源选择 → 授权指引 → 轮询） -->
     <Modal
       :open="loginOpen"
-      :title="'账户登录 — ' + (loginDescribe?.label ?? loginPreset?.label ?? '')"
+      :title="'账户登录 — ' + (loginDescribe?.label ?? loginTarget?.label ?? '')"
       @close="cancelLogin"
     >
       <div

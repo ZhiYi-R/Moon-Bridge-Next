@@ -137,6 +137,7 @@ pub fn run() {
             commands::catalog::catalog_import,
             commands::catalog::provider_detect_models,
             // OAuth 账户登录（通用编排，平台细节在 CAP_AUTH 插件）
+            commands::oauth::oauth_list,
             commands::oauth::oauth_describe,
             commands::oauth::oauth_begin,
             commands::oauth::oauth_status,

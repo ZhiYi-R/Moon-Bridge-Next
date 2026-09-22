@@ -1000,7 +1000,10 @@ mod tests {
         let output = completed["response"]["output"].as_array().unwrap();
         assert_eq!(output.len(), 2);
         assert_eq!(output[0]["type"], "reasoning");
-        assert_eq!(output[0]["encrypted_content"], "ENC", "本家凭据出站解除标记");
+        assert_eq!(
+            output[0]["encrypted_content"], "ENC",
+            "本家凭据出站解除标记"
+        );
         assert_eq!(output[1]["type"], "message");
         assert_eq!(output[1]["content"][0]["text"], "Hi");
     }

@@ -252,10 +252,12 @@ function MB.on_request(ctx, req) ... end -- 就地修改 req 即生效，亦可 
 
 ### 认证能力框架（CAP_AUTH，plugins/auth/*.lua）
 
-平台 OAuth（Kimi 设备码 / Command Code 回调·导入·粘贴）**不进入 core**：core 只提供通用
-能力与宿主原语，平台细节（端点、请求头、刷新授予、身份解析）全部在 Lua 插件内。与
-balance 的「旁路一次性脚本 + MB.query」同一范式——新增一家平台 = 加一个 `.lua`（或在
-Plugins 页新建 capabilities 含 `auth` 的插件）+ 一条账户预设，不改 core、不重编译网关。
+平台 OAuth **不进入 core**：core 只提供通用能力与宿主原语，平台细节（端点、client_id、
+scope、PKCE/设备码/回调、请求头、刷新授予、身份解析、provider 模板）全部在 Lua 插件内。
+内置 `auth-{claude,codex,commandcode,grok,kimi,qwen}` 六家（授权码+PKCE 本地回调、设备码、
+CLI 凭据导入、手动粘贴各形态）。与 quota 的「能力声明 + provider 绑定」同一范式——新增
+一家平台 = 加一个 `.lua`（或在 Plugins 页新建 capabilities 含 `auth` 的插件），不改 core、
+不重编译网关。
 
 **能力声明与门控**：`capabilities = { "auth" }`、`scopes = { "provider" }`。插件记录以
 `enabled = false` 全局停用；登录成功时宿主写 provider 维度 binding，注册表
@@ -263,7 +265,8 @@ Plugins 页新建 capabilities 含 `auth` 的插件）+ 一条账户预设，不
 全局启用会让它对每个 provider 的出站都注入，读不到令牌包即全部请求失败）。
 
 **钩子契约**（`MB.auth_*`，经 `LuaRuntime.call_mb_once/call_mb` 旁路调用）：
-`auth_describe`（流程元数据，UI 据此渲染，含可选 `sources` 来源选择）→ `auth_begin`
+`auth_describe`（流程元数据，UI 据此渲染：可选 `sources` 来源选择 + `provider`
+模板——新建路径的 provider 定义）→ `auth_begin`
 （可直出 `done`/`error` 终态，如本地 CLI 导入命中/显式失败）→ `auth_poll`（单步推进，
 状态机 `pending/slow_down/done/error/expired`，编排器掌握循环/总超时/取消）→ 运行时
 `auth_refresh` / `auth_headers`。
@@ -281,12 +284,18 @@ Plugins 页新建 capabilities 含 `auth` 的插件）+ 一条账户预设，不
 刷新失败回退窗口内仍有效的旧令牌并记 60s 退避；上游 401 触发一次强制刷新并重发本端点
 （不消耗故障转移名额）。未登录/刷新失败均为显式错误，不静默降级为无认证请求。
 
-**登录编排**（src-tauri `commands/oauth.rs`，平台无关）：`oauth_describe`（插件自述）
-→ `oauth_begin`（`ctx.source` 透传 UI 的来源选择）→ 后台轮询 `auth_poll`（粘贴经
-`oauth_paste` 透传下一轮 poll）→ done 落库。回调监听经 `mb.oauth.listen_callback` 由
-宿主托管（state 校验、超时、完成/取消/注册表销毁均清理）。内置两家插件随二进制
-`include_str!` 分发、首次启动种子进 db（幂等，不覆盖用户修改）。web/headless 运行时
-的 OAuth 端点不在本 PR 范围（管理 API 后续补齐，web.ts 对未实现 command 已显式报错）。
+**登录编排**（src-tauri `commands/oauth.rs`，平台无关，**插件/绑定驱动**）：
+`oauth_list`（全部声明 `auth` 能力的插件 + describe 元数据，预设选择器账户组的
+数据源）→ `oauth_describe`（插件自述；目标二选一：`plugin` 新建路径 / `provider`
+重登录走其绑定插件）→ `oauth_begin`（`ctx.source` 透传 UI 的来源选择）→ 后台轮询
+`auth_poll`（粘贴经 `oauth_paste` 透传下一轮 poll）→ done 落库。新建路径按插件
+`describe.provider` 模板建 provider（key/protocol/base_url 等由插件定义，静态预设表
+不参与认证决策）；provider 路径只刷新 `extra.auth` 与令牌包。回调监听经
+`mb.oauth.listen_callback` 由宿主托管（POST JSON 与 GET query 重定向两种形态都收，
+回极简完成页；state 校验、超时、完成/取消/注册表销毁均清理）。
+内置两家插件随二进制 `include_str!` 分发、首次启动种子进 db（幂等，不覆盖用户修改）。
+web/headless 运行时的 OAuth 端点不在本 PR 范围（管理 API 后续补齐，web.ts 对未实现
+command 已显式报错）。
 
 ---
 
@@ -458,9 +467,9 @@ Client → axum: POST /v1/responses | /v1/messages | /v1/chat/completions
 - **commands**（前端 `invoke`）：
   - 网关：`gateway_start / stop / restart / status`
   - CRUD：`provider_* / model_* / offer_* / route_* / plugin_*（含 `plugin_read_script` / `plugin_write_script` 在线编辑）/ binding_* / usage_* / settings_*`
-  - 预设与模型检测：`preset_list`（`presets.rs` 内嵌静态预设表：API Key 直连组开箱即用；账户组 Kimi/Command Code 经 OAuth 登录编排，预设以 `auth_plugin` 绑定 CAP_AUTH 插件）/ `provider_detect_models`（实时探测首端点的模型列表——OpenAI 系 `GET {base}/models`、Anthropic `GET {base}/v1/models`——再用 models.dev 目录按预设的 `models_dev_id` 分区 enrich 元数据；探测失败或空列表时回退目录分区；无目录映射时返回裸列表并以 warning 告知。预设解析先按 provider key 精确匹配，再按端点 Base URL 归一化匹配，用户改名后仍能找回目录映射）
+  - 预设与模型检测：`preset_list`（`presets.rs` 内嵌静态预设表，**仅 API Key 直连**的表单预填与 models.dev 目录映射，不参与认证决策）/ `provider_detect_models`（实时探测首端点的模型列表——OpenAI 系 `GET {base}/models`、Anthropic `GET {base}/v1/models`——再用 models.dev 目录分区 enrich 元数据；探测失败或空列表时回退目录分区；无目录映射时返回裸列表并以 warning 告知。目录映射解析：OAuth provider 用登录时插件模板写入的 `extra.auth.models_dev_id`，否则按预设表先 key 精确匹配、再按端点 Base URL 归一化匹配，用户改名后仍能找回目录映射）
   - 模型目录：`catalog_fetch`（后端 reqwest 拉取 `models.dev/api.json`，解析精简为扁平候选列表；顶层 JSON 在 `ManagedState` 有 5 分钟 TTL 缓存 + 拉取单飞锁，`refresh=true` 强制重拉并返回缓存命中标记）/ `catalog_import`（勾选批量导入：模型元数据按 slug upsert——已存在的按「有值者胜」合并不覆盖本地字段，返回实际写入/跳过数；**定价**经 `insert_offer_if_absent` 写入对应 provider 的 offer，并对同 slug 已有空定价的行回填 `backfill_offer_pricing`；刻意不触碰 provider 端点配置）
-  - OAuth 账户：`oauth_describe / oauth_begin / oauth_status / oauth_cancel / oauth_paste`——通用登录编排（平台细节在 CAP_AUTH 插件，见 §6 认证能力框架）：describe 拿插件自述决定渲染与来源选择，begin 启动后台登录任务并返回流程描述，前端轮询 status，cancel 经移除流程条目中止后台任务，paste 透传给下一轮 auth_poll。登录成功：令牌包加密存 `secrets` 表，provider 行只记非敏感 `extra.auth`，写 provider 维度插件绑定
+  - OAuth 账户：`oauth_list / oauth_describe / oauth_begin / oauth_status / oauth_cancel / oauth_paste`——通用登录编排（平台细节在 CAP_AUTH 插件，见 §6 认证能力框架）：list 列出全部声明 `auth` 能力的插件及其 describe 元数据；describe/begin 的目标二选一——`plugin`（新建路径，成功后按插件 `describe.provider` 模板建 provider + 写 provider 维度绑定）或 `provider`（已有 provider 重登录，服务端解析其绑定插件，只刷新 `extra.auth` 与令牌包）。前端轮询 status，cancel 经移除流程条目中止后台任务，paste 透传给下一轮 auth_poll。登录成功：令牌包加密存 `secrets` 表，provider 行只记非敏感 `extra.auth`
   - Trace：`trace_list / trace_read / trace_delete`（只读浏览 `trace_dir`，含路径穿越校验）
   - 应用：`app_info / config_get / config_set`
 - **托盘**：显示主窗口 / 一键启停网关 / 退出；左键单击显示窗口。

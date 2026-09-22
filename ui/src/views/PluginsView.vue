@@ -483,6 +483,7 @@ onActivated(() => {
             :options="[
               { value: 'core', label: 'core · 请求链路' },
               { value: 'quota', label: 'quota · 配额查询' },
+              { value: 'auth', label: 'auth · 账户认证' },
             ]"
           />
         </div>

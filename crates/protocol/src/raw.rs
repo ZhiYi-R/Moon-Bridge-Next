@@ -11,10 +11,16 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RawBody {
-    Json { value: Value },
-    Text { text: String },
+    Json {
+        value: Value,
+    },
+    Text {
+        text: String,
+    },
     /// 二进制体（base64 传输，Lua 侧以字符串呈现）。
-    Binary { data: Vec<u8> },
+    Binary {
+        data: Vec<u8>,
+    },
     Empty,
 }
 

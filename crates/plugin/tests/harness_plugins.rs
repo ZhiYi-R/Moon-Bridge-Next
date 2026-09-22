@@ -63,7 +63,10 @@ fn ctx() -> ReqCtx {
 #[test]
 fn harness_plugins_have_valid_manifests() {
     for (name, script) in [
-        ("opencode", include_str!("../../../plugins/harness/opencode.lua")),
+        (
+            "opencode",
+            include_str!("../../../plugins/harness/opencode.lua"),
+        ),
         (
             "claude-code",
             include_str!("../../../plugins/harness/claude-code.lua"),
@@ -95,7 +98,10 @@ async fn opencode_plugin_bridges_session_header_and_strips_it() {
         include_str!("../../../plugins/harness/opencode.lua"),
     );
     let mut msg = inbound(
-        vec![("x-opencode-session", "oc-abc"), ("content-type", "application/json")],
+        vec![
+            ("x-opencode-session", "oc-abc"),
+            ("content-type", "application/json"),
+        ],
         RawBody::json(serde_json::json!({"messages": []})),
     );
     rt.on_client_request_raw(&ctx(), &mut msg).await.unwrap();
@@ -112,10 +118,7 @@ async fn opencode_plugin_bridges_non_opencode_provider_headers() {
         include_str!("../../../plugins/harness/opencode.lua"),
     );
     let mut msg = inbound(
-        vec![
-            ("x-session-affinity", "oc-gen"),
-            ("x-session-id", "oc-gen"),
-        ],
+        vec![("x-session-affinity", "oc-gen"), ("x-session-id", "oc-gen")],
         RawBody::json(serde_json::json!({"messages": []})),
     );
     rt.on_client_request_raw(&ctx(), &mut msg).await.unwrap();
@@ -225,7 +228,10 @@ async fn codex_plugin_prefers_session_id_and_strips_all() {
 #[tokio::test]
 async fn codex_plugin_falls_back_to_window_id() {
     let rt = runtime("codex", include_str!("../../../plugins/harness/codex.lua"));
-    let mut msg = inbound(vec![("x-codex-window-id", "win-42")], RawBody::json(serde_json::json!({})));
+    let mut msg = inbound(
+        vec![("x-codex-window-id", "win-42")],
+        RawBody::json(serde_json::json!({})),
+    );
     rt.on_client_request_raw(&ctx(), &mut msg).await.unwrap();
     assert_eq!(msg.session_id.as_deref(), Some("win-42"));
     assert!(msg.header("x-codex-window-id").is_none());
@@ -261,7 +267,10 @@ async fn grok_build_falls_back_to_conv_id() {
         "grok-build",
         include_str!("../../../plugins/harness/grok-build.lua"),
     );
-    let mut msg = inbound(vec![("x-grok-conv-id", "gc-2")], RawBody::json(serde_json::json!({})));
+    let mut msg = inbound(
+        vec![("x-grok-conv-id", "gc-2")],
+        RawBody::json(serde_json::json!({})),
+    );
     rt.on_client_request_raw(&ctx(), &mut msg).await.unwrap();
     assert_eq!(msg.session_id.as_deref(), Some("gc-2"));
 }
@@ -317,7 +326,8 @@ async fn dsh_bridges_header_and_body_fallback() {
     // 安装级 id 非身份源，不动
     assert_eq!(msg.header("x-deepseek-harness-user-id"), Some("install-1"));
 
-    let body = serde_json::json!({"dsh_session_log": {"session": {"id": "dsh-sess-2"}}, "messages": []});
+    let body =
+        serde_json::json!({"dsh_session_log": {"session": {"id": "dsh-sess-2"}}, "messages": []});
     let mut msg = inbound(vec![], RawBody::json(body.clone()));
     rt.on_client_request_raw(&ctx(), &mut msg).await.unwrap();
     assert_eq!(msg.session_id.as_deref(), Some("dsh-sess-2"));

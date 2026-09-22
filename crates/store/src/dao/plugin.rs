@@ -54,8 +54,7 @@ fn row_to_binding(r: &rusqlite::Row) -> rusqlite::Result<PluginBinding> {
 impl Database {
     pub fn list_plugins(&self) -> Result<Vec<PluginRecord>> {
         let conn = self.conn.lock();
-        let mut stmt =
-            conn.prepare(&format!("SELECT {PLUGIN_COLS} FROM plugins ORDER BY name"))?;
+        let mut stmt = conn.prepare(&format!("SELECT {PLUGIN_COLS} FROM plugins ORDER BY name"))?;
         let rows = stmt.query_map([], row_to_plugin)?;
         let mut out = Vec::new();
         for r in rows {

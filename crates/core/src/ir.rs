@@ -24,7 +24,9 @@ pub type Map = JsonMap<String, Value>;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     /// 图像（base64 数据 + MIME 类型；`media_type` 为 "url"/"file" 时 data
     /// 分别承载远程 URL / 平台 file_id）。
     Image {
@@ -179,9 +181,7 @@ pub enum ToolChoice {
     Auto,
     None,
     Required,
-    Tool {
-        name: String,
-    },
+    Tool { name: String },
 }
 
 // ============================================================================
@@ -318,14 +318,22 @@ pub struct CoreResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamDelta {
-    Text { text: String },
-    Reasoning { text: String },
+    Text {
+        text: String,
+    },
+    Reasoning {
+        text: String,
+    },
     /// 推理凭据增量：加密 CoT 的回传凭据（如 anthropic `signature_delta`、
     /// responses reasoning item 的 `encrypted_content`）。不透明文本，
     /// 仅供入口协议原样透传给客户端供下一轮回传，绝不是展示内容。
-    ReasoningSignature { signature: String },
+    ReasoningSignature {
+        signature: String,
+    },
     /// 工具入参增量（部分 JSON 字符串）。
-    ToolInput { partial_json: String },
+    ToolInput {
+        partial_json: String,
+    },
 }
 
 /// 协议中立的流事件。上游 Adapter 把 SSE 解码为 `CoreStreamEvent`，

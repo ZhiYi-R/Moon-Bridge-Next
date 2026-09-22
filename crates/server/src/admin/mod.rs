@@ -229,10 +229,7 @@ pub fn router(state: AdminState) -> Router {
         .route("/api/usage/cost-by-provider", get(usage_cost_by_provider))
         // ---- quota（配额查询）----
         .route("/api/quota", get(quota::quota_list))
-        .route(
-            "/api/quota/:key/refresh",
-            post(quota::quota_refresh),
-        )
+        .route("/api/quota/:key/refresh", post(quota::quota_refresh))
         .route("/api/quota/refresh", post(quota::quota_refresh_all))
         .route("/api/quota/test", post(quota::quota_test))
         // ---- trace ----

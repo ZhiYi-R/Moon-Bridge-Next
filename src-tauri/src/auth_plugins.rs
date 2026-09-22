@@ -14,18 +14,31 @@ use serde_json::{json, Value};
 
 /// 内置插件表：(插件名, 脚本源码)。
 const BUILTIN: &[(&str, &str)] = &[
-    ("auth-kimi", include_str!("../../plugins/auth/kimi.lua")),
+    ("auth-claude", include_str!("../../plugins/auth/claude.lua")),
+    ("auth-codex", include_str!("../../plugins/auth/codex.lua")),
     (
         "auth-commandcode",
         include_str!("../../plugins/auth/commandcode.lua"),
     ),
+    ("auth-grok", include_str!("../../plugins/auth/grok.lua")),
+    ("auth-kimi", include_str!("../../plugins/auth/kimi.lua")),
+    ("auth-qwen", include_str!("../../plugins/auth/qwen.lua")),
 ];
 
 /// 种子内置认证插件（幂等；插入失败仅记录错误，不阻断启动）。
 pub fn seed_auth_plugins(db: &Database) {
     for (name, script) in BUILTIN {
         match db.get_plugin(name) {
-            Ok(Some(_)) => {}
+            // 存量记录修正：category 从 "core" 收敛到 "auth"（认证插件不进请求链路，
+            // 留在 core 会混入 provider 编辑器的三态绑定表）；只动 category 字段
+            Ok(Some(mut rec)) => {
+                if rec.category == "core" && rec.capabilities.iter().any(|c| c == "auth") {
+                    rec.category = "auth".to_string();
+                    if let Err(e) = db.upsert_plugin(&rec) {
+                        tracing::error!(plugin = %name, error = %e, "内置认证插件类别修正失败");
+                    }
+                }
+            }
             Ok(None) => {
                 let rec = PluginRecord {
                     name: (*name).to_string(),
@@ -35,7 +48,7 @@ pub fn seed_auth_plugins(db: &Database) {
                     config: json!({}),
                     scopes: vec!["provider".to_string()],
                     capabilities: vec!["auth".to_string()],
-                    category: "core".to_string(),
+                    category: "auth".to_string(),
                     config_schema: Value::Null,
                 };
                 if let Err(e) = db.upsert_plugin(&rec) {
