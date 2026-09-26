@@ -117,6 +117,7 @@ Typical uses of the wire layer:
 - Patch outbound bodies: inject metadata, cap `max_tokens`, and the like;
 - Enforce entry authorization: `abort` requests that lack an `Authorization` header;
 - Short-circuit with a local answer: return a cached response without contacting the upstream at all;
+- Heal transient upstream errors: return `retry` on 5xx/429 from the error path of `on_upstream_response_raw` and the gateway re-sends the request after a delay (a single-endpoint provider has no next endpoint to fail over to, so this is its only safety net) — the bundled `plugins/utils/rescue_5xx.lua` is ready to enable;
 - Drop noise such as heartbeat SSE chunks;
 - Orchestrate across providers with `mb.provider.invoke` — classify the request with a cheap model inside the plugin, then decide where the main request goes.
 
@@ -155,14 +156,14 @@ The main fields of `req` (CoreRequest): `model` (the resolved upstream model nam
 |------|-----------|---------|
 | `on_client_request_raw(ctx, msg)` | `raw_request` | Inbound request (client → gateway) |
 | `on_upstream_request_raw(ctx, msg)` | `raw_request` | Outbound request (gateway → upstream) |
-| `on_upstream_response_raw(ctx, msg)` | `raw_response` | Upstream response (non-streaming) |
+| `on_upstream_response_raw(ctx, msg)` | `raw_response` | Upstream response (non-streaming); **also fires on a non-2xx upstream response** (error path, `msg.status >= 400`) |
 | `on_client_response_raw(ctx, msg)` | `raw_response` | Outbound response (gateway → client, non-streaming) |
 | `on_upstream_chunk_raw(ctx, chunk)` | `raw_stream` | Upstream SSE chunk (streaming) |
 | `on_client_chunk_raw(ctx, chunk)` | `raw_stream` | SSE chunk written back to the client (streaming) |
 
 Fields of `msg`: `stage`, `protocol`, `provider`, `method`, `url`, `status`, `headers` (an order-preserving array `{{k, v}, ...}`), and `body` (JSON table / string / nil; nil with `body_truncated = true` when over the size threshold, in which case the original message is forwarded untouched). Fields of `chunk`: `stage`, `protocol`, `provider`, `event`, `data`, `raw`. In-place modification takes effect; for outbound requests, all four rewrites — `method`, `url`, `headers`, `body` — are honored.
 
-Return-value convention: return `nil` to pass through; message hooks may return `{ action = "short_circuit", status?, headers?, body? }` (answer locally, skipping the upstream) or `{ action = "abort", message? }` (reject the request); chunk hooks may return `{ action = "drop" }`. Short-circuited and aborted requests still produce usage records and traces for auditing.
+Return-value convention: return `nil` to pass through; message hooks may return `{ action = "short_circuit", status?, headers?, body? }` (answer locally, skipping the upstream), `{ action = "abort", message? }` (reject the request), or `{ action = "retry", delay_ms? }` (re-send this upstream request after `delay_ms` — **consumed only on the error path of `on_upstream_response_raw`**, treated as pass-through everywhere else; the retry count and delay are capped by the `pluginRetryMax` (default 8, 0 disables plugin retries) and `pluginRetryDelayCapMs` (default 30000) settings, and past the budget the gateway passes through and reports the original upstream error); chunk hooks may return `{ action = "drop" }`. Short-circuited and aborted requests still produce usage records and traces for auditing.
 
 Capability declarations double as the performance switch: a plugin that does not declare `raw_stream` produces no Lua calls at all during streaming — per-chunk forwarding carries zero overhead.
 
@@ -241,6 +242,7 @@ Each plugin owns a dedicated Lua VM running in a sandbox:
 - `plugins/examples/log_request.lua` — semantic-layer example: request logging, session counters, system-prompt injection, error rewriting;
 - `plugins/examples/raw_rewrite.lua` — wire-layer example: authorization checks, outbound header rewrites, body patching, heartbeat-chunk dropping;
 - `plugins/utils/FxxkDax.lua` — a minimal plugin in production use: injects the session-identifier header its upstream requires;
+- `plugins/utils/rescue_5xx.lua` — upstream 5xx/429 self-healing: from the error path, asks the gateway to re-send the request after an exponential backoff (the safety net for a single-endpoint provider);
 - `plugins/moonbridge.lua` — an LSP stub: add it to your lua-language-server workspace library for completion and type hints on `MB` and `mb`. In VS Code, for example: `"Lua.workspace.library": { "/path/to/moon-bridge-next/plugins": true }` in settings.json.
 
 ## Deployment

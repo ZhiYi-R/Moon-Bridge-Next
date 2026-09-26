@@ -5,6 +5,7 @@
 //! → 回程转换 → usage 写入数据库），断言客户端最终收到的报文。入口协议覆盖
 //! Responses / Anthropic / Chat，上游覆盖 Anthropic / Chat / Gemini。
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -1483,6 +1484,312 @@ async fn e2e_abort_still_records_usage_and_trace() {
     let _ = std::fs::remove_dir_all(&trace_dir);
 }
 
+// ── 插件驱动的上游重试（5xx/520 自愈）────────────────────────────────────
+
+/// 内联救援插件：上游错误（>=500）一律要求宿主 1ms 后重试；成功路径（msg.status=200）
+/// 返回 nil 放行。与 `plugins/utils/rescue_5xx.lua` 同构（后者多了退避与计数封顶）。
+const RESCUE_PLUGIN: &str = r#"
+MB = { version = "0.1.0", capabilities = { "raw_response" } }
+function MB.on_upstream_response_raw(ctx, msg)
+  if msg.status >= 500 then
+    return { action = "retry", delay_ms = 1 }
+  end
+end
+"#;
+
+/// 计数型 mock OpenAI Chat 上游：前 `fail_first` 次请求回 520（HTML 空壳，模拟
+/// api.commandcode.ai 的瞬时 5xx），之后按请求 `stream` 返回正常 JSON / SSE。
+///
+/// 返回 (base_url, 命中计数)——命中次数即「宿主总共发了几次上游请求」，是断言
+/// 「重试真的重发了」与「没重试」的唯一可信观察点（客户端只看得到末次结果）。
+async fn spawn_mock_chat_520_then_ok(fail_first: usize) -> (String, Arc<AtomicUsize>) {
+    type MockState = (Arc<AtomicUsize>, usize);
+    async fn chat(
+        axum::extract::State(s): axum::extract::State<MockState>,
+        Json(body): Json<Value>,
+    ) -> Response {
+        let (hits, fail_first) = s;
+        if hits.fetch_add(1, Ordering::SeqCst) < fail_first {
+            return (
+                axum::http::StatusCode::from_u16(520).unwrap(),
+                "<html>520 服务端未知错误</html>",
+            )
+                .into_response();
+        }
+        if body
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            let sse = concat!(
+                "data: {\"id\":\"c1\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"id\":\"c1\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":4,\"total_tokens\":12}}\n\n",
+                "data: [DONE]\n\n",
+            );
+            Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(Body::from(sse))
+                .unwrap()
+        } else {
+            Json(json!({
+                "id": "chatcmpl-1",
+                "object": "chat.completion",
+                "model": "gpt-4o",
+                "choices": [{ "index": 0, "message": { "role": "assistant", "content": "Hello from chat" }, "finish_reason": "stop" }],
+                "usage": { "prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12 }
+            }))
+            .into_response()
+        }
+    }
+    let hits = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route("/v1/chat/completions", post(chat))
+        .with_state((hits.clone(), fail_first));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), hits)
+}
+
+/// 重试测试装配：计数型 520 上游（openai-chat）+ 内联救援插件 + 可调 `plugin_retry_max`。
+///
+/// 不复用 `setup_with`/`seed_lua_state`：前者无插件与 trace，后者把上游协议钉死在
+/// anthropic 且用默认重试配置——本组测试三项都要能改。
+async fn setup_retry_state(
+    tag: &str,
+    plugin_script: &str,
+    retry_max: usize,
+    fail_first: usize,
+) -> (
+    Arc<AppState>,
+    Arc<Database>,
+    std::path::PathBuf,
+    Arc<AtomicUsize>,
+) {
+    let (base_url, hits) = spawn_mock_chat_520_then_ok(fail_first).await;
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    db.upsert_provider(&Provider {
+        key: "mock".into(),
+        endpoints: vec![Endpoint {
+            protocol: "openai-chat".into(),
+            base_url,
+            api_key: "sk-test".into(),
+        }],
+        version: None,
+        user_agent: None,
+        web_search: None,
+        extra: json!({}),
+        quota_plugin_ref: String::new(),
+        quota_interval_secs: 0,
+        quota_enabled: false,
+        quota_config: serde_json::json!({}),
+        enabled: true,
+        created_at: 0,
+        updated_at: 0,
+    })
+    .unwrap();
+    db.upsert_route(&Route {
+        alias: "test-model".into(),
+        model_slug: "gpt-4o".into(),
+        provider_key: "mock".into(),
+        extra: Value::Null,
+    })
+    .unwrap();
+    db.upsert_plugin(&PluginRecord {
+        name: format!("e2e-{tag}"),
+        source: "lua".into(),
+        script_ref: plugin_script.into(),
+        enabled: true,
+        config: json!({}),
+        scopes: vec!["global".into()],
+        capabilities: vec!["raw_response".into()],
+        category: "core".into(),
+        config_schema: Value::Null,
+    })
+    .unwrap();
+
+    let trace_dir = std::env::temp_dir().join(format!("mb-e2e-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&trace_dir);
+    let cfg = GatewayConfig {
+        trace_dir: Some(trace_dir.to_string_lossy().to_string()),
+        plugin_retry_max: retry_max,
+        ..GatewayConfig::default()
+    };
+    let state = bootstrap(cfg, db.clone()).expect("bootstrap 应成功加载插件");
+    (state, db, trace_dir, hits)
+}
+
+/// 520 自愈（非流式）：前 2 次 520、第 3 次 200 ⇒ 客户端拿到 200，上游命中 3 次。
+///
+/// 这是本次改造的目标场景：单端点 provider 的瞬时 5xx 不再冒泡到客户端。
+#[tokio::test]
+async fn e2e_plugin_retry_recovers_non_stream_520() {
+    let (state, db, trace_dir, hits) = setup_retry_state("retry-ok", RESCUE_PLUGIN, 8, 2).await;
+
+    let body = json!({
+        "model": "test-model",
+        "messages": [{ "role": "user", "content": "Hi" }],
+        "stream": false
+    });
+    let resp = dispatch::handle_request(state, Protocol::OpenAiChat, body, vec![], None)
+        .await
+        .expect("插件重试后应成功");
+    assert_eq!(resp.status(), 200);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let out: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        out["object"], "chat.completion",
+        "客户端拿到正常响应: {out}"
+    );
+    assert_eq!(
+        untag(out["choices"][0]["message"]["content"].as_str().unwrap()),
+        "Hello from chat"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        3,
+        "两次 520 后第三次成功 ⇒ 上游应被命中 3 次"
+    );
+    assert_eq!(
+        db.usage_summary().unwrap().requests,
+        1,
+        "一次客户端请求只记一条用量（重试轮不单独记账）"
+    );
+
+    let files = trace_json_files(&trace_dir);
+    assert_eq!(files.len(), 1, "重试轮不落 trace，只留末次");
+    let t: Value = serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
+    assert_eq!(t["status"], "ok");
+    assert_eq!(t["retries"], 2, "两次重试要写进 trace: {t}");
+    let _ = std::fs::remove_dir_all(&trace_dir);
+}
+
+/// 520 自愈（流式）：同样的 2 次 520 + 第 3 次成功，SSE 照常完整下发。
+///
+/// 流式请求的错误响应在响应头阶段就被拦住（尚未下发任何 SSE 事件），所以重试对
+/// 客户端完全透明：它只会看到第三次尝试的 SSE 流。
+#[tokio::test]
+async fn e2e_plugin_retry_recovers_stream_520() {
+    let (state, db, trace_dir, hits) = setup_retry_state("retry-sse", RESCUE_PLUGIN, 8, 2).await;
+
+    let body = json!({
+        "model": "test-model",
+        "messages": [{ "role": "user", "content": "Hi" }],
+        "stream": true
+    });
+    let resp = dispatch::handle_request(state, Protocol::OpenAiChat, body, vec![], None)
+        .await
+        .expect("流式请求同样应自愈");
+    assert_eq!(resp.status(), 200);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let sse = String::from_utf8_lossy(&bytes);
+    assert!(sse.contains("Hello"), "应下发正常增量: {sse}");
+    assert!(sse.contains("[DONE]"), "SSE 应以 [DONE] 收尾: {sse}");
+    assert_eq!(hits.load(Ordering::SeqCst), 3, "流式同样重发 3 次");
+    assert_eq!(db.usage_summary().unwrap().requests, 1);
+
+    // 流式 trace 在 StreamAudit 析构时落盘（body 读尽后），留一点时间等它写完
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let files = trace_json_files(&trace_dir);
+    assert_eq!(files.len(), 1, "流式请求应留下一份 trace");
+    let t: Value = serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
+    assert_eq!(t["retries"], 2, "流式路径的重试次数也要落盘: {t}");
+    let _ = std::fs::remove_dir_all(&trace_dir);
+}
+
+/// 永远 520：重试预算耗尽后如实报错——客户端最终拿到 520，上游命中 = 1 + 重试次数。
+///
+/// 上限由宿主强制（插件每轮都返回 retry），这条同时守着「不会死循环」。
+#[tokio::test]
+async fn e2e_plugin_retry_exhaustion_reports_upstream_520() {
+    let (state, db, trace_dir, hits) =
+        setup_retry_state("retry-give-up", RESCUE_PLUGIN, 2, usize::MAX).await;
+
+    let body = json!({
+        "model": "test-model",
+        "messages": [{ "role": "user", "content": "Hi" }],
+        "stream": false
+    });
+    let err = dispatch::handle_request(state, Protocol::OpenAiChat, body, vec![], None)
+        .await
+        .expect_err("重试耗尽后应把上游错误如实报出");
+    assert!(
+        matches!(
+            &err,
+            moonbridge_gateway::GatewayError::Upstream { status: 520, .. }
+        ),
+        "客户端应拿到上游的 520: {err}"
+    );
+    assert_eq!(
+        err.into_response().status(),
+        520,
+        "回给客户端的 HTTP 状态码也必须是 520"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        3,
+        "plugin_retry_max=2 ⇒ 1 次首试 + 2 次重试"
+    );
+    assert_eq!(db.usage_summary().unwrap().requests, 1);
+
+    let files = trace_json_files(&trace_dir);
+    assert_eq!(files.len(), 1);
+    let t: Value = serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
+    assert_eq!(t["status"], "error");
+    assert_eq!(t["retries"], 2, "失败请求的重试次数同样要留痕: {t}");
+    // trace.error 的文案沿用既有格式；520 不在 http crate 的已知码表里，Display 会补
+    // 「<unknown status code>」后缀（历史行为，未改），故只断言前缀。
+    assert!(
+        t["error"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("上游返回 HTTP 520"),
+        "错误摘要应含上游状态码: {t}"
+    );
+    let _ = std::fs::remove_dir_all(&trace_dir);
+}
+
+/// `plugin_retry_max = 0`：插件重试整体禁用，行为与改造前完全一致（一次都不重发）。
+#[tokio::test]
+async fn e2e_plugin_retry_disabled_is_legacy_behaviour() {
+    let (state, db, trace_dir, hits) =
+        setup_retry_state("retry-off", RESCUE_PLUGIN, 0, usize::MAX).await;
+
+    let body = json!({
+        "model": "test-model",
+        "messages": [{ "role": "user", "content": "Hi" }],
+        "stream": false
+    });
+    let err = dispatch::handle_request(state, Protocol::OpenAiChat, body, vec![], None)
+        .await
+        .expect_err("禁用重试后 520 直接冒泡");
+    assert!(matches!(
+        &err,
+        moonbridge_gateway::GatewayError::Upstream { status: 520, .. }
+    ));
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "plugin_retry_max=0 ⇒ 禁用插件重试，上游只被命中一次"
+    );
+    assert_eq!(db.usage_summary().unwrap().requests, 1);
+
+    let files = trace_json_files(&trace_dir);
+    assert_eq!(files.len(), 1);
+    let t: Value = serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
+    assert!(
+        t.get("retries").is_none(),
+        "0 次重试不写 retries 键（旧 trace 形态）: {t}"
+    );
+    let _ = std::fs::remove_dir_all(&trace_dir);
+}
+
 // ── 会话水印（session marker）──────────────────────────────────────────
 
 /// 水印测试装配：固定 JSON mock 上游 + trace 写入磁盘 + 可切换 `session_marker`/表深。
@@ -1815,15 +2122,9 @@ async fn e2e_plugin_session_id_overrides_watermark() {
         "messages": [{ "role": "user", "content": "Hi" }], "stream": false
     });
     let headers = vec![("x-opencode-session".to_string(), "oc-sess-123".to_string())];
-    let resp = dispatch::handle_request(
-        state.clone(),
-        Protocol::Anthropic,
-        body,
-        headers,
-        None,
-    )
-    .await
-    .expect("dispatch 应成功");
+    let resp = dispatch::handle_request(state.clone(), Protocol::Anthropic, body, headers, None)
+        .await
+        .expect("dispatch 应成功");
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();

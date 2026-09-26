@@ -5,6 +5,9 @@
 //! [RAW] on_client_request_raw → to_core_request → 路由
 //!   → [CORE] on_request/inject_tools → from_core_request
 //!   → [RAW] on_upstream_request_raw → 发送上游
+//!   → 上游非 2xx: [RAW] on_upstream_response_raw（错误路径，msg.status >= 400）
+//!                → 返回 retry 则延迟后重走上面的端点链（受 plugin_retry_max 与
+//!                  plugin_retry_delay_cap_ms 钳制），其余动作按放行/短路/中止处置
 //!   → 流式: read_chunks → [RAW] chunk → decode → [CORE] event → encode → [RAW] chunk → 写出
 //!     非流式: [RAW] on_upstream_response_raw → to_core_response → [CORE] on_response
 //!             → from_core_response → [RAW] on_client_response_raw → 回写
@@ -28,6 +31,12 @@ use crate::stream;
 use crate::trace::{self, TraceRecord, TraceUsage};
 use crate::upstream;
 use crate::usage;
+
+/// 插件在错误路径上要求短路代答的报文（`RawVerdict::ShortCircuit` 的三个字段）。
+///
+/// 单独取名有两个原因：判定要等 trace 建好之后再兑现（先取出、后应答，避免多造一份
+/// trace），且元组类型本身不方便直接写在语句里。
+type PluginAnswer = (u16, Vec<(String, String)>, RawBody);
 
 /// 处理一次入口请求，返回 axum 响应（流式 SSE 或非流式 JSON）。
 pub async fn handle_request(
@@ -100,7 +109,9 @@ pub async fn handle_request(
                 message,
             ))
         }
-        RawVerdict::Pass => {}
+        // 重试动作只由「上游响应钩子的错误路径」消费（见 handle_request）；
+        // 其它阶段拿到它一律按放行处理。
+        RawVerdict::Pass | RawVerdict::Retry { .. } => {}
     }
     // 插件会话覆写：on_client_request_raw 改写 msg.session_id（客户端自带会话
     // 头经插件转为身份源）优先于 extract_session 的结果——它是更显式的通道；
@@ -195,160 +206,106 @@ pub async fn handle_request(
     })?;
     core_req.tools.extend(extra_tools);
 
-    // ── Core → 上游协议（逐端点故障转移）──
+    // ── Core → 上游协议（逐端点故障转移 + 插件驱动的整链重试）──
 
-    // 故障转移：按序尝试各端点，连接错误/超时、429、5xx 且还有后续端点时切换；
+    // 外层：插件重试轮次（首轮 + 至多 plugin_retry_max 次重试）。只有上游返回错误
+    // （非 2xx）且报文层钩子在错误路径上返回 {action="retry"} 才进入下一轮；重发在
+    // 传输层由宿主原生完成（重走 from_core_request → 出站钩子 → send），协议翻译、
+    // 流式、trace 机制全部自然复用——插件不必自己搬报文（那会绕过协议转换与流式）。
+    // 内层：端点故障转移——按序尝试各端点，连接错误/超时、429、5xx 且还有后续端点时切换；
     // 其余 4xx 或末位端点失败则快速失败。协议绑定在端点上，Adapter 逐端点选取；
-    // outbound 钩子随端点逐次触发。
+    // outbound 钩子随端点逐次触发（重试轮同样逐端点重触发，补头类插件是幂等 set）。
     let total = resolved.endpoints.len();
-    let mut up: Option<UpstreamRequest> = None;
-    let mut resp: Option<reqwest::Response> = None;
-    let mut used_protocol = resolved.protocol;
-    for (attempt, ep) in resolved.endpoints.iter().enumerate() {
-        let provider_adapter = state
-            .registry
-            .provider(ep.protocol)
-            .ok_or_else(|| GatewayError::Route(format!("无上游 Adapter 支持协议 {}", ep.protocol)))
-            .map_err(|e| {
-                fail_audit(
-                    &state,
-                    &ctx,
-                    start,
-                    routed_trace(&ctx, &resolved, &client_request_snapshot),
-                    e,
-                )
-            })?;
-        let mut u = provider_adapter
-            .from_core_request(&ctx, &core_req, ep)
-            .await
-            .map_err(|e| {
-                fail_audit(
-                    &state,
-                    &ctx,
-                    start,
-                    routed_trace(&ctx, &resolved, &client_request_snapshot),
-                    e.into(),
-                )
-            })?;
+    for plugin_round in 0..=state.config.plugin_retry_max {
+        let mut up: Option<UpstreamRequest> = None;
+        let mut resp: Option<reqwest::Response> = None;
+        let mut used_protocol = resolved.protocol;
+        for (attempt, ep) in resolved.endpoints.iter().enumerate() {
+            let provider_adapter = state
+                .registry
+                .provider(ep.protocol)
+                .ok_or_else(|| {
+                    GatewayError::Route(format!("无上游 Adapter 支持协议 {}", ep.protocol))
+                })
+                .map_err(|e| {
+                    fail_audit(
+                        &state,
+                        &ctx,
+                        start,
+                        routed_trace(&ctx, &resolved, &client_request_snapshot),
+                        e,
+                    )
+                })?;
+            let mut u = provider_adapter
+                .from_core_request(&ctx, &core_req, ep)
+                .await
+                .map_err(|e| {
+                    fail_audit(
+                        &state,
+                        &ctx,
+                        start,
+                        routed_trace(&ctx, &resolved, &client_request_snapshot),
+                        e.into(),
+                    )
+                })?;
 
-        // ── [RAW] 出站请求钩子（每端点一次）──
-        let mut outbound = RawMessage {
-            stage: RawStage::UpstreamRequest,
-            protocol: ep.protocol,
-            provider: Some(resolved.provider_key.clone()),
-            method: Some(u.method.to_string()),
-            url: Some(u.url.clone()),
-            status: None,
-            headers: u.headers.clone(),
-            body: RawBody::json(u.body.clone()),
-            session_id: ctx.session_id.clone(),
-        };
-        match state
-            .hooks
-            .on_upstream_request_raw(&ctx, &mut outbound)
-            .await
-            .map_err(|e| {
-                fail_audit(
-                    &state,
-                    &ctx,
-                    start,
-                    outbound_trace(&ctx, &outbound, &resolved, &client_request_snapshot),
-                    e.into(),
-                )
-            })? {
-            RawVerdict::ShortCircuit {
-                status,
-                headers,
-                body,
-            } => {
-                return Ok(answered(
-                    &state,
-                    &ctx,
-                    start,
-                    outbound_trace(&ctx, &outbound, &resolved, &client_request_snapshot),
-                    Usage::default(),
+            // ── [RAW] 出站请求钩子（每端点一次）──
+            let mut outbound = RawMessage {
+                stage: RawStage::UpstreamRequest,
+                protocol: ep.protocol,
+                provider: Some(resolved.provider_key.clone()),
+                method: Some(u.method.to_string()),
+                url: Some(u.url.clone()),
+                status: None,
+                headers: u.headers.clone(),
+                body: RawBody::json(u.body.clone()),
+                session_id: ctx.session_id.clone(),
+            };
+            match state
+                .hooks
+                .on_upstream_request_raw(&ctx, &mut outbound)
+                .await
+                .map_err(|e| {
+                    fail_audit(
+                        &state,
+                        &ctx,
+                        start,
+                        outbound_trace(&ctx, &outbound, &resolved, &client_request_snapshot),
+                        e.into(),
+                    )
+                })? {
+                RawVerdict::ShortCircuit {
                     status,
                     headers,
                     body,
-                ));
-            }
-            RawVerdict::Abort { message } => {
-                return Err(aborted(
-                    &state,
-                    &ctx,
-                    start,
-                    outbound_trace(&ctx, &outbound, &resolved, &client_request_snapshot),
-                    message,
-                ))
-            }
-            RawVerdict::Pass => {}
-        }
-        if let Err(e) = apply_outbound(&mut u, outbound) {
-            // 钩子写回的报文非法：审计按「出站钩子后的报文」无法重建（已被消费），
-            // 用 Adapter 产出的原始上游请求快照。
-            let t = new_trace(
-                &ctx,
-                client_request_snapshot.clone(),
-                core_req.stream,
-                resolved.upstream_model.clone(),
-                resolved.provider_key.clone(),
-                Some(ep.protocol),
-                upstream_request_snapshot(&u),
-            );
-            return Err(fail_audit(&state, &ctx, start, t, e));
-        }
-
-        // 非流式请求施加 request_timeout_secs 总超时（流式刻意不设——长生成
-        // 不应被网关截断）。send 只覆盖到响应头；body 读取在 non_stream 里
-        // 以剩余预算再套一次超时 + read_body_capped 的大小上限作回退。
-        let send_res = if core_req.stream {
-            upstream::send(&state.client, &u).await
-        } else {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(state.config.request_timeout_secs),
-                upstream::send(&state.client, &u),
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(_) => Err(GatewayError::Upstream {
-                    status: 504,
-                    message: format!("上游请求超时（{}s）", state.config.request_timeout_secs),
-                }),
-            }
-        };
-        match send_res {
-            Ok(r) => {
-                let status = r.status();
-                let retryable = status.as_u16() == 429 || status.is_server_error();
-                if retryable && attempt + 1 < total {
-                    // 排空响应体（有界）：连接可复用且异常上游的大 body 不会耗尽内存
-                    let _ = read_body_capped(r, state.config.max_body_bytes).await;
-                    tracing::warn!(
-                        provider = %resolved.provider_key,
-                        endpoint = %ep.base_url,
-                        status = status.as_u16(),
-                        "端点失败，故障转移到下一端点"
-                    );
-                    continue;
+                } => {
+                    return Ok(answered(
+                        &state,
+                        &ctx,
+                        start,
+                        outbound_trace(&ctx, &outbound, &resolved, &client_request_snapshot),
+                        Usage::default(),
+                        status,
+                        headers,
+                        body,
+                    ));
                 }
-                up = Some(u);
-                resp = Some(r);
-                used_protocol = ep.protocol;
-                break;
-            }
-            Err(e) => {
-                if attempt + 1 < total {
-                    tracing::warn!(
-                        provider = %resolved.provider_key,
-                        endpoint = %ep.base_url,
-                        error = %e,
-                        "端点请求失败，故障转移到下一端点"
-                    );
-                    continue;
+                RawVerdict::Abort { message } => {
+                    return Err(aborted(
+                        &state,
+                        &ctx,
+                        start,
+                        outbound_trace(&ctx, &outbound, &resolved, &client_request_snapshot),
+                        message,
+                    ))
                 }
-                // 末位端点传输失败：整条链在没有任何上游响应的情况下终结——
-                // 仍须落 usage + trace，否则失败请求对用量/Traces 完全不可见。
+                // 重试动作只由「上游响应钩子的错误路径」消费（见 handle_request）；
+                // 其它阶段拿到它一律按放行处理。
+                RawVerdict::Pass | RawVerdict::Retry { .. } => {}
+            }
+            if let Err(e) = apply_outbound(&mut u, outbound) {
+                // 钩子写回的报文非法：审计按「出站钩子后的报文」无法重建（已被消费），
+                // 用 Adapter 产出的原始上游请求快照。
                 let t = new_trace(
                     &ctx,
                     client_request_snapshot.clone(),
@@ -360,66 +317,225 @@ pub async fn handle_request(
                 );
                 return Err(fail_audit(&state, &ctx, start, t, e));
             }
+
+            // 非流式请求施加 request_timeout_secs 总超时（流式刻意不设——长生成
+            // 不应被网关截断）。send 只覆盖到响应头；body 读取在 non_stream 里
+            // 以剩余预算再套一次超时 + read_body_capped 的大小上限作回退。
+            let send_res = if core_req.stream {
+                upstream::send(&state.client, &u).await
+            } else {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(state.config.request_timeout_secs),
+                    upstream::send(&state.client, &u),
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(_) => Err(GatewayError::Upstream {
+                        status: 504,
+                        message: format!("上游请求超时（{}s）", state.config.request_timeout_secs),
+                    }),
+                }
+            };
+            match send_res {
+                Ok(r) => {
+                    let status = r.status();
+                    let retryable = status.as_u16() == 429 || status.is_server_error();
+                    if retryable && attempt + 1 < total {
+                        // 排空响应体（有界）：连接可复用且异常上游的大 body 不会耗尽内存
+                        let _ = read_body_capped(r, state.config.max_body_bytes).await;
+                        tracing::warn!(
+                            provider = %resolved.provider_key,
+                            endpoint = %ep.base_url,
+                            status = status.as_u16(),
+                            "端点失败，故障转移到下一端点"
+                        );
+                        continue;
+                    }
+                    up = Some(u);
+                    resp = Some(r);
+                    used_protocol = ep.protocol;
+                    break;
+                }
+                Err(e) => {
+                    if attempt + 1 < total {
+                        tracing::warn!(
+                            provider = %resolved.provider_key,
+                            endpoint = %ep.base_url,
+                            error = %e,
+                            "端点请求失败，故障转移到下一端点"
+                        );
+                        continue;
+                    }
+                    // 末位端点传输失败：整条链在没有任何上游响应的情况下终结——
+                    // 仍须落 usage + trace，否则失败请求对用量/Traces 完全不可见。
+                    let t = new_trace(
+                        &ctx,
+                        client_request_snapshot.clone(),
+                        core_req.stream,
+                        resolved.upstream_model.clone(),
+                        resolved.provider_key.clone(),
+                        Some(ep.protocol),
+                        upstream_request_snapshot(&u),
+                    );
+                    return Err(fail_audit(&state, &ctx, start, t, e));
+                }
+            }
         }
+        // 路由器保证 endpoints 非空，循环必以成功或提前 return 结束
+        let up = up.expect("endpoints 非空");
+        let resp = resp.expect("endpoints 非空");
+
+        // 协议绑定在端点上：以实际命中的端点协议覆写 ctx（流式回程按它选流式 Adapter）
+        ctx = ctx.with_route(used_protocol, resolved.provider_key.clone());
+
+        let status = resp.status();
+
+        if !status.is_success() {
+            // 错误 body 可能有界很大（HTML 错误页、异常上游）——有界读取；响应头必须在
+            // read_body_capped 消费 resp 之前取出，错误路径的报文钩子要用它。
+            let resp_headers: Vec<(String, String)> = resp
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let bytes = read_body_capped(resp, state.config.max_body_bytes)
+                .await
+                .unwrap_or_default();
+            let text = String::from_utf8_lossy(&bytes).to_string();
+
+            // 错误响应同样进报文层钩子（stage=upstream_response，body 为错误原文文本）：
+            // 插件据此决定「重试 / 短路代答 / 中止 / 放行」，也可只做观测。
+            // 注意此处对报文的改写**不回流客户端**——客户端拿到的是 transform_error 的
+            // 产物与 gateway_error 包装；要改错误消息请用 core 层的 transform_error。
+            let mut inbound_resp = RawMessage {
+                stage: RawStage::UpstreamResponse,
+                protocol: used_protocol,
+                provider: Some(resolved.provider_key.clone()),
+                method: None,
+                url: None,
+                status: Some(status.as_u16()),
+                headers: resp_headers,
+                body: RawBody::Text { text: text.clone() },
+                session_id: ctx.session_id.clone(),
+            };
+            // 插件处置：None = 未要求代答（放行、或钩子出错），一律走下面的既有错误收尾
+            let mut short_circuit: Option<PluginAnswer> = None;
+            let mut abort_message: Option<String> = None;
+            match state
+                .hooks
+                .on_upstream_response_raw(&ctx, &mut inbound_resp)
+                .await
+            {
+                // 重试：延迟后重走整条端点链。配额耗尽（plugin_round 已达上限）时本臂不匹配，
+                // 落到 Pass 臂按放行收尾——重试次数由宿主封顶，插件说了不算。
+                Ok(RawVerdict::Retry { delay_ms })
+                    if plugin_round < state.config.plugin_retry_max =>
+                {
+                    let delay_ms = delay_ms.min(state.config.plugin_retry_delay_cap_ms);
+                    tracing::warn!(
+                        provider = %resolved.provider_key,
+                        status = status.as_u16(),
+                        attempt = plugin_round + 1,
+                        delay_ms,
+                        "上游错误，插件要求重试"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    continue;
+                }
+                Ok(RawVerdict::ShortCircuit {
+                    status,
+                    headers,
+                    body,
+                }) => short_circuit = Some((status, headers, body)),
+                Ok(RawVerdict::Abort { message }) => abort_message = Some(message),
+                // 放行；重试配额已耗尽时也走这里（后续按 Pass 处置）
+                Ok(RawVerdict::Pass) | Ok(RawVerdict::Retry { .. }) => {}
+                // 钩子出错只 warn：绝不能因此掩盖原始上游错误——客户端应看到真实的上游状态码
+                Err(e) => tracing::warn!(
+                    provider = %resolved.provider_key,
+                    status = status.as_u16(),
+                    error = %e,
+                    "on_upstream_response_raw 失败，按放行处理"
+                ),
+            }
+
+            // ── trace 骨架（请求侧；响应侧回程时补齐）──
+            // 每轮只在**终局路径**上造 trace：重试轮直接 continue（只有 warn，不落 trace），
+            // 所以最终留盘的 trace 里上游请求快照是末轮重发的报文。
+            // `plugin_round` 即已发生的插件重试次数（0 = 首轮，从未重试）。
+            let mut trace = new_trace(
+                &ctx,
+                client_request_snapshot,
+                core_req.stream,
+                resolved.upstream_model.clone(),
+                resolved.provider_key.clone(),
+                Some(used_protocol),
+                upstream_request_snapshot(&up),
+            );
+            trace.retries = plugin_round;
+            if let Some((status, headers, body)) = short_circuit {
+                trace.upstream_response = body_snapshot(&inbound_resp.body);
+                return Ok(answered(
+                    &state,
+                    &ctx,
+                    start,
+                    trace,
+                    Usage::default(),
+                    status,
+                    headers,
+                    body,
+                ));
+            }
+            if let Some(message) = abort_message {
+                return Err(aborted(&state, &ctx, start, trace, message));
+            }
+            let msg = state
+                .hooks
+                .transform_error(&ctx, &text)
+                .await
+                .unwrap_or_else(|_| text.clone());
+            trace.status = "error".to_string();
+            // 完整响应体归位 upstream_response 快照；error 只留简短摘要，
+            // 否则上游 4xx/5xx 的 HTML 错误页会整页写进 trace.error。
+            trace.upstream_response = body_snapshot(&RawBody::Text { text });
+            trace.error = Some(format!("上游返回 HTTP {status}"));
+            finish_audit(&state, &ctx, &mut trace, start, &Usage::default(), "error");
+            return Err(GatewayError::Upstream {
+                status: status.as_u16(),
+                message: msg,
+            });
+        }
+
+        // ── 流式 / 非流式分流 ──
+        // trace 骨架（请求侧；响应侧回程时补齐）；`plugin_round` 即已发生的重试次数。
+        let mut trace = new_trace(
+            &ctx,
+            client_request_snapshot,
+            core_req.stream,
+            resolved.upstream_model.clone(),
+            resolved.provider_key.clone(),
+            Some(used_protocol),
+            upstream_request_snapshot(&up),
+        );
+        trace.retries = plugin_round;
+        return if core_req.stream {
+            Ok(stream::build_stream_response(
+                state,
+                ctx,
+                resp,
+                resolved.upstream_model,
+                start,
+                trace,
+                session_tag,
+            ))
+        } else {
+            non_stream(state, ctx, resp, used_protocol, start, trace, session_tag).await
+        };
     }
-    // 路由器保证 endpoints 非空，循环必以成功或提前 return 结束
-    let up = up.expect("endpoints 非空");
-    let resp = resp.expect("endpoints 非空");
-
-    // 协议绑定在端点上：以实际命中的端点协议覆写 ctx（流式回程按它选流式 Adapter）
-    ctx = ctx.with_route(used_protocol, resolved.provider_key.clone());
-
-    let status = resp.status();
-
-    // ── trace 骨架（请求侧；响应侧回程时补齐）──
-    let mut trace = new_trace(
-        &ctx,
-        client_request_snapshot,
-        core_req.stream,
-        resolved.upstream_model.clone(),
-        resolved.provider_key.clone(),
-        Some(used_protocol),
-        upstream_request_snapshot(&up),
-    );
-
-    // ── 发送上游 ──（已在故障转移循环内完成）
-    if !status.is_success() {
-        // 错误 body 可能有界很大（HTML 错误页、异常上游）——有界读取
-        let bytes = read_body_capped(resp, state.config.max_body_bytes)
-            .await
-            .unwrap_or_default();
-        let text = String::from_utf8_lossy(&bytes).to_string();
-        let msg = state
-            .hooks
-            .transform_error(&ctx, &text)
-            .await
-            .unwrap_or_else(|_| text.clone());
-        trace.status = "error".to_string();
-        // 完整响应体归位 upstream_response 快照；error 只留简短摘要，
-        // 否则上游 4xx/5xx 的 HTML 错误页会整页写进 trace.error。
-        trace.upstream_response = body_snapshot(&RawBody::Text { text });
-        trace.error = Some(format!("上游返回 HTTP {status}"));
-        finish_audit(&state, &ctx, &mut trace, start, &Usage::default(), "error");
-        return Err(GatewayError::Upstream {
-            status: status.as_u16(),
-            message: msg,
-        });
-    }
-
-    // ── 流式 / 非流式分流 ──
-    if core_req.stream {
-        Ok(stream::build_stream_response(
-            state,
-            ctx,
-            resp,
-            resolved.upstream_model,
-            start,
-            trace,
-            session_tag,
-        ))
-    } else {
-        non_stream(state, ctx, resp, used_protocol, start, trace, session_tag).await
-    }
+    // 每轮要么 continue（插件要求重试且仍有配额），要么在上面 return；末轮即使插件
+    // 仍返回 retry 也按放行走错误收尾，故这里不可达。
+    unreachable!("插件重试循环必然以 return 结束")
 }
 
 /// 解析本次请求归属的会话，并**就地剥除**请求里的所有 marker。
@@ -571,7 +687,9 @@ async fn non_stream(
             ));
         }
         RawVerdict::Abort { message } => return Err(aborted(&state, &ctx, start, trace, message)),
-        RawVerdict::Pass => {}
+        // 重试动作只由「上游响应钩子的错误路径」消费（见 handle_request）；
+        // 其它阶段拿到它一律按放行处理。
+        RawVerdict::Pass | RawVerdict::Retry { .. } => {}
     }
     let body_value = take_json_body(inbound_resp.body, upstream_protocol)
         .map_err(|e| fail_audit(&state, &ctx, start, trace.clone(), e))?;
@@ -664,7 +782,9 @@ async fn non_stream(
             ));
         }
         RawVerdict::Abort { message } => return Err(aborted(&state, &ctx, start, trace, message)),
-        RawVerdict::Pass => {}
+        // 重试动作只由「上游响应钩子的错误路径」消费（见 handle_request）；
+        // 其它阶段拿到它一律按放行处理。
+        RawVerdict::Pass | RawVerdict::Retry { .. } => {}
     }
     let final_body = outbound_resp.body.as_json().cloned().unwrap_or(Value::Null);
 
@@ -756,6 +876,8 @@ fn new_trace(
         status: "ok".to_string(),
         latency_ms: 0,
         ttft_ms: None,
+        // 插件重试次数由调用方在拿到 plugin_round 后填入（此处是路由前的骨架，恒为 0）
+        retries: 0,
         usage: TraceUsage::default(),
         client_request,
         upstream_request,

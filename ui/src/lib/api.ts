@@ -187,6 +187,8 @@ export interface TraceDetail {
   latencyMs: number;
   /** 首字延迟（毫秒）；仅流式请求有值，非流式 / 插件代答为 null。 */
   ttftMs?: number | null;
+  /** 插件在本请求上实际触发的上游重试次数（0/缺省 = 未重试；旧 trace 无该字段）。 */
+  retries?: number;
   usage: {
     inputTokens: number;
     outputTokens: number;

@@ -117,6 +117,7 @@ Moon Bridge Next 是一台架在客户端与上游之间的本地网关：客户
 - 改写出站 body：注入 metadata、给 `max_tokens` 收敛上限等；
 - 做入口鉴权：缺 `Authorization` 头直接 `abort` 拒绝；
 - 短路本地应答：命中缓存时直接返回响应，完全不访问上游；
+- 上游瞬时错误自愈：在 `on_upstream_response_raw` 的错误路径上对 5xx/429 返回 `retry`，由宿主延迟后重发本次请求（单端点 Provider 没有下一个端点可切换，这是唯一的兜底手段）——仓库自带 `plugins/utils/rescue_5xx.lua` 可直接启用；
 - 丢弃心跳等无意义的 SSE chunk；
 - 配合 `mb.provider.invoke` 做跨 Provider 编排——例如在插件里先用便宜模型给请求分类，再决定主请求的去向。
 
@@ -155,14 +156,14 @@ Moon Bridge Next 是一台架在客户端与上游之间的本地网关：客户
 |------|---------|---------|
 | `on_client_request_raw(ctx, msg)` | `raw_request` | 入站请求（客户端 → 网关） |
 | `on_upstream_request_raw(ctx, msg)` | `raw_request` | 出站请求（网关 → 上游） |
-| `on_upstream_response_raw(ctx, msg)` | `raw_response` | 上游响应（非流式） |
+| `on_upstream_response_raw(ctx, msg)` | `raw_response` | 上游响应（非流式）；**上游非 2xx 时也触发**（错误路径，`msg.status >= 400`） |
 | `on_client_response_raw(ctx, msg)` | `raw_response` | 出站响应（网关 → 客户端，非流式） |
 | `on_upstream_chunk_raw(ctx, chunk)` | `raw_stream` | 上游 SSE chunk（流式） |
 | `on_client_chunk_raw(ctx, chunk)` | `raw_stream` | 回写客户端的 SSE chunk（流式） |
 
 `msg` 的字段：`stage`、`protocol`、`provider`、`method`、`url`、`status`、`headers`（保序数组 `{{k, v}, ...}`）、`body`（JSON table / 字符串 / nil；超过阈值时为 nil 且 `body_truncated = true`，原始报文照常转发）。`chunk` 的字段：`stage`、`protocol`、`provider`、`event`、`data`、`raw`。就地修改即生效；出站请求的 `method` / `url` / `headers` / `body` 四项改写全部生效。
 
-返回值约定：返回 `nil` 放行；报文钩子可返回 `{ action = "short_circuit", status?, headers?, body? }`（本地直接应答，跳过上游）或 `{ action = "abort", message? }`（拒绝请求）；chunk 钩子可返回 `{ action = "drop" }`。短路与中止的请求同样留下用量记录与 trace，便于审计。
+返回值约定：返回 `nil` 放行；报文钩子可返回 `{ action = "short_circuit", status?, headers?, body? }`（本地直接应答，跳过上游）、`{ action = "abort", message? }`（拒绝请求）或 `{ action = "retry", delay_ms? }`（延迟 `delay_ms` 毫秒后重发本次上游请求——**仅 `on_upstream_response_raw` 的错误路径消费**，其余阶段按放行处理；重试次数与延迟分别受配置 `pluginRetryMax`（默认 8，0 = 禁用插件重试）与 `pluginRetryDelayCapMs`（默认 30000）钳制，超预算即放行、如实回传原始上游错误）；chunk 钩子可返回 `{ action = "drop" }`。短路与中止的请求同样留下用量记录与 trace，便于审计。
 
 能力声明同时是性能开关：未声明 `raw_stream` 的插件在流式请求中完全不产生 Lua 调用，逐 chunk 转发零开销。
 
@@ -241,6 +242,7 @@ end
 - `plugins/examples/log_request.lua`——语义层示例：请求日志、会话计数、system 注入、错误改写；
 - `plugins/examples/raw_rewrite.lua`——报文层示例：鉴权检查、出站头改写、body 补丁、心跳 chunk 丢弃；
 - `plugins/utils/FxxkDax.lua`——生产在用的最小插件：为出站请求注入上游要求的会话标识头；
+- `plugins/utils/rescue_5xx.lua`——上游瞬时 5xx/429 自愈：在错误路径上按指数退避要求网关延迟重发本次请求（单端点 Provider 的兜底手段）；
 - `plugins/moonbridge.lua`——LSP stub：把它加入 lua-language-server 的工作区库即可获得 `MB` 与 `mb` 的补全和类型提示。以 VS Code 为例，在 settings.json 中配置：`"Lua.workspace.library": { "/path/to/moon-bridge-next/plugins": true }`。
 
 ## 部署形态

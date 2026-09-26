@@ -18,11 +18,16 @@
 ---@class MbVerdict
 ---报文钩子返回值：nil 表示放行（就地修改经 table 引用回写）；
 ---`{ action = "short_circuit", status?, headers?, body? }` 短路本次请求/响应；
----`{ action = "abort" }` 中止。
----@field action string|nil "short_circuit"|"abort"|nil
+---`{ action = "abort" }` 中止；
+---`{ action = "retry", delay_ms? }` 延迟后重发本次上游请求（重走端点链）——仅
+---`on_upstream_response_raw` 的**错误路径**（上游非 2xx）消费，其余阶段拿到它按放行处理；
+---次数与延迟受网关配置 `pluginRetryMax`（默认 8，0 = 禁用插件重试）与
+---`pluginRetryDelayCapMs`（默认 30000）钳制，超预算即放行、如实回传原始上游错误。
+---@field action string|nil "short_circuit"|"abort"|"retry"|nil
 ---@field status number|nil short_circuit 时的 HTTP 状态码（默认 200）
 ---@field headers table[]|nil short_circuit 时的响应头 `{{k,v},...}`
 ---@field body any short_circuit 时的响应体（table/字符串）
+---@field delay_ms number|nil retry 时的重试延迟（毫秒，缺省 0 = 立即重发）
 
 ---@class MbChunkVerdict
 ---chunk 钩子返回值：nil 放行；`{ action = "drop" }` 丢弃该 chunk。
@@ -50,6 +55,10 @@
 ---出入站原始报文钩子（需声明对应 raw_* 能力）。
 ---@field on_client_request_raw (fun(ctx: MbCtx, msg: MbRawMessage): MbVerdict|nil)|nil
 ---@field on_upstream_request_raw (fun(ctx: MbCtx, msg: MbRawMessage): MbVerdict|nil)|nil
+---上游**非 2xx** 时也会触发本钩子（msg.status >= 400，body 为错误原文文本）——此即
+---错误路径：返回 `{ action = "retry", delay_ms = ? }` 让网关延迟后重发本轮请求
+---（单端点 provider 的 5xx 自愈，见 plugins/utils/rescue_5xx.lua）。错误路径上对报文的
+---改写不回流客户端（客户端看到的错误消息由 core 层 transform_error 决定）。
 ---@field on_upstream_response_raw (fun(ctx: MbCtx, msg: MbRawMessage): MbVerdict|nil)|nil
 ---@field on_client_response_raw (fun(ctx: MbCtx, msg: MbRawMessage): MbVerdict|nil)|nil
 ---流式 chunk 钩子（需声明 "raw_stream"；高频，未声明则完全跳过）。
