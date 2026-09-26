@@ -201,7 +201,7 @@ fn downgrade_to_v12(conn: &Connection) {
     )
     .unwrap();
     assert_eq!(
-        moonbridge_store::schema::current_version(&conn).unwrap(),
+        moonbridge_store::schema::current_version(conn).unwrap(),
         12
     );
 }
