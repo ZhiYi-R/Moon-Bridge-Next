@@ -311,6 +311,138 @@ mod tests {
         assert!(matches!(cv, ChunkVerdict::Drop), "ping 应被丢弃");
     }
 
+    /// 加载仓库中真实交付的救援插件（`plugins/utils/rescue_5xx.lua`）。
+    fn load_rescue(config: serde_json::Value) -> LuaRuntime {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/utils/rescue_5xx.lua");
+        let script = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("读取 {} 失败: {e}", path.display()));
+        LuaRuntime::new(
+            "rescue_5xx",
+            &script,
+            &config,
+            bridge(),
+            SessionStore::new(),
+        )
+        .unwrap()
+    }
+
+    /// 救援插件的报文钩子调用桩：上游响应 `status` 触发一次。
+    ///
+    /// 顺手守住本插件的两条硬不变量——**绝不代答**（不 short_circuit / abort）、
+    /// **绝不改报文**（body/status/headers 原样）——它们在流式请求下是 SSE 语义的
+    /// 保命条件，不该只在文档里承诺。
+    async fn rescue_on(rt: &LuaRuntime, request_id: &str, status: u16) -> RawVerdict {
+        const BODY: &str = "<html>520 服务端未知错误</html>";
+        let ctx = ReqCtx::new(request_id, Protocol::OpenAiChat);
+        let mut msg = RawMessage {
+            stage: RawStage::UpstreamResponse,
+            protocol: Protocol::OpenAiChat,
+            provider: Some("mock".into()),
+            method: None,
+            url: None,
+            status: Some(status),
+            headers: vec![("content-type".into(), "text/html".into())],
+            body: RawBody::text(BODY),
+            session_id: None,
+        };
+        let v = rt.on_upstream_response_raw(&ctx, &mut msg).await.unwrap();
+        assert!(
+            !matches!(
+                v,
+                RawVerdict::ShortCircuit { .. } | RawVerdict::Abort { .. }
+            ),
+            "救援插件不得代答或中止，实际 {v:?}"
+        );
+        assert_eq!(msg.status, Some(status), "钩子不得改写 status");
+        assert_eq!(msg.body.as_text(), Some(BODY), "钩子不得改写 body");
+        assert_eq!(
+            msg.headers,
+            vec![("content-type".to_string(), "text/html".to_string())],
+            "钩子不得改写 headers"
+        );
+        v
+    }
+
+    fn retry_delay_of(v: RawVerdict) -> u64 {
+        match v {
+            RawVerdict::Retry { delay_ms } => delay_ms,
+            other => panic!("期望 retry 判定，实际 {other:?}"),
+        }
+    }
+
+    /// `rescue_5xx` 默认配置：指数退避到 max_delay 封顶、次数用尽放行原始错误、
+    /// 放行后计数释放（同一 request_id 再来一轮从头计）。
+    #[tokio::test]
+    async fn rescue_5xx_defaults_backoff_then_gives_up() {
+        let rt = load_rescue(json!({}));
+        assert!(rt.manifest.needs_raw_response());
+        assert_eq!(rt.manifest.version, "1.0.0");
+        assert_eq!(rt.manifest.category, "core");
+        assert_eq!(rt.manifest.scopes, vec!["global", "provider"]);
+
+        let delays: Vec<u64> = {
+            let mut out = Vec::new();
+            for _ in 0..5 {
+                out.push(retry_delay_of(rescue_on(&rt, "req-1", 520).await));
+            }
+            out
+        };
+        assert_eq!(
+            delays,
+            vec![500, 1000, 2000, 4000, 8000],
+            "默认 base=500/退避 2 倍/max=8000 封顶"
+        );
+        // 第 6 次：默认 max_retries = 5 已耗尽 ⇒ 放行原始错误
+        assert!(matches!(
+            rescue_on(&rt, "req-1", 520).await,
+            RawVerdict::Pass
+        ));
+        // 计数已释放：同一 request_id 再失败一次应从头计（退避回到 base）
+        assert_eq!(retry_delay_of(rescue_on(&rt, "req-1", 520).await), 500);
+    }
+
+    /// `rescue_5xx` 配置生效：状态码集合、次数上限与延迟参数都可覆盖；
+    /// 未列出的状态码（含 2xx 成功路径）一律放行。
+    #[tokio::test]
+    async fn rescue_5xx_honours_config_and_status_filter() {
+        let rt = load_rescue(json!({
+            "statuses": [520],
+            "max_retries": 1,
+            "base_delay_ms": 10,
+            "max_delay_ms": 25,
+        }));
+        assert_eq!(retry_delay_of(rescue_on(&rt, "a", 520).await), 10);
+        // max_retries = 1：第二次失败即放行
+        assert!(matches!(rescue_on(&rt, "a", 520).await, RawVerdict::Pass));
+
+        // 未列出的状态码：503 不在自定义集合里，200 是成功路径——都放行
+        assert!(matches!(rescue_on(&rt, "b", 503).await, RawVerdict::Pass));
+        assert!(matches!(rescue_on(&rt, "b", 200).await, RawVerdict::Pass));
+        // 429 在上游侧很常见，默认集合覆盖它
+        let dflt = load_rescue(json!({}));
+        assert_eq!(retry_delay_of(rescue_on(&dflt, "c", 429).await), 500);
+    }
+
+    /// 计数表有界：容量 256 的 FIFO 淘汰掉最老的 request_id，其计数从头开始——
+    /// 既是「计数确实在生效」的证据，也是「长跑不会无界增长」的证据。
+    #[tokio::test]
+    async fn rescue_5xx_counter_is_bounded_fifo() {
+        let rt = load_rescue(json!({}));
+        assert_eq!(retry_delay_of(rescue_on(&rt, "old", 520).await), 500);
+        for i in 0..256 {
+            rescue_on(&rt, &format!("filler-{i}"), 520).await;
+        }
+        assert_eq!(
+            retry_delay_of(rescue_on(&rt, "old", 520).await),
+            500,
+            "最老的 request_id 应已被 FIFO 淘汰，计数从头开始"
+        );
+        // 对照组：未被淘汰的 request_id 计数照常累加
+        assert_eq!(retry_delay_of(rescue_on(&rt, "fresh", 520).await), 500);
+        assert_eq!(retry_delay_of(rescue_on(&rt, "fresh", 520).await), 1000);
+    }
+
     /// 沙箱硬化：插件 on_request 内死循环应被指令计数 hook 中止（而非挂死）。
     #[tokio::test]
     async fn infinite_loop_aborted_by_instruction_limit() {

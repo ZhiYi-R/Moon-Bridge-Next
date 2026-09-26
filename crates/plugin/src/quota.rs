@@ -114,9 +114,11 @@ mod tests {
     #[test]
     fn charge_aborts_after_deadline() {
         let b = ExecutionBudget::new(u64::MAX);
-        // 截止时间设在「过去」：立即超时
+        // 截止时间设在「过去」：立即超时。now_ns() 以进程首个 Instant 为基准，
+        // 冷启动时 elapsed 可能仍是 0/1ns（0 > 1 不成立），先睡 1ms 保证时钟越过截止点。
         b.count.store(0, Ordering::Relaxed);
         b.deadline_ns.store(1, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(1));
         let err = b.charge(1).unwrap_err();
         assert!(err.contains("超时"), "{err}");
     }

@@ -168,7 +168,7 @@ pub enum CoreStreamEvent {
 |------|-----------|------|
 | `on_client_request_raw` | raw_request | 入站请求（客户端→网关） |
 | `on_upstream_request_raw` | raw_request | 出站请求（网关→上游） |
-| `on_upstream_response_raw` | raw_response | 入站响应（上游→网关，非流式） |
+| `on_upstream_response_raw` | raw_response | 入站响应（上游→网关）；**上游非 2xx 时也在错误路径触发**（`msg.status >= 400`，body 为错误原文文本） |
 | `on_client_response_raw` | raw_response | 出站响应（网关→客户端，非流式） |
 | `on_upstream_chunk_raw` | raw_stream | 上游 SSE chunk（流式） |
 | `on_client_chunk_raw` | raw_stream | 回写客户端 SSE chunk（流式） |
@@ -179,9 +179,33 @@ pub enum CoreStreamEvent {
 pub struct RawMessage { stage, protocol, provider, method, url, status, headers: Vec<(String,String)>, body: RawBody }
 pub struct RawChunk   { stage, protocol, provider, event, data: RawBody, raw: String }
 pub enum RawBody      { Json{value}, Text{text}, Binary{data}, Empty }
-pub enum RawVerdict   { Pass, ShortCircuit{status,headers,body}, Abort{message} }
+pub enum RawVerdict   { Pass, ShortCircuit{status,headers,body}, Retry{delay_ms}, Abort{message} }
 pub enum ChunkVerdict { Forward, Drop }
 ```
+
+**错误路径触发与 `retry` 动作**（`dispatch.rs`）：
+
+- 上游返回非 2xx 时，`dispatch` 先有界读取错误体、组装成 `stage = upstream_response` 的
+  `RawMessage`（`body = RawBody::Text`），再调 `on_upstream_response_raw`——即**错误响应也进
+  报文层钩子**（改造前错误响应完全绕过 raw 层）。同一钩子在非流式的成功路径上照旧触发一次。
+- 错误路径的四种处置：`Retry{delay_ms}` → `sleep(min(delay_ms, plugin_retry_delay_cap_ms))`
+  后重走整条端点链（`from_core_request` → 出站钩子 → 发送，协议翻译/流式/trace 全部复用）；
+  `ShortCircuit` / `Abort` 沿用既有语义；`Pass`（或钩子执行出错——只 warn）走既有错误收尾，
+  **不掩盖原始上游错误**。
+- 硬防护在宿主侧：重试轮次为 `for plugin_round in 0..=plugin_retry_max`（首轮 + 至多 N 次
+  重试，`plugin_retry_max` 默认 8、`0` = 禁用），末轮即使插件仍返回 `retry` 也按 `Pass` 处理；
+  单次延迟钳到 `plugin_retry_delay_cap_ms`（默认 30000）。插件返回多少次都不会死循环。
+- 每次重试记一条 `tracing::warn`（provider / status / attempt / delay），并把次数写进 trace 的
+  `retries` 字段（尾随零值不写盘，旧 trace JSON 无该键）。重试轮不单独落 trace/usage——只留末次。
+- 错误路径上对报文的**改写不回流客户端**：客户端看到的是 `transform_error` 的产物与
+  `gateway_error` 包装。要改错误消息请用 core 层 `transform_error`。
+- 其余阶段（`on_client_request_raw` / `on_upstream_request_raw` / `on_client_response_raw` /
+  非流式成功路径的 `on_upstream_response_raw`）拿到 `Retry` 一律按放行处理：重试是「重发上游」
+  的动作，这些位置上没有可重发的上游请求。
+
+> 仓库自带 `plugins/utils/rescue_5xx.lua` 是这个动作的参考实现（指数退避 + 按 `request_id`
+> 计数、FIFO 容量 256）：命中状态码返回 `{action="retry", delay_ms=…}`，耗尽后返回 `nil`
+> 放行原始错误；它**不 short_circuit、不改 body**——本地代答会把流式请求的 SSE 语义破坏掉。
 
 > **capability 过滤即性能开关**：未声明 `raw_stream` 的插件，流式每 chunk **完全不产生 Lua 调用**（零开销）。
 
@@ -283,6 +307,7 @@ SQLite（rusqlite, bundled + WAL），手写版本化 migration，每表一个 D
   价键逐项覆盖基价（未列价键回退基价）。目录导入保留两种形态。
 - trace 大对象存文件系统 `app_data_dir/traces/<session>/<model>/<created_at>-<short_id>.json`（`short_id` 为 request_id 首段），不写入数据库。
 - trace 的 `upstreamResponse`/`clientResponse`：**非流式**记协议响应体原文；**流式**记 `StreamAssembler` 从事件流聚合出的最终消息（`CoreResponse` 形态，见 §8）。
+- trace 的 `retries`：本次请求实际发生的插件重试次数（见 §5）。尾随零值不写该键——旧 trace JSON 没有它，读取方按缺省 0 处理即可。
 - **trace 治理**：`trace_record_bodies`（默认 `true`）为 `false` 时在 `dispatch::finish_audit` 集中抹体——`clientRequest`/`clientResponse`/`upstreamResponse` 置 null，`upstreamRequest` 只清 `body`（它的 URL/headers 已脱敏，但 body 含完整 prompt；只清 `clientRequest` 会留下旁路，流式路径曾因此泄漏）。`trace_retention`（默认 `500`；`0` = 关闭整理）按 mtime **全局** prune（跨会话/模型目录）并清掉空目录。快照脱敏在 `dispatch` 构造时完成：头名含 `auth`/`api-key`/`apikey`/`token`/`cookie`/`secret` 的值整体替换为 `[REDACTED]`；URL 查询参数名含 `key`/`token`/`secret` 的值同样脱敏（Google 风格 `?key=`）。上游非 2xx 的 `trace.error` 只记 `上游返回 HTTP {status}` 摘要，HTML 错误页不再整页写入数据库。
 
 ---
@@ -301,7 +326,11 @@ Client → axum: POST /v1/responses | /v1/messages | /v1/chat/completions
   → [CORE] on_request / inject_tools
   → 选 ProviderAdapter → from_core_request → UpstreamRequest(headers+body)
   → [RAW] on_upstream_request_raw          改上游 method/url/headers/body（全部回读，见下）
-  → reqwest 发送(受 egress proxy)
+  → reqwest 发送(受 egress proxy)   ←── 端点故障转移循环（逐端点重走上面三步）
+  → 上游非 2xx: [RAW] on_upstream_response_raw（错误路径，见 §5）
+             → retry = sleep(min(delay_ms, pluginRetryDelayCapMs)) 后重走端点链，
+               最多 pluginRetryMax 轮；short_circuit / abort 沿用既有语义；
+               pass（或钩子出错）→ transform_error → GatewayError::Upstream
   → [流式] 逐 chunk:
              [RAW] on_upstream_chunk_raw → [CORE] decode + on_stream_event
              → [CORE] filter_content（丢块连带压制同 index 增量；水印注入首个
@@ -406,6 +435,7 @@ Client → axum: POST /v1/responses | /v1/messages | /v1/chat/completions
 ## 9. Tauri 应用层（src-tauri）
 
 - **引导配置**：`app_config_dir/config.toml` → `AppConfig { gateway: GatewayConfig, logLevel, autoStart }`。其余业务配置全部入 SQLite。
+  - 插件重试的两个硬防护也在这里（camelCase 键名）：`gateway.pluginRetryMax`（默认 8，`0` = 禁用插件重试）与 `gateway.pluginRetryDelayCapMs`（默认 30000）。二者都在 Rust 侧强制，插件返回 `retry` 也不会超出——旧 `config.toml` 缺这两个键时按默认值解析。
 - **状态**：`ManagedState { db, paths, config, gateway }`，网关以 tokio task + oneshot 平滑关闭信号驱动启停。
 - **`gateway` 句柄锁的并发约束**：`start_gateway` / `stop_gateway` 等命令必须**避免在持有 `gateway` 互斥锁的同时 `.await`**，也不能在已持锁的路径上再取一次同把锁——`gateway_start` 被重复调用时会自锁死（前端连点即触发）。现在由 `has_live_gateway()`（短临界区，仅判断句柄存在且 `task` 未结束）先行幂等返回，`status()` 也在**一次**加锁内同时读出 running 与 addr。回归测试 `start_gateway_while_running_does_not_deadlock` 把风险调用放进**独立 OS 线程 + 独立 current-thread runtime**、用 `mpsc::recv_timeout` 断言，因为 `tokio::time::timeout` 与被阻塞的 future 同属一个任务、计时器永远得不到轮询，无法用来证死锁。
 - **commands**（前端 `invoke`）：

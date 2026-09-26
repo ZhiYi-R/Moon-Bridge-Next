@@ -61,6 +61,19 @@ pub struct GatewayConfig {
     /// 承担外部身份 tag 映射与插件态回收。
     #[serde(default = "default_session_depth")]
     pub session_table_depth: usize,
+    /// 插件驱动的上游重试上限（`config.toml` 键 `pluginRetryMax`）。
+    ///
+    /// 语义：上游响应为错误（非 2xx）且报文层钩子返回 `{action="retry"}` 时，
+    /// 网关延迟后**重走整条端点链**（重新构造请求 → 出站钩子 → 发送）；本值是
+    /// 单次请求允许的重试次数，`0` 表示禁用插件重试。这是插件的硬防护——
+    /// 插件返回多少次 retry 都不会死循环（超出后按放行处理，如实回传上游错误）。
+    #[serde(default = "default_plugin_retry_max")]
+    pub plugin_retry_max: usize,
+    /// 插件重试的单次延迟上限（毫秒，`config.toml` 键 `pluginRetryDelayCapMs`）。
+    /// 插件给的 `delay_ms` 会被钳到该值内；钩子阻塞的是本次请求的任务，
+    /// 设得过大同样会拖长上游错误暴露给客户端的时间。
+    #[serde(default = "default_plugin_retry_delay_cap")]
+    pub plugin_retry_delay_cap_ms: u64,
 }
 
 fn default_addr() -> String {
@@ -84,6 +97,12 @@ fn default_trace_retention() -> usize {
 fn default_session_depth() -> usize {
     64
 }
+fn default_plugin_retry_max() -> usize {
+    8
+}
+fn default_plugin_retry_delay_cap() -> u64 {
+    30_000
+}
 
 impl Default for GatewayConfig {
     fn default() -> Self {
@@ -99,6 +118,8 @@ impl Default for GatewayConfig {
             trace_retention: default_trace_retention(),
             session_marker: default_session_marker(),
             session_table_depth: default_session_depth(),
+            plugin_retry_max: default_plugin_retry_max(),
+            plugin_retry_delay_cap_ms: default_plugin_retry_delay_cap(),
         }
     }
 }

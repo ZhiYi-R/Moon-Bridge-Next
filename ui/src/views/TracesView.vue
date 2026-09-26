@@ -313,6 +313,7 @@ onUnmounted(() => document.removeEventListener("keydown", onKey));
               {{ detail.status }}
             </Badge>
             <Badge v-if="detail?.stream" variant="outline">stream</Badge>
+            <Badge v-if="detail?.retries" variant="outline">retry ×{{ detail.retries }}</Badge>
           </div>
           <div class="scrollbar-thin min-h-0 flex-1 overflow-y-auto p-5">
             <div v-if="detailLoading" class="py-10 text-center text-sm text-muted-foreground">

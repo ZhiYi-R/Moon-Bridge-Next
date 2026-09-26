@@ -176,6 +176,14 @@ pub enum RawVerdict {
         #[serde(default = "default_body")]
         body: RawBody,
     },
+    /// 重试当前上游请求：重走端点链（`from_core_request` → 出站钩子 → 发送），
+    /// `delay_ms` 毫秒后发起。仅上游响应钩子在**错误路径**（非 2xx）上处理该动作——
+    /// 网关侧有硬上限与延迟钳制（`plugin_retry_max` / `plugin_retry_delay_cap_ms`），
+    /// 插件返回多少次都不会死循环；其余阶段的钩子拿到它按放行处理。
+    Retry {
+        #[serde(default)]
+        delay_ms: u64,
+    },
     /// 中止：返回错误给客户端。
     Abort { message: String },
 }
