@@ -652,23 +652,33 @@ pub fn core_to_chat_response_message(content: &[ContentBlock]) -> Value {
 
 /// Chat usage → Core Usage（prompt_tokens/completion_tokens）。
 pub fn usage_from_chat(v: &Value) -> Usage {
+    let completion = v
+        .get("completion_tokens")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0) as u32;
+    let reasoning = v
+        .get("completion_tokens_details")
+        .and_then(|d| d.get("reasoning_tokens"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0) as u32;
     Usage {
         input_tokens: v.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-        output_tokens: v
-            .get("completion_tokens")
-            .and_then(|x| x.as_u64())
-            .unwrap_or(0) as u32,
+        // Core 口径要求 output_tokens 为含 reasoning 的输出总量。遵循 OpenAI 规范的上游
+        // completion_tokens 已含 reasoning（completion >= reasoning），原值透传；仅当出现
+        // completion < reasoning 这种未合并的破损口径（部分 Gemini 等中转站）时补足总量，
+        // 否则下游会把子集当成全集，output_tokens 反而小于 reasoning_tokens。
+        output_tokens: if completion < reasoning {
+            completion.saturating_add(reasoning)
+        } else {
+            completion
+        },
         cache_read_tokens: v
             .get("prompt_tokens_details")
             .and_then(|d| d.get("cached_tokens"))
             .and_then(|x| x.as_u64())
             .unwrap_or(0) as u32,
         cache_write_tokens: 0,
-        reasoning_tokens: v
-            .get("completion_tokens_details")
-            .and_then(|d| d.get("reasoning_tokens"))
-            .and_then(|x| x.as_u64())
-            .unwrap_or(0) as u32,
+        reasoning_tokens: reasoning,
     }
 }
 

@@ -55,14 +55,19 @@ function perfStats(): { buckets: PerfBucket[]; avgTtft: number | null; avgTps: n
     const e = map.get(key) ?? { ttftSum: 0, n: 0, out: 0, genSec: 0 };
     e.ttftSum += r.ttftMs!;
     e.n += 1;
-    if (genSec > 0) {
-      e.out += r.outputTokens;
+    // 生成阶段过短（上游单包瞬时倾泻，首包即尾包）会因分母趋零把 TPS 拉成天文数字，
+    // 排除出 TPS 累加；真实流式生成（genSec ≥ 0.2s）与 TTFT 均值均不受影响。
+    if (genSec >= 0.2) {
+      // 兼容历史记录中 outputTokens 未含 reasoning 的破损口径（总量应为其和）
+      const tokens =
+        r.outputTokens < r.reasoningTokens ? r.outputTokens + r.reasoningTokens : r.outputTokens;
+      e.out += tokens;
       e.genSec += genSec;
+      outSum += tokens;
+      genSum += genSec;
     }
     map.set(key, e);
     ttftSum += r.ttftMs!;
-    outSum += r.outputTokens;
-    if (genSec > 0) genSum += genSec;
   }
 
   const buckets = [...map.entries()]

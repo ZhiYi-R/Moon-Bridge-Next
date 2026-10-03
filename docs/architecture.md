@@ -70,6 +70,9 @@ pub struct Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_t
 // output_tokens 为输出总量（含 reasoning_tokens）；cache_*/reasoning 是子集
 // 拆分，供按价目分项计费，不另加进总量。各 Adapter 入站归一化须满足该口径
 //（如 Anthropic input 并入缓存、Gemini output 并入 thoughtsTokenCount）。
+// 缺陷上游防御：个别 OpenAI 兼容端点（部分 Gemini 中转站）的 completion_tokens
+// 不含 reasoning，出现 completion < reasoning 的破损口径时，openai_chat 适配器按
+// completion + reasoning 补足 output_tokens；标准上游（completion ≥ reasoning）原值透传。
 
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CoreStreamEvent {
@@ -571,6 +574,7 @@ Vue 3.5 + Vite 7 + TS 5 + Pinia + Vue Router + TailwindCSS 3 + shadcn-vue 风格
 - `src/stores/`：Pinia（gateway 状态、provider 列表）。
 - `src/router`：hash 路由（Tauri 自定义协议友好）。
 - `src/views/`：Dashboard（网关状态 + 用量 + Provider 概览）、Providers（完整 CRUD；可用模型选择器先列已选 chips，候选列表在搜索框聚焦时才展开下拉）、Models（模型 CRUD + 从 models.dev 搜索勾选批量导入 + provider 维度 Offer 管理，Offer 可绑定端点协议；两区可拖拽分栏）、Routes（别名 CRUD + 必填校验 + 可搜索模型下拉）、Plugins（在线脚本编辑 + 启停/增删 + 一键重启网关生效）、Usage（汇总卡片 + token 时序堆叠柱图 + 模型分布 Top 3 + 其他聚合 + 明细表，纯CSS/SVG 无额外依赖）、Balance（余额&健康看板：卡片引用上游 Provider 或手动 Key 列表（手动优先）+ 可选查询 URL + 新建时可从内置模板库填充脚本（new-api 中转/DeepSeek/Moonshot/SiliconFlow/OpenRouter/智谱/Kimi Coding Plan/Claude Code 等真实接口模板）+ 多 key 在同一卡片内逐行展示（掩码 key chip + 单 key 刷新）+ 按提供商分组 + 百分比/金额两种模式与卡片级显示切换 + 状态徽章 + 一键刷新 + 单列弹窗内测试拉取预览（逐 key 结果）+ 带编写指南的 Lua 脚本编辑）、Traces（主从布局 + 可拖宽列表 + ↑↓ 键盘导航 + 各阶段报文只读高亮，超过 256KB 截断为纯文本 + 删除）、Settings（网关分区默认展开）。
+- **TPS 展示口径**：Traces 详情页与 Dashboard 平均 TPS 均按「输出总量（含 reasoning）/ 生成阶段耗时」计算，生成阶段耗时 = 总延迟 − TTFT。生成阶段短于 200ms（响应被上游单包瞬时倾泻、无逐 token 流式过程）时判为不可测：Traces 显示「—」，Dashboard 不计入加权 TPS（TTFT 均值与样本数不受影响）。
 - `src/components/ui`：Button / Badge / Card / Input / Label / Modal（动画 + dirty 检查）/ Select / Switch / Pagination / ToastHost / CodeEditor（CodeMirror 6）等，精简 shadcn 风格。
 - `src/composables/`：`useConfirm`（Promise 化确认弹窗）、`useToast`（全局通知）、`useAutoPageSize`（实测行高分页 + 页首行锚定防漂移）、`usePointerDrag`（拖宽/分栏共用）。
 - 反馈与自适应：保存/删除统一走 toast；网关状态 4s 轮询；列表区分加载态与空态；表单网格 `auto-fit minmax` 随窗口宽度换列。
