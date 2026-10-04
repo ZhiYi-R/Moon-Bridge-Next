@@ -325,7 +325,10 @@ mod tests {
         std::fs::write(&inside, "MB = {}").unwrap();
         assert_eq!(
             parse_script_ref(inside.to_str().unwrap(), Some(&plugins)),
-            ScriptRef::File(inside.canonicalize().unwrap())
+            // 契约是「按传入路径原样返回」——containment 校验在 is_within_root
+            // 内部已做 canonicalize；macOS 的 /var 是 /private/var 符号链接，
+            // 断言侧 canonicalize 会在该平台凭空制造两个不等的路径。
+            ScriptRef::File(inside.clone())
         );
 
         for evil in [

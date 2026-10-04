@@ -131,6 +131,8 @@ pub fn raw_message_to_lua(lua: &Lua, m: &RawMessage, max_body_bytes: usize) -> R
     t.set("status", m.status)?;
     t.set("headers", lua.to_value(&m.headers)?)?;
     t.set("session_id", m.session_id.clone())?;
+    // 只读标记：apply_lua_to_message 故意不回读（见 RawMessage::error 文档）。
+    t.set("error", m.error)?;
     if body_exceeds(&m.body, max_body_bytes) {
         t.set("body", LuaValue::Nil)?;
         t.set("body_truncated", true)?;
@@ -236,6 +238,12 @@ pub fn parse_raw_action(lua: &Lua, ret: LuaValue) -> Result<Option<RawVerdict>> 
                 .unwrap_or_else(|| "aborted by plugin".to_string());
             Ok(Some(RawVerdict::Abort { message }))
         }
+        // 重试当前上游请求（仅上游响应钩子的错误路径消费；见 dispatch）：delay_ms 缺省 0，
+        // 非法类型（字符串/表等）与其它分支一样按错误处理，由上层降级为放行。
+        "retry" => {
+            let delay_ms = t.get::<Option<u64>>("delay_ms")?.unwrap_or(0);
+            Ok(Some(RawVerdict::Retry { delay_ms }))
+        }
         _ => Ok(None), // "pass" 或未知动作均视为放行
     }
 }
@@ -254,4 +262,111 @@ pub fn parse_chunk_action(ret: LuaValue) -> ChunkVerdict {
 
 pub fn protocol_str(p: Protocol) -> &'static str {
     p.as_str()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构造 `{ action = "retry" }` 形态的返回值（可选 `delay_ms`）。
+    fn retry_table(lua: &Lua, delay: LuaValue) -> LuaValue {
+        let t = lua.create_table().unwrap();
+        t.set("action", "retry").unwrap();
+        if !matches!(delay, LuaValue::Nil) {
+            t.set("delay_ms", delay).unwrap();
+        }
+        LuaValue::Table(t)
+    }
+
+    /// `{action="retry"}`：缺省延迟为 0（由宿主立即重发，延迟钳制仍受配置约束）。
+    #[test]
+    fn parses_retry_action_with_default_delay() {
+        let lua = Lua::new();
+        let v = retry_table(&lua, LuaValue::Nil);
+        assert_eq!(
+            parse_raw_action(&lua, v).unwrap(),
+            Some(RawVerdict::Retry { delay_ms: 0 })
+        );
+    }
+
+    /// `delay_ms` 显式给出时原样采用（rescue_5xx 的指数退避完全靠它表达）。
+    #[test]
+    fn parses_retry_action_with_explicit_delay() {
+        let lua = Lua::new();
+        let v = retry_table(&lua, LuaValue::Integer(700));
+        assert_eq!(
+            parse_raw_action(&lua, v).unwrap(),
+            Some(RawVerdict::Retry { delay_ms: 700 })
+        );
+    }
+
+    /// 不可转换的 delay_ms 类型必须报错（上层降级为放行），不能静默当 0 处理——否则
+    /// 插件写错类型就成了「无延迟猛重试」，与硬防护的意图正好相反。
+    ///
+    /// 注：Lua 自身的字符串→数字强制转换在这一层仍然生效（`delay_ms = "700"` 解成
+    /// 700），这是 mlua 与 `status` 等既有分支共有的口径，不在本分支单独收窄。
+    #[test]
+    fn rejects_unconvertible_delay_type() {
+        let lua = Lua::new();
+        let t = lua.create_table().unwrap();
+        let v = retry_table(&lua, LuaValue::Table(t));
+        assert!(
+            parse_raw_action(&lua, v).is_err(),
+            "表类型 delay_ms 应报解码错误"
+        );
+
+        let v2 = retry_table(&lua, LuaValue::String(lua.create_string("700").unwrap()));
+        assert_eq!(
+            parse_raw_action(&lua, v2).unwrap(),
+            Some(RawVerdict::Retry { delay_ms: 700 }),
+            "数字字符串按 Lua 语义强制转换"
+        );
+    }
+
+    /// `msg.error` 以布尔形态暴露给 Lua；它是宿主注入的只读标记——插件把
+    /// `msg.error` 改回 false 不得回流 RawMessage（否则能伪造错误路径骗过
+    /// registry 的 retry 终局判定分支）。
+    #[test]
+    fn error_flag_is_exposed_but_never_read_back() {
+        let lua = Lua::new();
+        for error in [true, false] {
+            let mut m = RawMessage {
+                stage: RawStage::UpstreamResponse,
+                protocol: Protocol::OpenAiChat,
+                provider: None,
+                method: None,
+                url: None,
+                status: Some(if error { 520 } else { 200 }),
+                headers: vec![],
+                body: RawBody::Empty,
+                session_id: None,
+                error,
+            };
+            let t = raw_message_to_lua(&lua, &m, usize::MAX).unwrap();
+            assert_eq!(
+                t.get::<bool>("error").unwrap(),
+                error,
+                "error 标记应以布尔暴露: {error}"
+            );
+            // 插件改写 msg.error 无效果：回写后保持宿主注入值
+            t.set("error", false).unwrap();
+            apply_lua_to_message(&lua, &t, &mut m).unwrap();
+            assert_eq!(m.error, error, "error 标记只读，插件改写不得回流");
+        }
+    }
+
+    /// 既有口径不变：`pass` 与未知动作仍视为放行（None），非 table 返回值同样放行。
+    #[test]
+    fn unknown_action_and_non_table_pass() {
+        let lua = Lua::new();
+        let t = lua.create_table().unwrap();
+        t.set("action", "pass").unwrap();
+        assert_eq!(parse_raw_action(&lua, LuaValue::Table(t)).unwrap(), None);
+
+        let t2 = lua.create_table().unwrap();
+        t2.set("action", "future_action").unwrap();
+        assert_eq!(parse_raw_action(&lua, LuaValue::Table(t2)).unwrap(), None);
+
+        assert_eq!(parse_raw_action(&lua, LuaValue::Nil).unwrap(), None);
+    }
 }

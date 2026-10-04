@@ -60,6 +60,11 @@ pub struct TraceRecord {
     pub latency_ms: u64,
     /// 首字延迟（毫秒）；仅流式请求有值，非流式 / 插件代答为 None。
     pub ttft_ms: Option<u64>,
+    /// 插件在本请求上实际触发的上游重试次数（`{action="retry"}` 被采纳且仍在
+    /// `plugin_retry_max` 预算内才 +1）。`0` 不写盘——旧 trace JSON 无该键，
+    /// 读取方（前端按 `retries` 缺省视为 0）无需兼容分支。
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub retries: usize,
     pub usage: TraceUsage,
     /// 客户端入站请求体（经入站报文钩子后）。
     pub client_request: Value,
@@ -72,6 +77,11 @@ pub struct TraceRecord {
     /// （含插件过滤与水印注入效果）。
     pub client_response: Value,
     pub error: Option<String>,
+}
+
+/// `retries = 0` 时不写该键（旧 trace JSON 与新 trace 的零值形态一致）。
+fn is_zero(v: &usize) -> bool {
+    *v == 0
 }
 
 /// `trace_record_bodies=false` 时写入磁盘前抹除全部报文体。
@@ -248,6 +258,7 @@ mod tests {
             status: "ok".into(),
             latency_ms: 12,
             ttft_ms: None,
+            retries: 0,
             usage: TraceUsage::default(),
             client_request: json!({ "model": model }),
             upstream_request: json!({ "url": "https://x" }),
@@ -293,6 +304,19 @@ mod tests {
         // trace_dir 为 None / 空时应静默跳过，不 panic
         write(None, &sample(None, "m"), 0);
         write(Some("  "), &sample(None, "m"), 0);
+    }
+
+    /// 新字段 `retries` 的旧 trace 兼容口径：0 不写盘（旧 JSON 里根本没有该键），
+    /// 非 0 才出现。已有 trace 读取方无需为「键可能缺失」加兼容分支。
+    #[test]
+    fn retries_is_omitted_when_zero() {
+        let mut rec = sample(Some("sess-1"), "claude-x");
+        let v = serde_json::to_value(&rec).unwrap();
+        assert!(v.get("retries").is_none(), "零值不得写盘: {v}");
+
+        rec.retries = 3;
+        let v = serde_json::to_value(&rec).unwrap();
+        assert_eq!(v["retries"], 3, "非零重试次数必须写盘: {v}");
     }
 
     /// 回归：`usage` 必须随外层一起序列化为 camelCase。

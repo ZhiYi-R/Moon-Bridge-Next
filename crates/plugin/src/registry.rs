@@ -213,7 +213,9 @@ impl PluginHooks for LuaPluginRegistry {
     ) -> CoreResult<RawVerdict> {
         for p in self.eligible(CAP_RAW_REQUEST, ctx) {
             match p.on_client_request_raw(ctx, m).await {
-                Ok(RawVerdict::Pass) => continue,
+                // Retry 只在「上游响应钩子的错误路径」是终局判定；此处按放行继续扇出，
+                // 不得让单个插件的 retry 吞掉后续插件的就地改写。
+                Ok(RawVerdict::Pass | RawVerdict::Retry { .. }) => continue,
                 Ok(v) => return Ok(v), // ShortCircuit / Abort 立即生效
                 Err(e) => {
                     tracing::warn!(plugin = %p.name, error = %e, "on_client_request_raw 失败")
@@ -230,7 +232,7 @@ impl PluginHooks for LuaPluginRegistry {
     ) -> CoreResult<RawVerdict> {
         for p in self.eligible(CAP_RAW_REQUEST, ctx) {
             match p.on_upstream_request_raw(ctx, m).await {
-                Ok(RawVerdict::Pass) => continue,
+                Ok(RawVerdict::Pass | RawVerdict::Retry { .. }) => continue,
                 Ok(v) => return Ok(v),
                 Err(e) => {
                     tracing::warn!(plugin = %p.name, error = %e, "on_upstream_request_raw 失败")
@@ -248,6 +250,9 @@ impl PluginHooks for LuaPluginRegistry {
         for p in self.eligible(CAP_RAW_RESPONSE, ctx) {
             match p.on_upstream_response_raw(ctx, m).await {
                 Ok(RawVerdict::Pass) => continue,
+                // 成功路径（m.error=false）上重试无意义——按放行继续扇出；
+                // 错误路径上的 Retry 是终局判定，落入下臂立即生效、不再扇出。
+                Ok(RawVerdict::Retry { .. }) if !m.error => continue,
                 Ok(v) => return Ok(v),
                 Err(e) => {
                     tracing::warn!(plugin = %p.name, error = %e, "on_upstream_response_raw 失败")
@@ -264,7 +269,7 @@ impl PluginHooks for LuaPluginRegistry {
     ) -> CoreResult<RawVerdict> {
         for p in self.eligible(CAP_RAW_RESPONSE, ctx) {
             match p.on_client_response_raw(ctx, m).await {
-                Ok(RawVerdict::Pass) => continue,
+                Ok(RawVerdict::Pass | RawVerdict::Retry { .. }) => continue,
                 Ok(v) => return Ok(v),
                 Err(e) => {
                     tracing::warn!(plugin = %p.name, error = %e, "on_client_response_raw 失败")

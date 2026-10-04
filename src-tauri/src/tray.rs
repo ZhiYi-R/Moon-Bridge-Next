@@ -75,7 +75,8 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-fn show_main_window(app: &AppHandle) {
+/// 唤回主窗口：托盘菜单/图标与 macOS 的 Reopen 事件共用。
+pub(crate) fn show_main_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
         let _ = win.unminimize();

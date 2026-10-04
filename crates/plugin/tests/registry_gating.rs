@@ -11,7 +11,7 @@ use moonbridge_plugin::{
     HostBridge, HttpRequest, HttpResponse, LuaPluginRegistry, LuaRuntime, SandboxLimits,
     ScopeOverrides, SessionStore,
 };
-use moonbridge_protocol::{PluginHooks, ReqCtx};
+use moonbridge_protocol::{PluginHooks, RawBody, RawMessage, RawStage, RawVerdict, ReqCtx};
 
 struct DummyBridge;
 
@@ -304,4 +304,126 @@ async fn nearest_scope_wins() {
     let mut req = CoreRequest::new("m");
     registry.on_request(&ctx, &mut req).await.unwrap();
     assert_eq!(req.temperature, Some(0.5), "global 维度应回退");
+}
+
+fn raw_runtime(name: &str, script: &str) -> Arc<LuaRuntime> {
+    let mut rt = LuaRuntime::new_with_limits(
+        name,
+        script,
+        &serde_json::json!({}),
+        Arc::new(DummyBridge),
+        moonbridge_plugin::session::SessionStore::new(),
+        SandboxLimits::default(),
+    )
+    .expect("插件脚本应能加载");
+    rt.enabled = true;
+    Arc::new(rt)
+}
+
+fn raw_msg(stage: RawStage, status: Option<u16>, error: bool) -> RawMessage {
+    RawMessage {
+        stage,
+        protocol: moonbridge_core::Protocol::Anthropic,
+        provider: None,
+        method: Some("POST".into()),
+        url: Some("http://localhost/v1/x".into()),
+        status,
+        headers: vec![],
+        body: RawBody::Empty,
+        session_id: None,
+        error,
+    }
+}
+
+fn has_xb(m: &RawMessage) -> bool {
+    m.headers.iter().any(|(k, v)| k == "x-b" && v == "1")
+}
+
+/// `{action="retry"}` 不得截断同阶段插件扇出：只有「上游响应钩子的错误路径」
+/// （msg.error == true）把它当终局判定；其余三个阶段与成功路径一律按放行处理——
+/// 后续插件照常执行，它们的就地改写不得丢失。
+/// 回归：旧实现所有钩子都是 `Ok(v) => return Ok(v)`，首个返回 retry 的插件
+/// 会静默吞掉同阶段其它插件的全部改写。
+#[tokio::test]
+async fn retry_verdict_does_not_truncate_same_stage_fanout() {
+    const RETRY_ALL: &str = r#"
+MB = { version = "0.1.0", capabilities = { "raw_request", "raw_response" } }
+function MB.on_client_request_raw(ctx, msg) return { action = "retry" } end
+function MB.on_upstream_request_raw(ctx, msg) return { action = "retry" } end
+function MB.on_upstream_response_raw(ctx, msg) return { action = "retry" } end
+function MB.on_client_response_raw(ctx, msg) return { action = "retry" } end
+"#;
+    const MARK_XB: &str = r#"
+MB = { version = "0.1.0", capabilities = { "raw_request", "raw_response" } }
+local function mark(ctx, msg)
+  msg.headers[#msg.headers + 1] = { "x-b", "1" }
+end
+function MB.on_client_request_raw(ctx, msg) mark(ctx, msg) end
+function MB.on_upstream_request_raw(ctx, msg) mark(ctx, msg) end
+function MB.on_upstream_response_raw(ctx, msg) mark(ctx, msg) end
+function MB.on_client_response_raw(ctx, msg) mark(ctx, msg) end
+"#;
+    let registry = LuaPluginRegistry::new(
+        vec![
+            raw_runtime("a-retry", RETRY_ALL),
+            raw_runtime("b-mark", MARK_XB),
+        ],
+        Default::default(),
+        SessionStore::new(),
+    );
+    let ctx = ctx_for(None);
+
+    // 三个阶段：retry 按放行扇出——verdict 为 Pass 且 B 插件的改写生效
+    let mut m = raw_msg(RawStage::ClientRequest, None, false);
+    let v = registry.on_client_request_raw(&ctx, &mut m).await.unwrap();
+    assert!(
+        matches!(v, RawVerdict::Pass),
+        "client_request 应放行: {v:?}"
+    );
+    assert!(has_xb(&m), "B 插件的 header 改写不得被吞");
+
+    let mut m = raw_msg(RawStage::UpstreamRequest, None, false);
+    let v = registry
+        .on_upstream_request_raw(&ctx, &mut m)
+        .await
+        .unwrap();
+    assert!(
+        matches!(v, RawVerdict::Pass),
+        "upstream_request 应放行: {v:?}"
+    );
+    assert!(has_xb(&m), "B 插件的 header 改写不得被吞");
+
+    let mut m = raw_msg(RawStage::ClientResponse, Some(200), false);
+    let v = registry.on_client_response_raw(&ctx, &mut m).await.unwrap();
+    assert!(
+        matches!(v, RawVerdict::Pass),
+        "client_response 应放行: {v:?}"
+    );
+    assert!(has_xb(&m), "B 插件的 header 改写不得被吞");
+
+    // upstream_response 成功路径（error=false）：重试无意义，同样按放行扇出
+    let mut m = raw_msg(RawStage::UpstreamResponse, Some(200), false);
+    let v = registry
+        .on_upstream_response_raw(&ctx, &mut m)
+        .await
+        .unwrap();
+    assert!(
+        matches!(v, RawVerdict::Pass),
+        "成功路径 retry 无意义，应放行: {v:?}"
+    );
+    assert!(has_xb(&m), "B 插件的 header 改写不得被吞");
+
+    // upstream_response 错误路径（error=true）：retry 是终局判定——立即返回，
+    // 同阶段靠后的 B 插件不执行（其改写也就不会出现）
+    let mut m = raw_msg(RawStage::UpstreamResponse, Some(520), true);
+    let v = registry
+        .on_upstream_response_raw(&ctx, &mut m)
+        .await
+        .unwrap();
+    assert_eq!(
+        v,
+        RawVerdict::Retry { delay_ms: 0 },
+        "错误路径 retry 应立即生效: {v:?}"
+    );
+    assert!(!has_xb(&m), "错误路径上 B 插件不应被执行");
 }
