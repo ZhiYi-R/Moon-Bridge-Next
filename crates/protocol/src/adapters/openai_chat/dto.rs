@@ -1300,4 +1300,53 @@ mod tests {
             ("https://example.com/a.png", "url")
         );
     }
+
+    /// usage_from_chat：标准上游 completion_tokens 已含 reasoning（completion >= reasoning），原值透传。
+    #[test]
+    fn usage_from_chat_standard_passthrough() {
+        let u = usage_from_chat(&json!({
+            "prompt_tokens": 5,
+            "completion_tokens": 10,
+            "completion_tokens_details": { "reasoning_tokens": 4 }
+        }));
+        assert_eq!(u.output_tokens, 10);
+        assert_eq!(u.reasoning_tokens, 4);
+        assert_eq!(u.input_tokens, 5);
+    }
+
+    /// usage_from_chat：破损口径 completion < reasoning（部分 Gemini 中转站 completion
+    /// 未并入 reasoning），按 completion + reasoning 补足 output 总量。
+    #[test]
+    fn usage_from_chat_broken_upstream_is_repaired() {
+        let u = usage_from_chat(&json!({
+            "prompt_tokens": 5,
+            "completion_tokens": 3,
+            "completion_tokens_details": { "reasoning_tokens": 7 }
+        }));
+        assert_eq!(u.output_tokens, 10);
+        assert_eq!(u.reasoning_tokens, 7);
+    }
+
+    /// usage_from_chat：completion == reasoning 走 passthrough 分支，output 不翻倍。
+    #[test]
+    fn usage_from_chat_equal_tokens_passthrough() {
+        let u = usage_from_chat(&json!({
+            "prompt_tokens": 5,
+            "completion_tokens": 7,
+            "completion_tokens_details": { "reasoning_tokens": 7 }
+        }));
+        assert_eq!(u.output_tokens, 7);
+        assert_eq!(u.reasoning_tokens, 7);
+    }
+
+    /// usage_from_chat：无 completion_tokens_details 时透传 completion，reasoning 为 0。
+    #[test]
+    fn usage_from_chat_without_details() {
+        let u = usage_from_chat(&json!({
+            "prompt_tokens": 5,
+            "completion_tokens": 3
+        }));
+        assert_eq!(u.output_tokens, 3);
+        assert_eq!(u.reasoning_tokens, 0);
+    }
 }
