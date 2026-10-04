@@ -51,6 +51,7 @@ fn inbound(headers: Vec<(&str, &str)>, body: RawBody) -> RawMessage {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
         body,
+        error: false,
         session_id: None,
     }
 }

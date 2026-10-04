@@ -94,6 +94,9 @@ pub struct RawMessage {
     /// 其他阶段仅回读当前已解析值（改写无效果）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// 上游错误路径标记：仅 upstream_response 阶段在上游非 2xx 时为 true（只读，插件改写无效果）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub error: bool,
 }
 
 fn default_body() -> RawBody {
@@ -177,9 +180,11 @@ pub enum RawVerdict {
         body: RawBody,
     },
     /// 重试当前上游请求：重走端点链（`from_core_request` → 出站钩子 → 发送），
-    /// `delay_ms` 毫秒后发起。仅上游响应钩子在**错误路径**（非 2xx）上处理该动作——
+    /// `delay_ms` 毫秒后发起。仅上游响应钩子在**错误路径**（`msg.error == true`，
+    /// 上游非 2xx）上处理该动作，且是终局判定——立即生效，同阶段靠后的插件不再
+    /// 执行；其余阶段/成功路径拿到它一律按放行处理、继续扇出给后续插件。
     /// 网关侧有硬上限与延迟钳制（`plugin_retry_max` / `plugin_retry_delay_cap_ms`），
-    /// 插件返回多少次都不会死循环；其余阶段的钩子拿到它按放行处理。
+    /// 插件返回多少次都不会死循环。
     Retry {
         #[serde(default)]
         delay_ms: u64,

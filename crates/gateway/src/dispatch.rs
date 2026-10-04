@@ -68,6 +68,7 @@ pub async fn handle_request(
         status: None,
         headers: req_headers,
         body: RawBody::json(raw_body),
+        error: false,
         session_id: ctx.session_id.clone(),
     };
     match state
@@ -259,6 +260,7 @@ pub async fn handle_request(
                 status: None,
                 headers: u.headers.clone(),
                 body: RawBody::json(u.body.clone()),
+                error: false,
                 session_id: ctx.session_id.clone(),
             };
             match state
@@ -319,17 +321,17 @@ pub async fn handle_request(
             }
 
             // 非流式请求施加 request_timeout_secs 总超时（流式刻意不设——长生成
-            // 不应被网关截断）。send 只覆盖到响应头；body 读取在 non_stream 里
-            // 以剩余预算再套一次超时 + read_body_capped 的大小上限作回退。
+            // 不应被网关截断）。预算是整条请求的总量：端点故障转移与插件重试共享
+            // 同一时钟（start），每次发送只拿剩余预算——否则累计等待会超出总额，
+            // 响应体未及时就绪时，上游的 200 还会被 non_stream 的读体剩余预算改判成 504。
+            // send 只覆盖到响应头；body 读取在 non_stream 里以剩余预算再套一次
+            // 超时 + read_body_capped 的大小上限作回退。
             let send_res = if core_req.stream {
                 upstream::send(&state.client, &u).await
             } else {
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(state.config.request_timeout_secs),
-                    upstream::send(&state.client, &u),
-                )
-                .await
-                {
+                let remaining = std::time::Duration::from_secs(state.config.request_timeout_secs)
+                    .saturating_sub(start.elapsed());
+                match tokio::time::timeout(remaining, upstream::send(&state.client, &u)).await {
                     Ok(r) => r,
                     Err(_) => Err(GatewayError::Upstream {
                         status: 504,
@@ -417,6 +419,7 @@ pub async fn handle_request(
                 status: Some(status.as_u16()),
                 headers: resp_headers,
                 body: RawBody::Text { text: text.clone() },
+                error: true,
                 session_id: ctx.session_id.clone(),
             };
             // 插件处置：None = 未要求代答（放行、或钩子出错），一律走下面的既有错误收尾
@@ -432,16 +435,33 @@ pub async fn handle_request(
                 Ok(RawVerdict::Retry { delay_ms })
                     if plugin_round < state.config.plugin_retry_max =>
                 {
-                    let delay_ms = delay_ms.min(state.config.plugin_retry_delay_cap_ms);
+                    let delay = std::time::Duration::from_millis(
+                        delay_ms.min(state.config.plugin_retry_delay_cap_ms),
+                    );
+                    // 非流式重试共享 request_timeout_secs 总预算：剩余预算装不下
+                    // 这次等待时就放弃——睡到超时只会把真实上游错误改判成 504。
+                    // 流式无总超时，不设此限。
+                    let budget_ok = core_req.stream
+                        || std::time::Duration::from_secs(state.config.request_timeout_secs)
+                            .saturating_sub(start.elapsed())
+                            > delay;
+                    if budget_ok {
+                        tracing::warn!(
+                            provider = %resolved.provider_key,
+                            status = status.as_u16(),
+                            attempt = plugin_round + 1,
+                            delay_ms = delay.as_millis() as u64,
+                            "上游错误，插件要求重试"
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
                     tracing::warn!(
                         provider = %resolved.provider_key,
                         status = status.as_u16(),
                         attempt = plugin_round + 1,
-                        delay_ms,
-                        "上游错误，插件要求重试"
+                        "剩余总预算不足以完成重试，放行原始上游错误"
                     );
-                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                    continue;
                 }
                 Ok(RawVerdict::ShortCircuit {
                     status,
@@ -658,6 +678,7 @@ async fn non_stream(
         status: Some(status),
         headers: resp_headers,
         body: RawBody::json(body_value),
+        error: false,
         session_id: ctx.session_id.clone(),
     };
     match state
@@ -757,6 +778,7 @@ async fn non_stream(
         status: Some(200),
         headers: vec![("content-type".to_string(), "application/json".to_string())],
         body: RawBody::json(client_json),
+        error: false,
         session_id: ctx.session_id.clone(),
     };
     match state
@@ -1240,6 +1262,7 @@ mod tests {
             status: None,
             headers: up.headers.clone(),
             body: RawBody::json(up.body.clone()),
+            error: false,
             session_id: None,
         }
     }

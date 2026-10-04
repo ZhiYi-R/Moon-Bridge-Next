@@ -1486,12 +1486,13 @@ async fn e2e_abort_still_records_usage_and_trace() {
 
 // ── 插件驱动的上游重试（5xx/520 自愈）────────────────────────────────────
 
-/// 内联救援插件：上游错误（>=500）一律要求宿主 1ms 后重试；成功路径（msg.status=200）
-/// 返回 nil 放行。与 `plugins/utils/rescue_5xx.lua` 同构（后者多了退避与计数封顶）。
+/// 内联救援插件：上游错误路径（msg.error 且 >=500）一律要求宿主 1ms 后重试；
+/// 成功路径（msg.error=false）返回 nil 放行。与 `plugins/utils/rescue_5xx.lua`
+/// 同构（后者多了退避与计数封顶）；`msg.error` 由网关在非 2xx 时置位。
 const RESCUE_PLUGIN: &str = r#"
 MB = { version = "0.1.0", capabilities = { "raw_response" } }
 function MB.on_upstream_response_raw(ctx, msg)
-  if msg.status >= 500 then
+  if msg.error and msg.status >= 500 then
     return { action = "retry", delay_ms = 1 }
   end
 end
@@ -1568,6 +1569,26 @@ async fn setup_retry_state(
     std::path::PathBuf,
     Arc<AtomicUsize>,
 ) {
+    let cfg = GatewayConfig {
+        plugin_retry_max: retry_max,
+        ..GatewayConfig::default()
+    };
+    setup_retry_state_with(tag, plugin_script, fail_first, cfg).await
+}
+
+/// `setup_retry_state` 的可定制版：调用方给 `GatewayConfig`（`trace_dir` 由本函数
+/// 按 tag 分配并回填），其余装配（mock 上游、provider/route/插件种子）不变。
+async fn setup_retry_state_with(
+    tag: &str,
+    plugin_script: &str,
+    fail_first: usize,
+    mut cfg: GatewayConfig,
+) -> (
+    Arc<AppState>,
+    Arc<Database>,
+    std::path::PathBuf,
+    Arc<AtomicUsize>,
+) {
     let (base_url, hits) = spawn_mock_chat_520_then_ok(fail_first).await;
     let db = Arc::new(Database::open_in_memory().unwrap());
     db.upsert_provider(&Provider {
@@ -1612,11 +1633,7 @@ async fn setup_retry_state(
 
     let trace_dir = std::env::temp_dir().join(format!("mb-e2e-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&trace_dir);
-    let cfg = GatewayConfig {
-        trace_dir: Some(trace_dir.to_string_lossy().to_string()),
-        plugin_retry_max: retry_max,
-        ..GatewayConfig::default()
-    };
+    cfg.trace_dir = Some(trace_dir.to_string_lossy().to_string());
     let state = bootstrap(cfg, db.clone()).expect("bootstrap 应成功加载插件");
     (state, db, trace_dir, hits)
 }
@@ -1752,6 +1769,60 @@ async fn e2e_plugin_retry_exhaustion_reports_upstream_520() {
             .starts_with("上游返回 HTTP 520"),
         "错误摘要应含上游状态码: {t}"
     );
+    let _ = std::fs::remove_dir_all(&trace_dir);
+}
+
+/// 非流式 `request_timeout_secs` 是整条请求的总预算，插件重试必须共享它：
+/// 剩余预算装不下一次重试延迟时放弃重试、把真实上游错误还给客户端。
+///
+/// 回归：旧实现每次发送都拿全额 `request_timeout_secs`，重试+睡眠累计后整条请求
+/// 超出总预算仍继续重发（本例旧实现会发出第 3 次请求）；响应体未及时就绪时，
+/// 上游的 200 还会被 `non_stream` 的读体剩余预算（已耗尽）改判成 504。
+/// 本例 fail_first=2：首试 520 → 预算内允许一次 600ms 重试 → 第二次 520 时
+/// 剩余预算 < 600ms，放弃重试 ⇒ 客户端 520、上游命中 2 次。
+#[tokio::test]
+async fn e2e_plugin_retry_respects_request_timeout_budget() {
+    const SLOW_RESCUE_PLUGIN: &str = r#"
+MB = { version = "0.1.0", capabilities = { "raw_response" } }
+function MB.on_upstream_response_raw(ctx, msg)
+  if msg.error and msg.status >= 500 then
+    return { action = "retry", delay_ms = 600 }
+  end
+end
+"#;
+    let cfg = GatewayConfig {
+        request_timeout_secs: 1,
+        ..GatewayConfig::default()
+    };
+    let (state, db, trace_dir, hits) =
+        setup_retry_state_with("retry-budget", SLOW_RESCUE_PLUGIN, 2, cfg).await;
+
+    let body = json!({
+        "model": "test-model",
+        "messages": [{ "role": "user", "content": "Hi" }],
+        "stream": false
+    });
+    let err = dispatch::handle_request(state, Protocol::OpenAiChat, body, vec![], None)
+        .await
+        .expect_err("剩余预算不足应放弃重试、放行原始上游错误");
+    assert!(
+        matches!(
+            &err,
+            moonbridge_gateway::GatewayError::Upstream { status: 520, .. }
+        ),
+        "应回传上游真实的 520 而非人造 504: {err}"
+    );
+    assert_eq!(
+        err.into_response().status(),
+        520,
+        "回给客户端的 HTTP 状态码也必须是 520"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        2,
+        "首试 + 1 次预算内重试后即放弃，上游应被命中 2 次"
+    );
+    assert_eq!(db.usage_summary().unwrap().requests, 1);
     let _ = std::fs::remove_dir_all(&trace_dir);
 }
 

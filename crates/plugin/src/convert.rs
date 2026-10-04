@@ -131,6 +131,8 @@ pub fn raw_message_to_lua(lua: &Lua, m: &RawMessage, max_body_bytes: usize) -> R
     t.set("status", m.status)?;
     t.set("headers", lua.to_value(&m.headers)?)?;
     t.set("session_id", m.session_id.clone())?;
+    // 只读标记：apply_lua_to_message 故意不回读（见 RawMessage::error 文档）。
+    t.set("error", m.error)?;
     if body_exceeds(&m.body, max_body_bytes) {
         t.set("body", LuaValue::Nil)?;
         t.set("body_truncated", true)?;
@@ -319,6 +321,38 @@ mod tests {
             Some(RawVerdict::Retry { delay_ms: 700 }),
             "数字字符串按 Lua 语义强制转换"
         );
+    }
+
+    /// `msg.error` 以布尔形态暴露给 Lua；它是宿主注入的只读标记——插件把
+    /// `msg.error` 改回 false 不得回流 RawMessage（否则能伪造错误路径骗过
+    /// registry 的 retry 终局判定分支）。
+    #[test]
+    fn error_flag_is_exposed_but_never_read_back() {
+        let lua = Lua::new();
+        for error in [true, false] {
+            let mut m = RawMessage {
+                stage: RawStage::UpstreamResponse,
+                protocol: Protocol::OpenAiChat,
+                provider: None,
+                method: None,
+                url: None,
+                status: Some(if error { 520 } else { 200 }),
+                headers: vec![],
+                body: RawBody::Empty,
+                session_id: None,
+                error,
+            };
+            let t = raw_message_to_lua(&lua, &m, usize::MAX).unwrap();
+            assert_eq!(
+                t.get::<bool>("error").unwrap(),
+                error,
+                "error 标记应以布尔暴露: {error}"
+            );
+            // 插件改写 msg.error 无效果：回写后保持宿主注入值
+            t.set("error", false).unwrap();
+            apply_lua_to_message(&lua, &t, &mut m).unwrap();
+            assert_eq!(m.error, error, "error 标记只读，插件改写不得回流");
+        }
     }
 
     /// 既有口径不变：`pass` 与未知动作仍视为放行（None），非 table 返回值同样放行。

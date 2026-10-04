@@ -119,14 +119,21 @@ local function forget(id)
   end
 end
 
--- msg: { stage = "upstream_response", status, headers, body, provider, ... }
+-- msg: { stage = "upstream_response", status, headers, body, provider, error, ... }
+--   msg.error == true 仅在「上游响应钩子的错误路径」（非 2xx）由网关注入（只读）。
 function MB.on_upstream_response_raw(ctx, msg)
   local cfg = config()
   local status = tonumber(msg.status) or 0
   local id = ctx.request_id
 
+  if not msg.error then
+    -- 成功路径（2xx）无需重试：本插件只挂错误路径，顺手释放可能残留的计数
+    forget(id)
+    return nil
+  end
+
   if not cfg.statuses[status] then
-    -- 未命中：2xx 成功或未列出的 4xx——该请求已无需重试，顺手释放计数
+    -- 未命中：未列入 statuses 的错误码（如 4xx）——该请求已无需重试，顺手释放计数
     forget(id)
     return nil
   end

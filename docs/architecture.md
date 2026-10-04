@@ -168,7 +168,7 @@ pub enum CoreStreamEvent {
 |------|-----------|------|
 | `on_client_request_raw` | raw_request | 入站请求（客户端→网关） |
 | `on_upstream_request_raw` | raw_request | 出站请求（网关→上游） |
-| `on_upstream_response_raw` | raw_response | 入站响应（上游→网关）；**上游非 2xx 时也在错误路径触发**（`msg.status >= 400`，body 为错误原文文本） |
+| `on_upstream_response_raw` | raw_response | 入站响应（上游→网关）；**上游非 2xx 时也在错误路径触发**（此时 `msg.error = true`，body 为错误原文文本） |
 | `on_client_response_raw` | raw_response | 出站响应（网关→客户端，非流式） |
 | `on_upstream_chunk_raw` | raw_stream | 上游 SSE chunk（流式） |
 | `on_client_chunk_raw` | raw_stream | 回写客户端 SSE chunk（流式） |
@@ -176,7 +176,9 @@ pub enum CoreStreamEvent {
 报文层数据载体（`crates/protocol/src/raw.rs`）：
 
 ```rust
-pub struct RawMessage { stage, protocol, provider, method, url, status, headers: Vec<(String,String)>, body: RawBody }
+pub struct RawMessage { stage, protocol, provider, method, url, status, headers: Vec<(String,String)>, body: RawBody, session_id, error: bool }
+// error 为宿主注入的只读标记：仅 upstream_response 阶段在上游非 2xx 时为 true，
+// Lua 侧可读（msg.error）但改写不回流；其余阶段/成功路径恒为 false。
 pub struct RawChunk   { stage, protocol, provider, event, data: RawBody, raw: String }
 pub enum RawBody      { Json{value}, Text{text}, Binary{data}, Empty }
 pub enum RawVerdict   { Pass, ShortCircuit{status,headers,body}, Retry{delay_ms}, Abort{message} }
@@ -186,8 +188,10 @@ pub enum ChunkVerdict { Forward, Drop }
 **错误路径触发与 `retry` 动作**（`dispatch.rs`）：
 
 - 上游返回非 2xx 时，`dispatch` 先有界读取错误体、组装成 `stage = upstream_response` 的
-  `RawMessage`（`body = RawBody::Text`），再调 `on_upstream_response_raw`——即**错误响应也进
-  报文层钩子**（改造前错误响应完全绕过 raw 层）。同一钩子在非流式的成功路径上照旧触发一次。
+  `RawMessage`（`body = RawBody::Text`，且 **`error = true`**——这是错误路径与成功路径的
+  唯一区分标记，插件按 `if not msg.error then return end` 只挂错误路径），再调
+  `on_upstream_response_raw`——即**错误响应也进报文层钩子**（改造前错误响应完全绕过
+  raw 层）。同一钩子在非流式的成功路径上照旧触发一次（`error = false`）。
 - 错误路径的四种处置：`Retry{delay_ms}` → `sleep(min(delay_ms, plugin_retry_delay_cap_ms))`
   后重走整条端点链（`from_core_request` → 出站钩子 → 发送，协议翻译/流式/trace 全部复用）；
   `ShortCircuit` / `Abort` 沿用既有语义；`Pass`（或钩子执行出错——只 warn）走既有错误收尾，
@@ -195,12 +199,16 @@ pub enum ChunkVerdict { Forward, Drop }
 - 硬防护在宿主侧：重试轮次为 `for plugin_round in 0..=plugin_retry_max`（首轮 + 至多 N 次
   重试，`plugin_retry_max` 默认 8、`0` = 禁用），末轮即使插件仍返回 `retry` 也按 `Pass` 处理；
   单次延迟钳到 `plugin_retry_delay_cap_ms`（默认 30000）。插件返回多少次都不会死循环。
+  非流式请求的 `request_timeout_secs` 是**整条请求的总预算**，由端点故障转移与插件重试的
+  各次发送/等待共享（同一 `start` 时钟）：重试延迟超出剩余预算时放弃重试、把原始上游错误
+  还给客户端，而不是睡到超时后把响应改判成 504；流式刻意不设总超时。
 - 每次重试记一条 `tracing::warn`（provider / status / attempt / delay），并把次数写进 trace 的
   `retries` 字段（尾随零值不写盘，旧 trace JSON 无该键）。重试轮不单独落 trace/usage——只留末次。
 - 错误路径上对报文的**改写不回流客户端**：客户端看到的是 `transform_error` 的产物与
   `gateway_error` 包装。要改错误消息请用 core 层 `transform_error`。
-- 其余阶段（`on_client_request_raw` / `on_upstream_request_raw` / `on_client_response_raw` /
-  非流式成功路径的 `on_upstream_response_raw`）拿到 `Retry` 一律按放行处理：重试是「重发上游」
+- `Retry` 的扇出语义（`registry.rs`）：仅在「`on_upstream_response_raw` 且 `msg.error`」
+  上是终局判定——立即生效、同阶段靠后的插件不再执行；其余三个阶段与成功路径一律按
+  `Pass` 扇出继续（单个插件的 retry 不得吞掉后续插件的就地改写）。重试是「重发上游」
   的动作，这些位置上没有可重发的上游请求。
 
 > 仓库自带 `plugins/utils/rescue_5xx.lua` 是这个动作的参考实现（指数退避 + 按 `request_id`
@@ -258,7 +266,7 @@ function MB.on_request(ctx, req) ... end -- 就地修改 req 即生效，亦可 
   - **执行超时**：hook 内附带 wall-clock 截止时间（`call_timeout`），覆盖缓慢（非死循环）的长计算。
   - **body 降级**：raw body 超过 `max_body_bytes` 时不展开为 Lua table（置 `nil` + `body_truncated` 标记），回写时保留原始报文，避免过大的报文耗尽沙箱内存。阈值随 `GatewayConfig.max_body_bytes`（默认 100 MB），故大报文展开由内存上限（默认 1024 MB）作最终限制。
   - `mb.http.request` 未显式指定超时则由 gateway bridge 施加默认超时（默认 30s），防止 raw 钩子内挂死。
-  - 配额上限由 `SandboxLimits` 描述，gateway 从 `GatewayConfig` 派生注入。注意 `request_timeout_secs` **只**用于推导插件的 `call_timeout`；上游 HTTP 请求**刻意不设总超时**（长流式请求不应被网关截断），仅受连接与 egress 策略约束。
+  - 配额上限由 `SandboxLimits` 描述，gateway 从 `GatewayConfig` 派生注入。注意 `request_timeout_secs` 同时是**非流式**上游请求的总预算（发送 + 响应体读取共享，见 §5 重试预算口径）；流式上游**刻意不设总超时**（长流式请求不应被网关截断），仅受连接与 egress 策略约束。
 - **HostBridge**（crates/plugin/src/bridge.rs）：受控宿主能力契约，由 gateway 实现并注入，维持 plugin 不依赖 gateway 的单向依赖。
 - **示例插件**：`plugins/examples/log_request.lua`（Core 层）、`plugins/examples/raw_rewrite.lua`（报文层）。二者均有加载执行回归测试（`crates/plugin` 的 `loads_repo_example_plugins`）。
 - **脚本引用解析**（`moonbridge_gateway::parse_script_ref`，gateway 加载与 src-tauri 在线编辑**共用同一套规则**）：由 `GatewayConfig.plugins_dir` 决定 `script_ref` 语义——
@@ -327,9 +335,10 @@ Client → axum: POST /v1/responses | /v1/messages | /v1/chat/completions
   → 选 ProviderAdapter → from_core_request → UpstreamRequest(headers+body)
   → [RAW] on_upstream_request_raw          改上游 method/url/headers/body（全部回读，见下）
   → reqwest 发送(受 egress proxy)   ←── 端点故障转移循环（逐端点重走上面三步）
-  → 上游非 2xx: [RAW] on_upstream_response_raw（错误路径，见 §5）
+  → 上游非 2xx: [RAW] on_upstream_response_raw（错误路径，msg.error=true，见 §5）
              → retry = sleep(min(delay_ms, pluginRetryDelayCapMs)) 后重走端点链，
-               最多 pluginRetryMax 轮；short_circuit / abort 沿用既有语义；
+               最多 pluginRetryMax 轮；非流式重试还受 request_timeout_secs
+               剩余预算约束（装不下延迟即放弃）；short_circuit / abort 沿用既有语义；
                pass（或钩子出错）→ transform_error → GatewayError::Upstream
   → [流式] 逐 chunk:
              [RAW] on_upstream_chunk_raw → [CORE] decode + on_stream_event

@@ -20,7 +20,9 @@
 ---`{ action = "short_circuit", status?, headers?, body? }` 短路本次请求/响应；
 ---`{ action = "abort" }` 中止；
 ---`{ action = "retry", delay_ms? }` 延迟后重发本次上游请求（重走端点链）——仅
----`on_upstream_response_raw` 的**错误路径**（上游非 2xx）消费，其余阶段拿到它按放行处理；
+---`on_upstream_response_raw` 的**错误路径**（`msg.error == true`，上游非 2xx）消费，
+---且是终局判定：立即生效、同阶段靠后的插件不再执行；其余阶段/成功路径拿到它一律
+---按放行处理并继续扇出给后续插件；
 ---次数与延迟受网关配置 `pluginRetryMax`（默认 8，0 = 禁用插件重试）与
 ---`pluginRetryDelayCapMs`（默认 30000）钳制，超预算即放行、如实回传原始上游错误。
 ---@field action string|nil "short_circuit"|"abort"|"retry"|nil
@@ -55,10 +57,12 @@
 ---出入站原始报文钩子（需声明对应 raw_* 能力）。
 ---@field on_client_request_raw (fun(ctx: MbCtx, msg: MbRawMessage): MbVerdict|nil)|nil
 ---@field on_upstream_request_raw (fun(ctx: MbCtx, msg: MbRawMessage): MbVerdict|nil)|nil
----上游**非 2xx** 时也会触发本钩子（msg.status >= 400，body 为错误原文文本）——此即
+---上游**非 2xx** 时也会触发本钩子（此时 msg.error == true，body 为错误原文文本）——此即
 ---错误路径：返回 `{ action = "retry", delay_ms = ? }` 让网关延迟后重发本轮请求
----（单端点 provider 的 5xx 自愈，见 plugins/utils/rescue_5xx.lua）。错误路径上对报文的
----改写不回流客户端（客户端看到的错误消息由 core 层 transform_error 决定）。
+---（单端点 provider 的 5xx 自愈，见 plugins/utils/rescue_5xx.lua）。错误路径上 retry
+---是终局判定（后续插件不再执行）；只处理错误路径的插件建议开头
+---`if not msg.error then return end`，只处理成功的用 `if msg.error then return end`。
+---错误路径上对报文的改写不回流客户端（客户端看到的错误消息由 core 层 transform_error 决定）。
 ---@field on_upstream_response_raw (fun(ctx: MbCtx, msg: MbRawMessage): MbVerdict|nil)|nil
 ---@field on_client_response_raw (fun(ctx: MbCtx, msg: MbRawMessage): MbVerdict|nil)|nil
 ---流式 chunk 钩子（需声明 "raw_stream"；高频，未声明则完全跳过）。
@@ -161,6 +165,8 @@ MB = {}
 ---@field session_id string|nil 会话身份覆写通道：仅 client_request 阶段可写生效——
 ---    改成客户端自带会话 id（如 x-opencode-session 头值）即成为最高优先级身份源；
 ---    设 nil = 否决宿主已提取身份。其他阶段回读当前已解析值，改写无效果。
+---@field error boolean|nil 上游错误路径标记：仅 upstream_response 阶段在上游非 2xx 时
+---    为 true（只读，插件改写无效果）；据此区分「成功响应」与「错误路径」。
 
 ---@class MbRawChunk
 ---@field stage string "upstream_chunk"|"client_chunk"

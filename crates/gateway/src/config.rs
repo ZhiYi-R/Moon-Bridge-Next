@@ -30,8 +30,10 @@ pub struct GatewayConfig {
     /// 上游请求超时（秒）。
     ///
     /// 两处生效：非流式上游请求的总超时（`dispatch.rs` 发送 + 响应体读取共用
-    /// 这一预算；流式刻意不受此限——长生成不应被网关截断），以及插件沙箱的
-    /// `call_timeout` 派生基准（见 `lib.rs::sandbox_limits`）。
+    /// 这一预算——它是整条请求的总量，端点故障转移与插件重试的各次发送/等待
+    /// 都扣同一时钟，重试延迟超出剩余预算时直接放弃重试；流式刻意不受此限——
+    /// 长生成不应被网关截断），以及插件沙箱的 `call_timeout` 派生基准
+    /// （见 `lib.rs::sandbox_limits`）。
     /// 上游 HTTP 客户端本身只设连接超时，见 `upstream.rs::build_client`。
     #[serde(default = "default_timeout")]
     pub request_timeout_secs: u64,
@@ -67,11 +69,14 @@ pub struct GatewayConfig {
     /// 网关延迟后**重走整条端点链**（重新构造请求 → 出站钩子 → 发送）；本值是
     /// 单次请求允许的重试次数，`0` 表示禁用插件重试。这是插件的硬防护——
     /// 插件返回多少次 retry 都不会死循环（超出后按放行处理，如实回传上游错误）。
+    /// 非流式请求的每次重试还受 `request_timeout_secs` 总预算约束：剩余预算
+    /// 装不下重试延迟即放弃，把真实上游错误还给客户端。
     #[serde(default = "default_plugin_retry_max")]
     pub plugin_retry_max: usize,
     /// 插件重试的单次延迟上限（毫秒，`config.toml` 键 `pluginRetryDelayCapMs`）。
     /// 插件给的 `delay_ms` 会被钳到该值内；钩子阻塞的是本次请求的任务，
-    /// 设得过大同样会拖长上游错误暴露给客户端的时间。
+    /// 设得过大同样会拖长上游错误暴露给客户端的时间。非流式请求下钳制后的
+    /// 延迟若仍超过 `request_timeout_secs` 剩余预算，该次重试同样被放弃。
     #[serde(default = "default_plugin_retry_delay_cap")]
     pub plugin_retry_delay_cap_ms: u64,
 }

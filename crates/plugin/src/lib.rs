@@ -129,6 +129,7 @@ mod tests {
             status: None,
             headers: vec![("content-type".into(), "application/json".into())],
             body: RawBody::json(json!({"model": "orig"})),
+            error: false,
             session_id: None,
         };
         let verdict = rt.on_upstream_request_raw(&ctx, &mut msg).await.unwrap();
@@ -161,6 +162,7 @@ mod tests {
             status: None,
             headers: vec![],
             body: RawBody::json(json!({})),
+            error: false,
             session_id: None,
         };
         let verdict = rt.on_client_request_raw(&ctx, &mut msg).await.unwrap();
@@ -286,6 +288,7 @@ mod tests {
             status: None,
             headers: vec![("content-type".into(), "application/json".into())],
             body: RawBody::json(json!({ "model": "orig", "max_tokens": 99999 })),
+            error: false,
             session_id: None,
         };
         let v = rt2.on_upstream_request_raw(&ctx, &mut msg).await.unwrap();
@@ -344,6 +347,7 @@ mod tests {
             status: Some(status),
             headers: vec![("content-type".into(), "text/html".into())],
             body: RawBody::text(BODY),
+            error: status >= 400,
             session_id: None,
         };
         let v = rt.on_upstream_response_raw(&ctx, &mut msg).await.unwrap();
@@ -548,6 +552,7 @@ mod tests {
             status: None,
             headers: vec![],
             body: RawBody::json(original.clone()),
+            error: false,
             session_id: None,
         };
         let v = rt.on_client_request_raw(&ctx, &mut msg).await.unwrap();
@@ -606,6 +611,7 @@ mod tests {
             status: None,
             headers: vec![],
             body: RawBody::json(json!({"model": "m"})),
+            error: false,
             session_id: None,
         };
         let v = rt.on_client_request_raw(&ctx, &mut msg).await.unwrap();
