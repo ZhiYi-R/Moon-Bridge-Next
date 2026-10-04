@@ -28,12 +28,23 @@ const detail = ref<TraceDetail | null>(null);
 const detailLoading = ref(false);
 const traceDir = ref("");
 
-/** TPS：输出 token / 生成秒；生成时间 = 总延迟 − TTFT，非流式或无 TTFT 为 null。 */
+/** 生成阶段最短可信时长（毫秒）：低于此值说明响应体被上游单包瞬时倾泻（首包即尾包），
+ *  不存在逐 token 流式过程，据其计算 TPS 会因分母趋零而失真。 */
+const MIN_GEN_MS = 200;
+
+/** TPS：输出 token / 生成秒；生成时间 = 总延迟 − TTFT。非流式、无 TTFT、或生成阶段短于
+ *  MIN_GEN_MS（瞬时倾泻，无流式测量意义）时为 null。 */
 const tpsText = computed(() => {
   const d = detail.value;
   if (!d?.ttftMs || d.latencyMs <= d.ttftMs) return "—";
-  const genSec = (d.latencyMs - d.ttftMs) / 1000;
-  return `${(d.usage.outputTokens / genSec).toFixed(1)} tok/s`;
+  const genMs = d.latencyMs - d.ttftMs;
+  if (genMs < MIN_GEN_MS) return "—";
+  // 兼容历史记录中 outputTokens 未含 reasoning 的破损口径（总量应为其和）
+  const tokens =
+    d.usage.outputTokens < d.usage.reasoningTokens
+      ? d.usage.outputTokens + d.usage.reasoningTokens
+      : d.usage.outputTokens;
+  return `${(tokens / (genMs / 1000)).toFixed(1)} tok/s`;
 });
 
 /** 超过该体积的报文不走 CodeMirror 高亮（大 JSON 语法解析成本高），<pre> 也只渲染前 N 截断段——
