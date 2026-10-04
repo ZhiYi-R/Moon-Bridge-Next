@@ -179,14 +179,15 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("运行 Moon Bridge Next 时发生错误");
 
-    app.run(|app_handle, event| match event {
+    app.run(|_app_handle, _event| {
         // macOS：点 Dock 图标、双击 .app、`open -a` 都会走 applicationShouldHandleReopen。
         // 上面把「关闭主窗口」实现成隐藏到托盘，而托盘图标可能被菜单栏管理工具（Bartender
         // 之类）挪到屏外、根本点不到——这里是唯一不依赖托盘的唤回入口，缺了它窗口一旦
         // 隐藏就再无出路（窗口对象其实还在，只是 orderOut）。
         // `has_visible_windows` 不参与判断：窗口已在最前时再 show/focus 一次无副作用。
         #[cfg(target_os = "macos")]
-        tauri::RunEvent::Reopen { .. } => tray::show_main_window(app_handle),
-        _ => {}
+        if let tauri::RunEvent::Reopen { .. } = _event {
+            tray::show_main_window(_app_handle);
+        }
     });
 }
