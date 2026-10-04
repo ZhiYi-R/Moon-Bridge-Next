@@ -200,10 +200,7 @@ fn downgrade_to_v12(conn: &Connection) {
          DELETE FROM schema_version WHERE version >= 13;",
     )
     .unwrap();
-    assert_eq!(
-        moonbridge_store::schema::current_version(conn).unwrap(),
-        12
-    );
+    assert_eq!(moonbridge_store::schema::current_version(conn).unwrap(), 12);
 }
 
 #[test]
