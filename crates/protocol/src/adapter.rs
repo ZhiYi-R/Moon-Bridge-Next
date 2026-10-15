@@ -56,14 +56,11 @@ pub struct UpstreamRequest {
     pub stream: bool,
 }
 
-/// 入口协议 ↔ Core（非流式）。例：OpenAI Responses 请求 → CoreRequest。
+/// 入口协议 ↔ Core（非流式）。
 #[async_trait]
 pub trait ClientAdapter: Send + Sync {
     fn protocol(&self) -> Protocol;
     async fn to_core_request(&self, ctx: &ReqCtx, raw: Value) -> Result<CoreRequest>;
-    //
-    // `from_core_*` / `to_core_*` 表达的是 **Core ↔ 协议的转换方向**、与配对方法对称，
-    // 不是构造函数；且 Adapter 经 `Arc<dyn …>` 动态派发，`&self` 无法去除。
     #[allow(clippy::wrong_self_convention)]
     async fn from_core_response(&self, ctx: &ReqCtx, resp: CoreResponse) -> Result<Value>;
 }
@@ -85,27 +82,20 @@ pub trait ClientStreamAdapter: Send + Sync {
     ) -> Result<Vec<RawChunk>>;
 }
 
-/// encode 的每流状态。adapter 本身为并发共享单例，可变状态由 gateway
-/// 按请求持有，encode 保持可重入。
+/// 流式编码的请求级状态。
 #[derive(Default)]
 pub struct StreamEncodeState {
-    /// 已向客户端开启（content_block_start 已发出）的块索引。
+    /// 已发送起始事件的块索引集合。
     pub open_blocks: std::collections::HashSet<usize>,
-    /// 逐 MessageDelta 取最大值合并出的累计用量——上游常分段上报
-    /// （Anthropic 在 message_start 给 input、message_delta 给 output），
-    /// 收尾事件须发合并值，否则客户端只见半份。
+    /// 跨 `MessageDelta` 按字段取最大值合并后的累计用量。
     pub usage_acc: Usage,
-    /// BlockStart 记录下的起始块（ToolUse 元数据等）；收尾事件（如
-    /// responses 的 output_item.done）需要还原完整 item 时读取。
+    /// `BlockStart` 记录的初始内容块，供收尾事件还原完整结构。
     pub blocks: std::collections::HashMap<usize, moonbridge_core::ContentBlock>,
-    /// 逐块累积的增量载荷（Text 文本 / ToolInput 的 partial_json），
-    /// 供 `*.done` 类收尾事件携带完整内容。
+    /// 按块索引累积的文本或工具参数 JSON 增量。
     pub delta_acc: std::collections::HashMap<usize, String>,
-    /// MessageStart 携带的响应 id（收尾事件回填，避免发空串）。
+    /// `MessageStart` 携带的响应 ID。
     pub message_id: String,
-    /// Core 块索引 → 客户端 tool_calls 序数。OpenAI Chat 的
-    /// `tool_calls[].index` 只在工具调用内计数（0,1,2…），直接用 Core
-    /// 块索引会因前置文本块产生稀疏序号，严格客户端累积出带空洞数组。
+    /// Core 块索引到客户端 `tool_calls` 连续序号（0, 1, 2…）的映射。
     pub tool_ordinals: std::collections::HashMap<usize, usize>,
     pub next_tool_ordinal: usize,
 }
@@ -142,29 +132,20 @@ impl StreamEncodeState {
     }
 }
 
-/// decode 的每流状态。adapter 本身为并发共享单例，可变状态由 gateway
-/// 按请求持有，decode 保持可重入。
-///
-/// 无显式块边界事件的协议（Gemini：每个 chunk 只有一串 parts）需要跨 chunk
-/// 维持稳定的块索引分配与块内容累积——函数调用计数、text/reasoning 各自的
-/// 索引槽位都挂载在这里；带显式 `index`/`output_index` 的协议（Anthropic/
-/// OpenAI）完全不用它。
+/// 流式解码的请求级状态，用于无显式块边界的协议（如 Gemini、OpenAI Chat）跨 chunk 维护块索引与累积内容。
 #[derive(Default)]
 pub struct StreamDecodeState {
-    /// 命名槽位 → 块索引（键由 adapter 自定，如 "text"/"reasoning"）。
+    /// 命名槽位到块索引的映射（如 `"text"` / `"reasoning"`）。
     pub block_indexes: std::collections::HashMap<String, usize>,
-    /// 下一个待分配块索引（函数调用等匿名块直接取它并自增）。
+    /// 下一个待分配的块索引。
     pub next_block_index: usize,
-    /// 按块索引累积中的内容块（供收尾事件携带完整块，如 reasoning item
-    /// 需要完整 summary + signature 还原）。
+    /// 按块索引累积的内容块，供收尾事件携带完整块数据。
     pub blocks: std::collections::HashMap<usize, moonbridge_core::ContentBlock>,
-    /// 已开启但尚未 BlockStop 的块索引（按开启顺序）。上游流正常终止
-    /// （finish_reason/[DONE]）时按序补发收尾，下游客户端的块状态机
-    /// 才不会留下永久开启的块。
+    /// 已开启但尚未发出 `BlockStop` 的块索引列表（按开启顺序排列）。
     pub open_blocks: Vec<usize>,
-    /// MessageStart 是否已发出（无显式起始事件的协议去重用）。
+    /// 是否已发出 `MessageStart`。
     pub message_started: bool,
-    /// 逐块累积的 tool_call 参数 JSON 增量（上游按 delta 下发时）。
+    /// 按块索引累积的工具调用参数 JSON 字符串。
     pub args_acc: std::collections::HashMap<usize, String>,
 }
 
@@ -233,13 +214,11 @@ impl StreamDecodeState {
     }
 }
 
-/// Core ↔ 上游协议（非流式）。例：CoreRequest → Anthropic Messages 请求。
+/// Core ↔ 上游协议（非流式）。
 #[async_trait]
 pub trait ProviderAdapter: Send + Sync {
     fn protocol(&self) -> Protocol;
-    /// CoreRequest → 上游待发送请求（含 URL/headers/body）。
-    ///
-    /// 命名口径同上（转换方向，非构造函数；`&self` 为动态派发所必需）。
+    /// 将 `CoreRequest` 转换为上游待发送请求。
     #[allow(clippy::wrong_self_convention)]
     async fn from_core_request(
         &self,

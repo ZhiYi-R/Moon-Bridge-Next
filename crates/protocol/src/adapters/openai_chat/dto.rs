@@ -52,8 +52,7 @@ fn s(v: &Value, key: &str) -> String {
         .to_string()
 }
 
-/// `function.arguments` → Core ToolUse.input。规范形态是 JSON 字符串；部分
-/// 兼容实现直接发对象，此前经 `as_str` 落 `{}` 参数全丢——两种形态都收。
+/// 解析 `function.arguments`（兼容 JSON 字符串与直接内联的对象）。
 fn parse_call_arguments(v: Option<&Value>) -> Value {
     match v {
         Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or_else(|_| json!({})),
@@ -101,7 +100,6 @@ fn parse_chat_content(v: Option<&Value>) -> Vec<ContentBlock> {
                     }
                 }
                 // file part：{"type":"file","file":{file_id|file_url|file_data,filename}}
-                // ——此前整块丢弃。file_data 是 data: URL，与 image_url 同口径拆分。
                 Some("file") => {
                     let f = p.get("file")?;
                     let name = f.get("filename").and_then(|n| n.as_str()).map(String::from);
@@ -187,8 +185,6 @@ pub fn chat_to_core_messages(msgs: &[Value]) -> Vec<Message> {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
-            // 保留已解析的多模态块（图片等）：此前经 text_of 压成纯文本，内嵌
-            // 图片被静默丢弃，跨协议转发到 Anthropic 等上游时无法还原。
             if content.is_empty() {
                 content.push(ContentBlock::text(String::new()));
             }
@@ -373,8 +369,7 @@ pub fn core_to_chat_messages(system: &[ContentBlock], messages: &[Message]) -> V
         if !tool_calls.is_empty() {
             m["tool_calls"] = json!(tool_calls);
         }
-        // assistant 消息的推理回传：thinking 模式上游要求 reasoning_content
-        // 随历史带回，此前 Reasoning 块整体丢弃导致多轮 tool_calls 链 400。
+        // assistant 消息回传推理内容（thinking 模式上游要求历史消息保留 reasoning_content）
         if role == "assistant" {
             attach_reasoning(&mut m, &reasoning);
         }

@@ -16,15 +16,14 @@
 --------------------------------------------------------------------------------
 
 ---@class MbVerdict
----报文钩子返回值：nil 表示放行（就地修改经 table 引用回写）；
----`{ action = "short_circuit", status?, headers?, body? }` 短路本次请求/响应；
----`{ action = "abort" }` 中止；
----`{ action = "retry", delay_ms? }` 延迟后重发本次上游请求（重走端点链）——仅
----`on_upstream_response_raw` 的**错误路径**（`msg.error == true`，上游非 2xx）消费，
----且是终局判定：立即生效、同阶段靠后的插件不再执行；其余阶段/成功路径拿到它一律
----按放行处理并继续扇出给后续插件；
----次数与延迟受网关配置 `pluginRetryMax`（默认 8，0 = 禁用插件重试）与
----`pluginRetryDelayCapMs`（默认 30000）钳制，超预算即放行、如实回传原始上游错误。
+---报文钩子返回值：
+--- - `nil`：放行（保留就地修改）
+--- - `{ action = "short_circuit", status?, headers?, body? }`：短路并直接返回响应
+--- - `{ action = "abort", message? }`：中止请求并返回错误
+--- - `{ action = "retry", delay_ms? }`：延迟后重发本次上游请求。仅在 `on_upstream_response_raw`
+---   的错误路径（`msg.error == true`）生效，且作为终局判定立即触发重试，不再执行同阶段后续插件；
+---   其他阶段或成功路径返回该值时按放行处理。重试次数与延迟受配置项 `pluginRetryMax`（默认 8，0 禁用）
+---   与 `pluginRetryDelayCapMs`（默认 30000）限制。
 ---@field action string|nil "short_circuit"|"abort"|"retry"|nil
 ---@field status number|nil short_circuit 时的 HTTP 状态码（默认 200）
 ---@field headers table[]|nil short_circuit 时的响应头 `{{k,v},...}`
@@ -57,17 +56,10 @@
 ---出入站原始报文钩子（需声明对应 raw_* 能力）。
 ---@field on_client_request_raw (fun(ctx: MbCtx, msg: MbRawMessage): MbVerdict|nil)|nil
 ---@field on_upstream_request_raw (fun(ctx: MbCtx, msg: MbRawMessage): MbVerdict|nil)|nil
----上游**非 2xx** 时也会触发本钩子（此时 msg.error == true，body 为错误原文文本）——此即
----错误路径：返回 `{ action = "retry", delay_ms = ? }` 让网关延迟后重发本轮请求
----（单端点 provider 的 5xx 自愈，见 plugins/utils/rescue_5xx.lua）。错误路径上 retry
----是终局判定（后续插件不再执行）；只处理错误路径的插件建议开头
----`if not msg.error then return end`，只处理成功的用 `if msg.error then return end`。
----流式请求另有第二种错误路径：上游返回 200 后**尚未产出任何内容**就以带内错误帧
----（如 responses 的 `response.failed`）宣告失败、或流未产出内容即静默终结——此时同样以
----`msg.error == true` 触发本钩子（`status == 200`，body 为上游错误文本，见
----plugins/utils/rescue_fake_200.lua）；零产出意味着客户端还什么都没收到，retry 是
----安全的。一旦上游产出过内容，流不可重试、本钩子不触发。
----错误路径上对报文的改写不回流客户端（客户端看到的错误消息由 core 层 transform_error 决定）。
+---上游响应报文钩子。当上游返回非 2xx，或流式请求在产生任何内容块前以带内错误帧（如 `response.failed`）
+---或异常 EOF 失败时，同样以 `msg.error == true` 触发。
+---在错误路径上返回 `{ action = "retry", delay_ms = ? }` 可使网关延迟后重发请求。
+---错误路径上对 `msg.body` 的修改不会回传给客户端（修改客户端可见错误消息请使用 `transform_error`）。
 ---@field on_upstream_response_raw (fun(ctx: MbCtx, msg: MbRawMessage): MbVerdict|nil)|nil
 ---@field on_client_response_raw (fun(ctx: MbCtx, msg: MbRawMessage): MbVerdict|nil)|nil
 ---流式 chunk 钩子（需声明 "raw_stream"；高频，未声明则完全跳过）。

@@ -1,19 +1,12 @@
-//! Moon Bridge Next 协议层。
+//! Moon Bridge Next 协议适配层。
 //!
-//! 本层位于 `core` 之上、`service/gateway` 之下，职责是「协议转换」：
-//! - [`adapter`]：入口/上游 × 非流式/流式 四象限 Adapter 契约，以及
-//!   [`adapter::ProviderEndpoint`] / [`adapter::UpstreamRequest`] 等数据载体。
-//! - [`raw`]：报文层数据载体（[`raw::RawMessage`] / [`raw::RawChunk`] /
-//!   [`raw::RawVerdict`]），供 Lua 插件直接读写出入站 HTTP 报文。
-//! - [`hooks`]：[`hooks::PluginHooks`] trait —— 插件扩展点（Core 层 + 报文层），
-//!   protocol 通过它调用插件，从而与 plugin crate 解耦（不反向依赖）。
-//! - [`registry`]：[`registry::Registry`] 按协议索引 Adapter；
-//!   [`registry::builtin_registry`] 装配内置 Adapter。
-//! - [`adapters`]：内置协议实现（openai_responses / anthropic / openai_chat /
-//!   google_genai，均含入口 + 上游四象限）。
+//! 位于 `core` 之上、`gateway` 之下，负责协议转换与插件扩展点定义：
+//! - [`adapter`]：入口/上游 × 非流式/流式 四象限 Adapter 接口与请求载体。
+//! - [`raw`]：原始报文载体（[`raw::RawMessage`] / [`raw::RawChunk`] / [`raw::RawVerdict`]）。
+//! - [`hooks`]：[`hooks::PluginHooks`] trait，定义语义层与报文层插件钩子接口。
+//! - [`registry`]：按协议索引 Adapter 的注册表。
+//! - [`adapters`]：四种内置协议实现（OpenAI Responses、Anthropic、OpenAI Chat、Google GenAI）。
 //! - [`context`]：[`context::ReqCtx`] 请求上下文。
-//!
-//! 依赖方向：protocol → core（不依赖 plugin/store/gateway）。
 
 pub mod adapter;
 pub mod adapters;

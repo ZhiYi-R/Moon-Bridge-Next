@@ -61,37 +61,20 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
-/// 危险全局：切断文件、动态库与模块加载访问。
+/// 沙箱禁用的危险全局变量，用于阻断文件系统、动态库、模块加载与运行时代码编译。
 ///
-/// mlua `Lua::new()` 打开的是 `StdLib::ALL_SAFE`，**含 `io`/`os`/`package`**，它们被
-/// 注册进 `package.loaded`（即 registry 里的 `_LOADED`）。因此只置空 `_G.os`/`_G.io`
-/// 是不够的——插件里 `require("io")` 会直接取回活表，`io.open(path,"w")` 随即成立。
-/// 光删 `require` 也不够：`package.searchers` 的元素本身就能返回**可执行 loader**
-/// （等价 `loadfile`）。故连 `require` 与整个 `package` 表一并移除。
-///
-/// `load`/`loadstring` 一并移除：切断运行时把字符串编译成代码的能力（纵深防御，
-/// 配合已移除的 `debug` 杜绝重新取得执行钩子 / 原生 loader 的路径）。
-///
-/// 已确认 `plugins/**`、余额模板与 crate 内测试均不使用这些名字；LSP 桩
-/// （`plugins/moonbridge.lua`）本就声明「沙箱中 os/io/loadfile/dofile 不可用」。
+/// `mlua::Lua::new()` 默认加载 `StdLib::ALL_SAFE`（包含 `io`、`os`、`package`）。
+/// 除移除 `os`、`io`、`loadfile`、`dofile` 外，还需一并移除 `require` 与 `package`
+/// （防止通过 `require("io")` 或 `package.searchers` 重新获取能力），以及 `debug`、`load`、`loadstring`。
 const DANGEROUS_GLOBALS: [&str; 9] = [
     "os", "io", "loadfile", "dofile", "require", "package", "debug", "load", "loadstring",
 ];
 
-/// 协程钩子补丁：把宿主装的指令计数/超时钩子传导到插件新建的线程。
+/// 协程包装补丁：将宿主的指令计数与超时 debug hook 挂载到插件新建的所有协程上。
 ///
-/// Lua 的 debug hook 按 `lua_State`（线程）生效且**不被新建协程继承**，所以宿主在
-/// `create_thread` 上挂载的那颗钩子只覆盖它自己那一层；插件内
-/// `coroutine.wrap(function() while true do end end)()` 会在一个全新、无钩子的线程里
-/// 死循环，绕过 `max_instructions` 与 `call_timeout`，并因 `Mutex<Lua>` 的 `MutexGuard` 跨 await
-/// 持有而永久阻塞该插件的请求链路。
-///
-/// 做法：包一层 `coroutine.create`/`wrap`，线程创建后立即经宿主回调补挂载钩子。
-/// 两者都必须经**同一个 upvalue 构造函数**拿线程，不能让 `wrap` 去查全局
-/// `coroutine.create`——否则插件覆写 `coroutine.create` 就能让 `wrap` 造出无钩线程。
-/// `bind` 同样必须是 upvalue 而非全局，否则插件 `__mb_bind_thread = nil` 即可绕过。
-/// 原生 `coroutine.wrap` 在 C 内直连线程创建、不经过 Lua 层 `create`，故须一并覆写；
-/// 其多返回值与错误传播语义用 `table.pack/unpack` 复刻。
+/// Lua 的 debug hook 按 `lua_State`（线程）独立生效，不会自动继承给新建协程。
+/// 此补丁通过闭包 upvalue 包装 `coroutine.create` 与 `coroutine.wrap`，在协程创建时立即调用
+/// `__mb_bind_thread` 绑定相同的执行预算钩子，并随后清除全局 `__mb_bind_thread` 引用。
 const COROUTINE_PATCH: &str = r#"
 local bind = __mb_bind_thread
 __mb_bind_thread = nil

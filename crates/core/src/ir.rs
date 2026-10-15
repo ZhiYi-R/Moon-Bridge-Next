@@ -32,14 +32,9 @@ pub enum ContentBlock {
         data: String,
         media_type: String,
     },
-    /// 文档/文件（PDF、代码文件等）：
-    /// - Anthropic：`document` 块（source = base64/text/url/file）
-    /// - OpenAI Responses：`input_file` part
-    /// - OpenAI Chat：`file` content part
-    /// - Gemini：`fileData`（Uri 引用）/`inlineData`（base64）
+    /// 文档或文件（PDF、代码文件等）。
     ///
-    /// 与 `Image` 不同，来源形态用显式 `source` 字段而非 media_type 特殊值判别——
-    /// `media_type` 始终承载真实 MIME 类型（如 application/pdf）。
+    /// 与 `Image` 不同，来源形态通过显式 `source` 字段区分，`media_type` 始终记录真实 MIME 类型。
     Document {
         #[serde(default)]
         source: DocSource,
@@ -99,8 +94,7 @@ pub enum DocSource {
     Base64,
     /// 远程 URL 引用（`data` 为 URL）。
     Url,
-    /// 平台侧文件 ID（`data` 为 file_id，如 Anthropic Files API /
-    /// OpenAI file_id）——跨账号/跨协议不可解，仅同协议回传有意义。
+    /// 平台侧文件 ID（`data` 为 file_id，如 Anthropic Files API 或 OpenAI file_id），仅在同协议回传时有效。
     File,
     /// 纯文本内容（`data` 为文本本身，`media_type` 为 text/*）。
     Text,
@@ -213,13 +207,10 @@ pub enum StopReason {
     PauseTurn,
 }
 
-/// 口径不变量（计价与跨协议转换都依赖它，各 Adapter 入站归一化时须满足）：
-/// - `input_tokens` = prompt **总量**，含 `cache_read_tokens` + `cache_write_tokens`
-///   （OpenAI `prompt_tokens` 口径；Anthropic 原生 input 不含缓存，入站时已并入）；
-/// - `output_tokens` = 输出**总量**，含 `reasoning_tokens`
-///   （OpenAI `completion_tokens` / Anthropic `output_tokens` 口径；Gemini 的
-///   `candidatesTokenCount` 不含 thoughts，入站时已并入）。
-/// - `cache_*` / `reasoning` 均为子集拆分，供按价目分项计费；不另加进总量。
+/// Token 用量统计口径（计价与跨协议转换均基于以下约束）：
+/// - `input_tokens`：prompt 总量，包含 `cache_read_tokens` 与 `cache_write_tokens`。
+/// - `output_tokens`：输出总量，包含 `reasoning_tokens`。
+/// - `cache_*` 与 `reasoning_tokens` 为子集拆分，用于按价目分项计费，不重复累加。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     #[serde(default)]
@@ -320,9 +311,8 @@ pub struct CoreResponse {
 pub enum StreamDelta {
     Text { text: String },
     Reasoning { text: String },
-    /// 推理凭据增量：加密 CoT 的回传凭据（如 anthropic `signature_delta`、
-    /// responses reasoning item 的 `encrypted_content`）。不透明文本，
-    /// 仅供入口协议原样透传给客户端供下一轮回传，绝不是展示内容。
+    /// 推理签名增量（如 Anthropic `signature_delta` 或 OpenAI Responses `encrypted_content`），
+    /// 仅供入口协议透传给客户端并在下一轮原样回传。
     ReasoningSignature { signature: String },
     /// 工具入参增量（部分 JSON 字符串）。
     ToolInput { partial_json: String },

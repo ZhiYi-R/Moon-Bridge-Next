@@ -21,10 +21,8 @@ pub struct ReqCtx {
     pub route_alias: Option<String>,
     /// 上游实际模型名，路由解析后填充（插件 model 维度 binding 的 scope_key 依据）。
     pub upstream_model: Option<String>,
-    /// 上游模型的输出 token 上限（models 表 `max_output_tokens`，dispatch 随路由
-    /// 解析回填）。**不是**客户端设的 `CoreRequest::max_tokens`——仅供
-    /// 「max_tokens 必填」的上游协议（Anthropic）在客户端未设上限时回退取值；
-    /// 其余协议客户端没给就依旧不发送该字段，不凭空注入。
+    /// 上游模型的最大输出 token 上限（来自 `models.max_output_tokens`），
+    /// 供要求 `max_tokens` 必填的上游协议（如 Anthropic）在客户端未指定时作为回退值。
     pub upstream_max_output_tokens: Option<u32>,
     pub stream: bool,
     /// 其它元数据（原始 headers 摘录、客户端 UA 等）。

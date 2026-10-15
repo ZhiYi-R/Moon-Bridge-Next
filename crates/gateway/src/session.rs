@@ -1,27 +1,12 @@
-//! 会话水印：把 session id 以 marker 形式嵌进助手**推理（CoT）块**的明文首部，
-//! 靠客户端把整段对话历史原样带回，从而在下一轮被识别回同一会话。
+//! 会话水印：将 session ID 以 `[mb:<载荷>]` 标记嵌入助手推理（CoT）块明文首部，
+//! 供不携带显式会话标识的客户端在下一轮带回历史消息时还原同一会话身份。
 //!
-//! 为什么需要它：Qwen Code 这类客户端在请求头与请求体里都不携带会话标识（其
-//! `prompt_cache_key` 注入路径以 hostname 恰为 `api.openai.com` 为前提，经网关时不生效），
-//! 于是 `ctx.session_id` 恒为 `None`，插件的 `mb.session` 与 trace 的会话目录都失去粒度。
-//!
-//! 关键设计：**入站即剥除，剥完才转发上游**。上游模型的输入里永远不出现 marker，因此
-//! 模型没有模仿它的机会（模仿只会发生在 marker 进入上下文时），marker 的唯一存活期是
-//! 客户端本地 transcript。这也意味着发往上游的 prompt 比客户端存档更干净。
-//!
-//! 为什么嵌推理块而非正文：
-//! - thinking 回传是硬语义——thinking 模式上游缺 `reasoning_content`/thinking 块
-//!   直接 400，客户端必然原样带回，与 `<mb-cot>` 凭据机制同一条可靠通道；
-//! - 每个 thinking 响应都带推理块（含 tool_use 轮），首轮起即可打标记；
-//! - 正文是用户可见输出且会被客户端包进 tool_result 等结构，不再被 marker 污染。
-//!
-//! marker 形态：`[mb:<载荷>]`。载荷即会话身份本身——
-//! - 网关自分配会话：载荷 = session uuid，`ctx.session_id` 直接用载荷，
-//!   活跃表淘汰 / 网关重启都不再造成 session id（及 `x-opencode-session` 等
-//!   下游亲和头）漂移；
-//! - 外部身份会话（body `session_id` / `previous_response_id` /
-//!   `X-Codex-Window-Id`）：载荷 = [`tag_from_id`] 派生的定长 6-hex 短 tag，
-//!   经 [`SessionTable`] 还原回外部 id。
+//! 核心约定：
+//! - **入站即剥除**：请求进入网关后先剥除所有历史水印再执行路由与插件，确保水印不进入上游模型上下文。
+//! - **嵌入位置**：仅嵌入首个非加密（non-redacted）推理块首部，不污染用户可见正文；无推理块的轮次不打标记。
+//! - **载荷格式**：网关自建会话直接使用会话 UUID 作为载荷，不因 LRU 淘汰或网关重启而漂移；
+//!   外部显式会话 ID（`session_id` / `previous_response_id` / `X-Codex-Window-Id`）通过 [`tag_from_id`]
+//!   派生 6 位十六进制短标签，经 [`SessionTable`] 映射还原。
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;

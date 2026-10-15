@@ -11,14 +11,10 @@ use moonbridge_core::Usage;
 use serde::Serialize;
 use serde_json::Value;
 
-/// trace 对外暴露的用量快照（camelCase）。
+/// Trace 文件中的用量结构（`camelCase`）。
 ///
-/// `moonbridge_core::Usage` **有意**保持 snake_case——Lua 插件经 mlua serde 直接读写它
-/// （见 `docs/architecture.md` §3 命名约定）。而 serde 的 `rename_all` **不作用于嵌套
-/// 类型**，所以把 `Usage` 原样写进 camelCase 的 `TraceRecord`，写入磁盘就成了
-/// `"usage": {"input_tokens": …}`；前端按 `usage.inputTokens` 读取拿到 `undefined`，
-/// 再被 `formatTokens` 的 `n ?? 0` 兜成「0」——真实 trace 的 token 全显示为 0 且无报错
-/// （已实证）。这里做一次显式映射，使写入磁盘 JSON 符合「面向前端的 DTO 统一 camelCase」。
+/// `moonbridge_core::Usage` 保持 `snake_case` 供 Lua 插件直接读写，而 `serde` 的 `rename_all`
+/// 不会递归作用于嵌套类型，因此通过独立的 `TraceUsage` 将字段序列化为前端约定的 `camelCase`。
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TraceUsage {
@@ -319,12 +315,7 @@ mod tests {
         assert_eq!(v["retries"], 3, "非零重试次数必须写盘: {v}");
     }
 
-    /// 回归：`usage` 必须随外层一起序列化为 camelCase。
-    ///
-    /// 历史缺陷是 `TraceRecord` 上 `rename_all = "camelCase"` **不会**作用到嵌套的
-    /// `moonbridge_core::Usage`（它无 rename，线上是 snake_case），于是前端
-    /// `usage.inputTokens` 恒为 `undefined`，被 `formatTokens(n ?? 0)` 渲染成 0
-    /// ——真实 trace 的 token 全部静默显示为 0。
+    /// 验证 `TraceRecord.usage` 序列化为 `camelCase` 且不包含 `snake_case` 键。
     #[test]
     fn usage_is_camel_case_and_never_leaks_snake_case() {
         let mut rec = sample(Some("sess-1"), "claude-x");

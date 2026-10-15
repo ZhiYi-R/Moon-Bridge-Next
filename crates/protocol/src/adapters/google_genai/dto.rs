@@ -27,12 +27,8 @@ pub const DEFAULT_VERSION: &str = "v1beta";
 /// 误判，属可接受的边角冲突。
 pub(crate) const EXEC_CODE: &str = "executable_code";
 
-/// `functionCall` 无 `id` 字段时 ToolUse.id 的占位值；`functionResponse`
-/// 无 `id` 时 ToolResult.tool_use_id 用 `{FR_NAME_PREFIX}{name}` 占位——
-/// contents_to_core 收齐全部消息后按「调用按名入队、结果按名出队」配对
-/// 并分配唯一 id。此前结果直接以函数名作 tool_use_id，与调用侧合成的
-/// `{name}-call` 永不匹配，转 Anthropic 等强校验上游会因悬空 tool_result
-/// 整请求 400；同名函数多次调用时合成 id 还会重复。
+/// `functionCall` 与 `functionResponse` 缺省 `id` 时的内部占位前缀。
+/// `contents_to_core` 遍历消息时按函数名顺序配对调用与结果，并生成唯一 `tool_use_id`。
 const FCALL_PENDING: &str = "__gemini_fcall__";
 const FR_NAME_PREFIX: &str = "__gemini_fres__:";
 
@@ -707,8 +703,6 @@ pub fn part_to_blocks(p: &Value) -> Vec<ContentBlock> {
         });
     }
     if let Some(fd) = p.get("fileData") {
-        // Files API 引用 → Document（Uri 源）：此前整块丢弃。displayName
-        // 承载文件名；mimeType 保留真实类型供回传还原。
         let uri = fd
             .get("fileUri")
             .and_then(|v| v.as_str())

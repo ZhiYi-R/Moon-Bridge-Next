@@ -1,13 +1,8 @@
-//! `PluginHooks` trait：插件扩展点，定义在 protocol 层。
+//! `PluginHooks` trait：定义在 protocol 层的插件扩展接口。
 //!
-//! protocol/gateway 在请求处理链路的固定位置调用这些钩子；plugin crate 用 mlua
-//! 实现该 trait（`LuaPluginRegistry`）。protocol 永不依赖 plugin——二者仅通过本
-//! trait 解耦（对应 Moon Bridge 的 `CorePluginHooks` 函数结构体思路）。
-//!
-//! 钩子分两组：
-//! - **Core IR 语义层**：操作协议中立的 `CoreRequest`/`CoreResponse`/`CoreStreamEvent`。
-//! - **出入站原始报文层**：操作 `RawMessage`/`RawChunk`（headers/body/SSE chunk），
-//!   位于协议转换最外层，可改写、短路或中止。
+//! 钩子分为两层：
+//! - **Core IR 语义层**：操作协议无关的 `CoreRequest` / `CoreResponse` / `CoreStreamEvent`。
+//! - **原始报文层**：在协议转换外层操作 `RawMessage` / `RawChunk`，支持改写、短路、重试、中止或丢弃。
 
 use async_trait::async_trait;
 use moonbridge_core::{ContentBlock, CoreRequest, CoreResponse, CoreStreamEvent, Result, Tool};

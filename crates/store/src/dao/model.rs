@@ -186,12 +186,8 @@ params![o.provider_key, o.model_slug, o.pricing.as_ref().map(|v| v.to_string()),
         Ok(n > 0)
     }
 
-    /// 按 slug 给所有同模型报价回填定价：仅更新 `pricing_json IS NULL` 的行，
-    /// 用户手填过的定价一律不动。返回被回填的行数。
-    ///
-    /// 背景：目录导入的定价落在 models.dev 的 provider 命名空间下，而用户本地
-    /// provider 用自己的 key；Provider 页勾选绑定还会先建出 `pricing: null` 的行。
-    /// 两边一叠，用户 key 名下的报价就永久没定价。这里只填空，不覆盖。
+    /// 按 `model_slug` 为所有尚未配置定价（`pricing_json IS NULL`）的 Offer 回填定价，
+    /// 不覆盖已手动设置的非空定价。返回更新行数。
     pub fn backfill_offer_pricing(&self, model_slug: &str, pricing: &Value) -> Result<usize> {
         let conn = self.conn.lock();
         let n = conn.execute(

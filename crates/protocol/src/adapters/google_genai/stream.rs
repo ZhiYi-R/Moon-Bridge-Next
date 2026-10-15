@@ -70,8 +70,7 @@ impl ProviderStreamAdapter for GoogleGenAiAdapter {
             // 纯函数调用/纯思考响应不再留下空文本块。
         }
 
-        // prompt 级拒绝/拦截：无 candidates、以 promptFeedback.blockReason
-        // 终止。此前整块被丢弃 → 客户端收到空输出；现映射为内容过滤终止。
+        // prompt 级拒绝（无 candidates，通过 promptFeedback.blockReason 终止）映射为 ContentFilter。
         if data.get("candidates").is_none()
             || data["candidates"]
                 .as_array()

@@ -71,28 +71,19 @@ pub(crate) fn clamped_thinking_budget(effort: &str, max_tokens: u32) -> Option<u
 // 推理凭据的来源标记
 // ============================================================================
 //
-// `ContentBlock::Reasoning.signature` / `ToolUse.signature` 承载的是**不透明
-// 回传凭据**（Anthropic thinking signature / OpenAI encrypted_content /
-// Gemini thoughtSignature）。跨协议转发时把 A 家的凭据填进 B 家的字段会被
-// 上游拒绝（或污染推理状态），故入站时给凭据打上来源标记，出站时只放行
-// 同来源凭据、异源凭据按「无凭据」降级处理。
-//
-// 无前缀的凭据（插件注入、旧会话遗留）视为未知来源，保持透传——历史行为。
+// `ContentBlock::Reasoning.signature` 与 `ToolUse.signature` 存放各协议的不透明回传凭据
+// （Anthropic thinking signature / OpenAI encrypted_content / Gemini thoughtSignature）。
+// 跨协议转发时，入站凭据打上来源前缀，出站时仅还原同源凭据，异源凭据按无凭据降级或原样透传给客户端。
 
 pub(crate) const SIG_ANTHROPIC: &str = "ant:";
 pub(crate) const SIG_OPENAI: &str = "oai:";
 pub(crate) const SIG_GEMINI: &str = "gem:";
-/// Chat 协议（OpenAI Chat Completions）上游没有独立推理凭据字段——
-/// thinking 模式上游（DeepSeek/Kimi 系）要求把 `reasoning_content` 原文
-/// 随历史回传，**推理明文本身即凭据**。decode 侧给无凭据推理打上此前缀
-/// （payload 为推理原文），使 Responses 等客户端方向有可回传的不透明
-/// 凭据（`encrypted_content`）；同时前缀机制让该自凭据在 OpenAI/Anthropic/
-/// Gemini 上游方向按异源凭据降级，不会以假凭据污染真上游。
+/// OpenAI Chat 上游无独立凭据字段，思考模式要求在历史消息中回传 `reasoning_content` 原文。
+/// 解码时为无签名的推理文本附加 `chat:` 前缀作为自凭据，使客户端（如 Responses）可保存并回传，
+/// 同时避免该文本被其他协议上游误认为原生签名。
 pub(crate) const SIG_CHAT: &str = "chat:";
 
-/// 入站：给凭据打上来源标记（空凭据原样返回 `None`）。已带已知前缀的
-/// 凭据视为先前打标记的回传，原样保留（幂等）——凭据经客户端转一圈后
-/// 还会回到本 adapter，二次打标记会让 `untag_signature` 错位。
+/// 入站时为凭据附加来源前缀（空串返回 `None`，已有已知前缀则保持幂等）。
 pub(crate) fn tag_signature(prefix: &str, sig: Option<String>) -> Option<String> {
     sig.filter(|s| !s.is_empty()).map(|s| {
         if [SIG_ANTHROPIC, SIG_OPENAI, SIG_GEMINI, SIG_CHAT]

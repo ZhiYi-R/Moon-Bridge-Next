@@ -111,16 +111,10 @@ pub fn is_within_root(path: &std::path::Path, root: &std::path::Path) -> bool {
     }
 }
 
-/// 解析 `script_ref`：以 `.lua` 结尾（忽略大小写与首尾空白）视为**文件脚本**，
-/// 否则视为**内联源码**。
+/// 解析 `script_ref`：以 `.lua` 结尾（忽略大小写与首尾空白）视为文件脚本，否则视为内联源码。
 ///
-/// 这是 gateway 与 app 层**共用的唯一判定**——历史上两侧规则不一致（UI 看 `.lua`
-/// 后缀、gateway 看 `Path::exists()`），导致相对路径 `x.lua` 在 UI 里归一到
-/// `plugins_dir`、在运行时却按进程 CWD 判断，不一致时被静默当作 Lua 源码编译失败。
-///
-/// 给了 `plugins_dir` 时，相对路径挂载到其下、绝对路径必须落在其内，越界一律
-/// [`ScriptRef::Rejected`]（切断了「把 `script_ref` 写成任意绝对路径 → 让网关去
-/// 读/执行该文件」这条逃逸路）。未给 `plugins_dir` 时不做包含性校验（CLI/测试场景）。
+/// 若指定了 `plugins_dir`，相对路径将拼接到 `plugins_dir` 下，绝对路径必须位于 `plugins_dir` 内，
+/// 越界路径返回 [`ScriptRef::Rejected`]。`plugins_dir` 为 `None` 时不做目录边界校验（用于 CLI/测试）。
 pub fn parse_script_ref(script_ref: &str, plugins_dir: Option<&std::path::Path>) -> ScriptRef {
     let trimmed = script_ref.trim();
     if !trimmed.to_ascii_lowercase().ends_with(".lua") {

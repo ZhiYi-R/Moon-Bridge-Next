@@ -25,9 +25,8 @@
 #     Unix 密钥文件权限为 0600；恢复旧镜像须恢复升级前数据库及匹配凭据材料。
 #   - restart 策略用于容器异常退出恢复；管理页面的网关重启在进程内排空后重新监听，
 #     不依赖此策略；状态显示实际绑定地址，旧余额调度任务随重启取消。
-#   - 私网余额访问通过启动环境 MOONBRIDGE_BALANCE_PRIVATE_ORIGINS 精确 origin JSON 数组授权；
-#     不是卡片 extra；元数据地址始终禁止。显式 egressProxy 使余额 HTTP 报不支持代理，
-#     不静默直连；网关推理代理仍支持。
+#   - 私网配额访问通过启动环境变量 MOONBRIDGE_QUOTA_PRIVATE_ORIGINS 传入精确 origin JSON 数组；
+#     云元数据地址始终禁止。显式配置 egressProxy 时配额 HTTP 将报错而不绕过代理直连。
 #   - 镜像为本地构建，故关闭 watchtower 自动更新，升级靠上面的 save/load 流程。
 services:
   moonbridge:

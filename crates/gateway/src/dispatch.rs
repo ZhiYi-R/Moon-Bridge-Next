@@ -39,14 +39,11 @@ use crate::usage;
 /// trace），且元组类型本身不方便直接写在语句里。
 type PluginAnswer = (u16, Vec<(String, String)>, RawBody);
 
-/// 飞行中审计兜底：`handle_request` 的 future 挂在 axum 连接上——客户端在响应
-/// 返回前断开（或进程退出/任务取消）时，整个 future 被静默 drop，`fail_audit` /
-/// `finish_audit` / `StreamAudit::Drop` 一个都轮不到：usage 与 trace 零记录，
-/// 上游只看到连接被掐（new-api 记 `client_gone`）。本 guard 在「正常返回」之外
-/// 的一切消失路径（取消、panic 回卷）补一条 `aborted` 记录，让幽灵请求可观测。
+/// 在途请求审计守卫：当 `handle_request` future 在正常返回前被丢弃（如客户端提前断开、
+/// 进程退出或任务取消）时，在 `Drop` 中补写一条 `status = "aborted"` 的用量与 Trace 记录。
 ///
-/// 注意**正常返回必须先 `disarm`**——否则 Ok/Err 路径已经写过审计的会被双写；
-/// 流式请求的后续生命周期由 `StreamAudit::Drop` 接管，不在本 guard 覆盖范围内。
+/// 正常走完的调用路径（含 `Ok` 与已记录错误的 `Err`）必须调用 `disarm()` 避免重复写入；
+/// 流式请求进入响应流后由 `StreamAudit::Drop` 接管后续生命周期。
 struct InflightAudit {
     db: Arc<Database>,
     trace_dir: Option<String>,
@@ -1051,15 +1048,10 @@ fn take_json_body(body: RawBody, protocol: Protocol) -> Result<Value> {
     }
 }
 
-/// 把插件对出站报文的改写**全部**回读到 [`UpstreamRequest`]。
+/// 将插件对出站报文的修改（`method` / `url` / `headers` / `body`）写回 [`UpstreamRequest`]。
 ///
-/// 历史缺陷：这里只回读 url / headers / JSON body。`method` 明明被写进了递给 Lua 的
-/// 表里（`convert.rs`），却从不回读 ⇒ 插件改 `msg.method` 静默无效；插件把 body 改写成
-/// `Text` 同样被 `if let RawBody::Json` 一句丢弃 ⇒ 改写静默失效却照常发请求。
-///
-/// 上游传输层只承载 JSON（`upstream::send` 走 `req.json`），所以：`Text` 按其是否为合法
-/// JSON 解析后采用，`Binary` 与解析失败的 `Text` 一律显式报错（不再假装成功），`Empty`
-/// 保持 Adapter 原 body（要发 null 请写回 `Json(Value::Null)`）。
+/// 上游传输层统一发送 JSON，因此 `Text` 必须为合法 JSON 字符串，`Binary` 或非法 JSON 文本将返回错误；
+/// `Empty` 表示未修改报文体，保留 Adapter 生成的原始 `body`。
 fn apply_outbound(up: &mut UpstreamRequest, outbound: RawMessage) -> Result<()> {
     if let Some(m) = &outbound.method {
         up.method = http::Method::from_bytes(m.as_bytes())
@@ -1206,8 +1198,7 @@ fn upstream_request_snapshot(u: &UpstreamRequest) -> Value {
     })
 }
 
-/// 读取上游响应体并施加大小上限：非流式回程原先 `resp.bytes()` 无界读取，
-/// 异常/恶意上游可让进程内存膨胀。超限与读取失败都以 502 返回。
+/// 读取上游响应体并限制最大字节数，超出上限或读取失败均返回 502 错误。
 async fn read_body_capped(resp: reqwest::Response, max: usize) -> Result<Vec<u8>> {
     use futures::StreamExt;
     let mut stream = resp.bytes_stream();

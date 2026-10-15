@@ -179,9 +179,6 @@ pub(super) fn anthropic_to_block(v: &Value) -> Option<ContentBlock> {
         )),
         "image" => {
             let source = v.get("source")?;
-            // source.type 必须分派：url/file 源没有 data/media_type 字段，
-            // 按 base64 读会得到 data:"" 的空图片块——再出站到任何协议都是
-            // 坏数据（Anthropic 400 / chat 出 "data:image/png;base64," 垃圾）。
             match source.get("type").and_then(|t| t.as_str()) {
                 Some("url") => Some(ContentBlock::Image {
                     data: source
@@ -213,9 +210,7 @@ pub(super) fn anthropic_to_block(v: &Value) -> Option<ContentBlock> {
                 }),
             }
         }
-        // document：按 source.type 分派，此前整块丢弃（Core 无对应 IR）。
-        // content 源是块数组，展平为 text Document——嵌套结构无法单块表达，
-        // 内容保留优先于形态保真。
+        // document：按 source.type 分派；content 源的块数组展平为纯文本 Document。
         "document" => {
             let source = v.get("source")?;
             let name = v.get("title").and_then(|t| t.as_str()).map(String::from);

@@ -207,9 +207,7 @@ fn build_input(req: &CoreRequest) -> Vec<Value> {
                     ..
                 } => {
                     flush_parts!();
-                    // *_call_output.output 原生支持 part 数组
-                    // （input_text/input_image/input_file）：含图片/文档时改用
-                    // 数组形态把内嵌媒体留在结果内部，不再经 text_of 静默丢弃。
+                    // *_call_output.output 支持字符串或 part 数组（input_text/input_image/input_file）
                     let has_media = content.iter().any(|b| {
                         matches!(
                             b,

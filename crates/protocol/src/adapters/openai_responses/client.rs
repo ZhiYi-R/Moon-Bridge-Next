@@ -181,10 +181,7 @@ fn call_item_to_message(item: &Value, namespace: Option<String>) -> Message {
     }
 }
 
-/// `*_call_output` 类 output item → 装 ToolResult 的 tool 消息。
-/// output 可为字符串或 part 数组（input_text/input_image/input_file/
-/// computer_screenshot 等）：数组形态按块解析，此前整体 to_string 会把
-/// 内嵌图片变成 JSON 噪声文本；对象形态（computer_screenshot）按单项解析。
+/// `*_call_output` 类 output item 转换为 `ToolResult` 消息（支持字符串、块数组或单对象）。
 fn call_output_to_message(item: &Value) -> Message {
     let id = item
         .get("call_id")
@@ -324,8 +321,7 @@ impl ClientAdapter for OpenAiResponsesAdapter {
                         Some("function_call_output") => {
                             req.messages.push(call_output_to_message(item));
                         }
-                        // custom_tool_call / computer_call / mcp_call /
-                        // local_shell_call 等同族 item：此前整块丢弃。
+                        // custom_tool_call / computer_call / mcp_call / local_shell_call 等扩展调用项
                         Some(ty) if ty.ends_with("_call") => {
                             req.messages
                                 .push(call_item_to_message(item, Some(ty.to_string())));

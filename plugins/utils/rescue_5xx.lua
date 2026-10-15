@@ -1,21 +1,11 @@
--- rescue_5xx：上游瞬时 5xx / 429 自愈——命中状态码就让网关延迟后重发本次请求。
+-- rescue_5xx：上游瞬时 5xx / 429 自动重试插件。
 --
--- 场景：单端点 provider（如 api.commandcode.ai 这类只有一个端点的上游）偶发 520/502 时，
--- 端点故障转移循环里没有下一个端点可切换，错误直接冒泡给客户端（Agent 子代理当场死亡）。
--- 本插件挂在「上游响应报文层」的**错误路径**上，把它变成一个「延迟后重试」决策，
--- 由宿主原生重发整条端点链——协议翻译、流式、trace 机制全部照旧；插件不自建转发
--- （用 mb.http.request 手工搬报文会绕过协议转换与流式）。
+-- 在 `on_upstream_response_raw` 的错误路径（`msg.error == true`）上，当状态码命中配置列表时
+-- 返回 `{ action = "retry", delay_ms = N }`，由网关按指数退避延迟后重新执行端点请求链。
 --
--- 延迟退避：第 n 次重试等 min(base_delay_ms * 2^(n-1), max_delay_ms)。
--- 计数按 ctx.request_id 键控（同一请求的每一轮失败各触发一次本钩子），FIFO 容量 256 防泄漏。
---
--- 只返回 { action = "retry", delay_ms = N } 或 nil（放行原始错误）：
--- **不 short_circuit、不改 body**——本地代答会让流式请求的 SSE 语义当场破坏
--- （客户端等的是一个事件流，不是一个 JSON 对象）。
---
--- 硬防护在宿主侧（config.toml，插件无法绕过）：`pluginRetryMax`（默认 8，0 = 禁用插件
--- 重试）与 `pluginRetryDelayCapMs`（默认 30000）兜底，插件返回多少次 retry 都不会死循环，
--- 也不会把单次等待睡到不可接受的长度。
+-- 退避计算：`min(base_delay_ms * 2^(n-1), max_delay_ms)`。
+-- 重试计数按 `ctx.request_id` 隔离，使用容量为 256 的 FIFO 队列限制内存占用。
+-- 重试总次数与单次最大延迟同时受网关配置 `pluginRetryMax` 与 `pluginRetryDelayCapMs` 约束。
 
 MB = {
   name = "rescue_5xx",

@@ -235,14 +235,8 @@ async fn process_stream_event(
         .map_err(|e| e.to_string())
 }
 
-/// 流式请求的收尾审计：析构时落 usage 与 trace。
-///
-/// 三处历史缺陷一并修掉：
-/// 1. 原先把 `usage::record` 写在 `while` 之后，客户端中途断开会 drop 掉整个
-///    生成器 ⇒ 该请求既无用量也无 trace。放在 `Drop` 里则三种结束方式都覆盖。
-/// 2. 原先无条件记 `status="ok"`，即使刚发完 error 事件就 break ⇒ 失败被记成成功。
-///    现在按 `failed` / `completed` 记 `error` / `aborted` / `ok`。
-/// 3. trace 的 status 与 error 原先从不回填（恒为构造时的 "ok"）。
+/// 流式请求的收尾审计守卫：在流析构（`Drop`）时统一写入用量记录与磁盘 Trace，
+/// 覆盖正常读尽（`ok`）、中途报错（`error`）与客户端提前断开（`aborted`）三种结束路径。
 struct StreamAudit {
     db: Arc<Database>,
     ctx: ReqCtx,

@@ -415,13 +415,8 @@ impl ClientStreamAdapter for AnthropicAdapter {
             CoreStreamEvent::BlockStop { index, block } => {
                 // 仅对已开启的块收尾；从未开启的（空推理块）不产生任何事件
                 if st.open_blocks.remove(index) {
-                    // 工具块的 arguments 可能只在收尾完整块里到达（Responses
-                    // `arguments.done` 单帧形态）或增量帧全为空串：若本块从未
-                    // 下发过非空 input_json_delta，先补一帧携带完整 input 的
-                    // delta，再发 stop——否则客户端收到「start+stop、参数缓冲
-                    // 为空」的畸形 tool_use，严格解析器直接判 InvalidStreamError
-                    // 断开连接（qwen-code 实测行为）。Text 同理：上游把整段
-                    // 正文只放在收尾块时补发 text_delta 再收尾。
+                    // 若工具调用参数或文本仅在 BlockStop 的完整块中提供（未发过非空 delta），
+                    // 在发出 content_block_stop 前补发一次完整增量，避免客户端收到空参数块。
                     let input = match block.as_ref() {
                         Some(ContentBlock::ToolUse { input, .. }) => Some(input),
                         _ => None,

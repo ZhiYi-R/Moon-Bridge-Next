@@ -1,22 +1,12 @@
--- rescue_fake_200：流式请求「假 200」自愈——上游 HTTP 200 后未产出任何内容就以
--- 带内错误帧宣告失败（responses 的 `response.failed` 等，body 为错误原文），或流
--- 静默终结（无终帧 EOF）。
+-- rescue_fake_200：流式请求零产出失败自动重试插件。
 --
--- 场景：new-api 类中转把后端瞬时失败转成流内错误帧——HTTP 层一切正常（200），
---  rescue_5xx 这类按状态码判定的插件够不着它。网关对这种「零产出即失败」合成
--- `msg.error == true` 且 `status == 200` 的错误路径报文（此时客户端还一个字节都
--- 没收到，重发安全）；本插件把它变成一个「延迟后重试」决策，由宿主重走端点链。
--- 已产出内容的流不可重试——那种失败钩子根本不会被调用。
+-- 当上游返回 HTTP 200 但在产生任何内容块前即发送带内错误帧（如 `response.failed`）或异常关闭流时，
+-- 网关会以 `msg.error == true` 且 `msg.status == 200` 触发 `on_upstream_response_raw`。
+-- 本插件在此路径上返回 `{ action = "retry", delay_ms = N }`，由网关按指数退避（或错误附带的
+-- `[retry-after=Ns]` 提示）延迟后重发请求。
 --
--- 延迟退避：第 n 次重试等 min(base_delay_ms * 2^(n-1), max_delay_ms)。
--- 计数按 ctx.request_id 键控（同一请求的每一轮失败各触发一次本钩子），FIFO 容量 256 防泄漏。
---
--- 只返回 { action = "retry", delay_ms = N } 或 nil（放行原始错误）：
--- **不 short_circuit、不改 body**——本地代答会让流式请求的 SSE 语义当场破坏
--- （客户端等的是一个事件流，不是一个 JSON 对象）。
---
--- 硬防护在宿主侧（config.toml，插件无法绕过）：`pluginRetryMax`（默认 8，0 = 禁用插件
--- 重试）与 `pluginRetryDelayCapMs`（默认 30000）兜底，插件返回多少次 retry 都不会死循环。
+-- 重试计数按 `ctx.request_id` 隔离（FIFO 容量 256），并受网关 `pluginRetryMax` 与
+-- `pluginRetryDelayCapMs` 配置上限约束。
 
 MB = {
   name = "rescue_fake_200",

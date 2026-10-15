@@ -105,14 +105,10 @@ impl ManagedState {
         }
     }
 
-    /// 是否已有存活的网关任务。
+    /// 检查是否已有存活的网关任务。
     ///
-    /// 单独成函数是为了让 `MutexGuard` 在**返回时**必然释放。历史缺陷：
-    /// `if let Some(h) = self.gateway.lock().unwrap().as_ref() { return self.status(); }`
-    /// 在 edition 2021 下 `if let`  scrutinee 的临时量活到块结束，`MutexGuard` 仍被持有，
-    /// 而 `status()` 再次获取同一把**非重入** `std::sync::Mutex` ⇒ 永久死锁，
-    /// 连带 `gateway_status` / `gateway_stop` / 托盘切换全部阻塞。
-    /// 实测 edition 2021 与 2024 都会死锁，升级 edition 不是解法。
+    /// 独立成函数以确保 `self.gateway` 的 `MutexGuard` 在函数返回时立即释放，
+    /// 避免后续调用 `self.status()` 时重入同一把非重入 `std::sync::Mutex` 导致死锁。
     fn has_live_gateway(&self) -> bool {
         let guard = self.gateway.lock().unwrap();
         matches!(guard.as_ref(), Some(h) if !h.task.is_finished())
@@ -197,15 +193,10 @@ mod tests {
         (paths, dir)
     }
 
-    /// 回归：网关已在运行时再次 `start_gateway` 必须幂等返回，不得死锁。
+    /// 验证网关运行期间重复调用 `start_gateway` 幂等返回且不发生死锁。
     ///
-    /// 历史缺陷：`if let Some(h) = self.gateway.lock()...` 仍持有 `MutexGuard` 时调用 `status()`，
-    /// 再取同一把非重入 `std::sync::Mutex` ⇒ 永久阻塞。
-    ///
-    /// 为什么把被测调用放进独立 OS 线程 + 自有 runtime：死锁发生在同步 `lock()` 里，
-    /// 若按直觉写 `timeout(dur, st.start_gateway())`，定时器与该 future 同属一个任务，
-    /// 任务一旦阻塞就再也不能轮询定时器 —— 回归时表现为**测试挂死**而非失败。
-    /// 现在阻塞只会泄漏那个分离线程，主测试线程靠 `recv_timeout` 干净地判定失败。
+    /// 被测调用运行在独立 OS 线程与独立 runtime 中，通过 `recv_timeout` 判定超时，
+    /// 防止同步锁死锁阻塞当前测试任务的定时器轮询。
     #[test]
     fn start_gateway_while_running_does_not_deadlock() {
         let (paths, dir) = temp_paths("idempotent");

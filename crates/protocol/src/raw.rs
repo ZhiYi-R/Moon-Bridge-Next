@@ -94,13 +94,11 @@ pub struct RawMessage {
     pub headers: Vec<(String, String)>,
     #[serde(default = "default_body")]
     pub body: RawBody,
-    /// 会话身份覆写通道：仅 `client_request` 阶段生效——钩子把它改成客户端
-    /// 自带的会话 id（如 `x-opencode-session` 头值）即成为最高优先级身份源，
-    /// 写入 `ctx.session_id` 后走外部身份分支；设 nil = 否决宿主已提取的身份。
-    /// 其他阶段仅回读当前已解析值（改写无效果）。
+    /// 会话身份覆写字段：仅在 `client_request` 阶段可写，非空值将作为最高优先级的会话 ID，
+    /// 设为 `nil` 则清除宿主已提取的会话标识。其他阶段仅作只读暴露。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    /// 上游错误路径标记：仅 upstream_response 阶段在上游非 2xx 时为 true（只读，插件改写无效果）。
+    /// 上游错误路径标记（只读）：仅在 `upstream_response` 阶段遇到上游非 2xx 或流式零产出失败时为 `true`。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub error: bool,
 }
@@ -185,14 +183,11 @@ pub enum RawVerdict {
         #[serde(default = "default_body")]
         body: RawBody,
     },
-    /// 重试当前上游请求：重走端点链（`from_core_request` → 出站钩子 → 发送），
-    /// `delay_ms` 毫秒后发起。仅上游响应钩子在**错误路径**（`msg.error == true`）上
-    /// 处理该动作，且是终局判定——立即生效，同阶段靠后的插件不再执行；其余阶段/
-    /// 成功路径拿到它一律按放行处理、继续扇出给后续插件。错误路径有两类：
-    /// 上游非 2xx；或流式请求 200 后零产出即以带内错误帧宣告失败（status=200、
-    /// error=true）——后者客户端未收到任何内容，重发安全。
-    /// 网关侧有硬上限与延迟钳制（`plugin_retry_max` / `plugin_retry_delay_cap_ms`），
-    /// 插件返回多少次都不会死循环。
+    /// 延迟 `delay_ms` 毫秒后重发当前上游请求。
+    ///
+    /// 仅在 `on_upstream_response_raw` 的错误路径（`msg.error == true`）生效，且作为终局判定立即触发重试，
+    /// 不再执行同阶段后续插件；其他阶段或成功路径返回该值时按 `Pass` 处理。
+    /// 重试次数与单次延迟受网关配置 `plugin_retry_max` 与 `plugin_retry_delay_cap_ms` 限制。
     Retry {
         #[serde(default)]
         delay_ms: u64,

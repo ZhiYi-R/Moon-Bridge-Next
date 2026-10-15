@@ -15,15 +15,7 @@ use tauri::State;
 use crate::commands::CmdResult;
 use crate::state::ManagedState;
 
-/// 解析脚本引用为**受约束**的文件路径；`Ok(None)` 表示内联脚本。
-///
-/// 判定与网关加载侧共用 [`parse_script_ref`]（以 `.lua` 结尾 = 文件脚本），并强制
-/// 相对路径归一到 `plugins_dir`、绝对路径必须落在 `plugins_dir` 之内。
-///
-/// 历史缺陷：旧实现把绝对 `script_ref` 原样放行，`plugin_read_script` 还有一条
-/// 「只要 `Path::exists()` 就读」的回退——等于任意文件读取原语；配合
-/// `plugin_write_script` 即任意文件写入。同目录 `trace.rs` 早有 `resolve_within`
-/// 做包含性校验，此处缺失属遗漏。
+/// 解析脚本引用为受 `plugins_dir` 约束的文件路径；`Ok(None)` 表示内联脚本。
 fn script_file(state: &ManagedState, script_ref: &str) -> CmdResult<Option<PathBuf>> {
     match parse_script_ref(script_ref, Some(state.paths.plugins_dir.as_path())) {
         ScriptRef::File(p) => Ok(Some(p)),

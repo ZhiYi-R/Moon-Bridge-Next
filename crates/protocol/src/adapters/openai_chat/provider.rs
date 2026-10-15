@@ -179,9 +179,7 @@ mod tests {
             .any(|(k, v)| k == "authorization" && v == "Bearer sk-test"));
     }
 
-    /// 回归：`reasoning.effort` 必须传导到上游 `reasoning_effort`。
-    /// 历史缺陷是 Core IR 只有入口侧写、四个上游 adapter 全不读，Codex 的推理
-    /// 强度意图被静默丢弃。
+    /// 验证 `reasoning.effort` 传导至上游 `reasoning_effort`。
     #[tokio::test]
     async fn propagates_reasoning_effort() {
         let mut req = CoreRequest::new("o3");
